@@ -128,6 +128,8 @@ function startBridgeServer(win) {
 function setupAutoUpdater(win) {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = require('electron-log');
+  autoUpdater.logger.transports.file.level = 'info';
 
   autoUpdater.on('update-available',   (info) => win.webContents.send('update-status', { status: 'available',    version: info.version }));
   autoUpdater.on('update-not-available',  ()  => win.webContents.send('update-status', { status: 'none' }));
