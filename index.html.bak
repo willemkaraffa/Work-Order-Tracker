@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Work Order Tracker</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg0:#111;--bg1:#1c1c1c;--bg2:#262626;--bg3:#303030;--border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.13);--text0:#f0f0f0;--text1:#aaa;--text2:#555;--r:6px;--rlg:10px;--font:'DM Mono','Consolas','Courier New',monospace}
+html,body{height:100%;background:var(--bg0);color:var(--text0);font-family:var(--font);font-size:12px;-webkit-font-smoothing:antialiased;overflow:hidden}
+.app{display:flex;flex-direction:column;height:100vh;padding:10px 14px 8px;gap:8px;overflow:hidden}
+.header{display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header-left h1{font-size:15px;font-weight:600;letter-spacing:-.3px}
+.header-left p{font-size:10px;color:var(--text1);margin-top:1px}
+.header-right{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+button{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:var(--r);border:.5px solid var(--border2);background:var(--bg2);color:var(--text0);font-size:11px;font-family:var(--font);cursor:pointer;white-space:nowrap;transition:background .1s}
+button:hover{background:var(--bg3)}
+.btn-primary{background:var(--text0);color:var(--bg0);border-color:var(--text0);font-weight:600}
+.btn-primary:hover{opacity:.88;background:var(--text0)}
+.icon-btn{background:none;border:none;padding:2px 5px;color:var(--text1);font-size:13px;border-radius:4px}
+.icon-btn:hover{background:var(--bg3);color:var(--text0)}
+.icon-btn.del:hover{color:#ef4444;background:rgba(239,68,68,.15)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:5px;flex-shrink:0}
+.stat-card{background:var(--bg1);border-radius:var(--r);padding:6px 9px;border:1.5px solid transparent}
+.stat-label{font-size:9px;color:var(--text1);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-value{font-size:17px;font-weight:700}
+.tabs{display:flex;gap:4px;flex-shrink:0}
+.tab{background:var(--bg1);color:var(--text1);border-color:var(--border);font-size:11px}
+.tab.active{background:var(--text0);color:var(--bg0);border-color:var(--text0);font-weight:600}
+.filters{background:var(--bg1);border:.5px solid var(--border);border-radius:var(--rlg);padding:7px 10px;flex-shrink:0}
+.filter-row{display:flex;gap:5px;align-items:center}
+.filter-row input[type=text]{flex:2;min-width:0}
+.filter-row select{flex:1;min-width:0}
+input[type=text],input[type=date],input[type=tel],select,textarea{padding:5px 7px;border-radius:var(--r);border:.5px solid var(--border2);background:var(--bg2);color:var(--text0);font-size:11px;font-family:var(--font);outline:none}
+input[type=text]:focus,input[type=date]:focus,input[type=tel]:focus,select:focus,textarea:focus{border-color:rgba(255,255,255,.32)}
+select option{background:var(--bg2)}
+.table-outer{background:var(--bg1);border:.5px solid var(--border);border-radius:var(--rlg);overflow:hidden;flex:1;display:flex;flex-direction:column;min-height:0}
+.table-scroll{overflow-y:auto;overflow-x:auto;flex:1}
+.table-scroll::-webkit-scrollbar{width:5px;height:5px}
+.table-scroll::-webkit-scrollbar-track{background:transparent}
+.table-scroll::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:3px}
+table{border-collapse:collapse;white-space:nowrap;width:100%}
+thead{position:sticky;top:0;z-index:2}
+th{background:var(--bg2);padding:6px 9px;text-align:left;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text1);border-bottom:.5px solid var(--border);cursor:pointer;user-select:none}
+th:hover{color:var(--text0)}
+td{padding:0;border-bottom:.5px solid var(--border);vertical-align:middle;font-size:11px}
+.tdi{padding:6px 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+tr:last-child td{border-bottom:none}
+/* Priority row background — subtle tint on each row */
+tr.pri-high td{background:rgba(239,68,68,0.07)}
+tr.pri-high:hover td{background:rgba(239,68,68,0.13)}
+tr.pri-medium td{background:rgba(245,158,11,0.06)}
+tr.pri-medium:hover td{background:rgba(245,158,11,0.12)}
+tr.pri-low td{background:rgba(16,185,129,0.05)}
+tr.pri-low:hover td{background:rgba(16,185,129,0.10)}
+tr.pri-warranty td{background:rgba(26,115,232,0.07)}
+tr.pri-warranty:hover td{background:rgba(26,115,232,0.13)}
+tr.pri-none:hover td{background:var(--bg2)}
+.editable{cursor:text}
+.editable:hover .tdi{background:rgba(255,255,255,0.06);border-radius:4px}
+.cell-in{width:100%;background:var(--bg3);color:var(--text0);border:1px solid rgba(255,255,255,.28);border-radius:4px;padding:3px 6px;font-size:11px;font-family:var(--font);outline:none}
+.cell-sel{width:100%;background:var(--bg3);color:var(--text0);border:1px solid rgba(255,255,255,.28);border-radius:4px;padding:3px 4px;font-size:11px;font-family:var(--font);outline:none}
+.addr-cell .tdi{min-width:150px;max-width:220px}
+.act-cell{display:flex;gap:2px;align-items:center;padding:0 5px;flex-wrap:nowrap}
+.badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;white-space:nowrap}
+.date-fresh{color:#f0f0f0}
+.date-warn{color:#f59e0b}
+.date-urgent{color:#ef4444;font-weight:600}
+.notes-wrap{position:relative;display:inline-block}
+.notes-tip{display:none;position:fixed;z-index:9999;background:var(--bg3);border:.5px solid var(--border2);border-radius:7px;padding:9px 11px;max-width:280px;min-width:120px;font-size:11px;line-height:1.55;color:var(--text0);box-shadow:0 8px 24px rgba(0,0,0,.6);white-space:pre-wrap;word-break:break-word;pointer-events:none}
+.notes-wrap:hover .notes-tip{display:block}
+.ni{color:var(--text2);font-size:12px;cursor:default;margin-left:3px}
+.ni.on{color:#6ba8f7}
+.inv-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(107,168,247,.15);color:#6ba8f7;border:.5px solid rgba(107,168,247,.3)}
+.inv-btn:hover{background:rgba(107,168,247,.28)}
+.paid-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(16,185,129,.15);color:#10b981;border:.5px solid rgba(16,185,129,.3)}
+.paid-btn:hover{background:rgba(16,185,129,.28)}
+.rev-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(255,255,255,.07);color:var(--text1);border:.5px solid var(--border2)}
+.rev-btn:hover{background:var(--bg3);color:var(--text0)}
+.import-btn{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(139,92,246,.18);color:#a78bfa;border:.5px solid rgba(139,92,246,.35)}
+.import-btn:hover{background:rgba(139,92,246,.3)}
+.footer-bar{display:flex;align-items:center;justify-content:space-between;padding:5px 10px;border-top:.5px solid var(--border);font-size:10px;color:var(--text1);flex-shrink:0}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:var(--bg1);border-radius:12px;padding:18px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;border:.5px solid var(--border2)}
+.modal h2{font-size:13px;font-weight:600;margin-bottom:14px}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fg label{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text1)}
+.fg input,.fg select,.fg textarea{width:100%}
+textarea{min-height:55px;resize:vertical}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.fgrid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.full{grid-column:1/-1}
+.mact{display:flex;gap:6px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:.5px solid var(--border)}
+.mm{max-width:360px}
+.mr{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:.5px solid var(--border)}
+.mr:last-child{border-bottom:none}
+.ar{display:flex;gap:6px;margin-top:10px;align-items:center}
+.ar input[type=text]{flex:1}
+input[type=color]{width:26px;height:24px;border:none;background:none;cursor:pointer;padding:0;border-radius:4px}
+/* Import modal */
+.import-item{background:var(--bg2);border-radius:6px;padding:8px 10px;margin-bottom:6px;border:1px solid var(--border2);cursor:pointer}
+.import-item:hover{border-color:#a78bfa}
+.import-item-addr{font-size:11px;color:var(--text0);font-weight:600}
+.import-item-meta{font-size:10px;color:var(--text1);margin-top:2px}
+.import-check{float:right;margin-top:2px;accent-color:#a78bfa;width:14px;height:14px}
+
+/* Auto-update banner */
+.update-banner{display:none;align-items:center;justify-content:space-between;padding:5px 14px;background:rgba(139,92,246,0.18);border-bottom:.5px solid rgba(139,92,246,0.35);flex-shrink:0;font-size:11px;color:#a78bfa}
+.update-banner.show{display:flex}
+.update-banner button{background:rgba(139,92,246,0.25);border:.5px solid rgba(139,92,246,0.5);color:#a78bfa;font-size:10px;padding:3px 10px}
+.update-banner button:hover{background:rgba(139,92,246,0.4)}
+</style>
+</head>
+<body>
+<div id="update-banner" class="update-banner"><span id="update-msg">⬆ Update available</span><button onclick="installUpdate()">Restart &amp; Install</button></div>
+<div class="app" id="app"></div>
+<script>
+const DSTATUSES=['Open','In Progress','Parts Pending','Pending-Complete','Closed'];
+const DPRIORITIES=['High','Medium','Low','Warranty'];
+const DTYPES=['HVAC','Plumbing','Electrical','Other'];
+const DTECHS=['Mike R.','Jake T.','Chris B.'];
+const DPMS=[{name:'AMH',color:'#1a73e8'},{name:'MSR',color:'#10b981'},{name:'Other',color:'#6b7280'}];
+const SC={'Open':'#10b981','In Progress':'#1a73e8','Parts Pending':'#f59e0b','Pending-Complete':'#8b5cf6','Closed':'#4b5563'};
+const PC={'High':'#ef4444','Medium':'#f59e0b','Low':'#10b981','Warranty':'#1a73e8'};
+const PRICLASS={'High':'pri-high','Medium':'pri-medium','Low':'pri-low','Warranty':'pri-warranty'};
+const TC={'HVAC':'#f59e0b','Plumbing':'#1a73e8','Electrical':'#8b5cf6','Other':'#6b7280'};
+const SAMPLE=[
+  {id:'WO-001',pm:'AMH',type:'HVAC',address:'412 Hillcrest Dr, Durham, NC',phone:'',tech:'Mike R.',status:'In Progress',priority:'High',notes:'Thermostat replaced. Check refrigerant next visit.',dateCreated:'2025-04-21',tab:'active',deleted:false},
+  {id:'WO-002',pm:'MSR',type:'HVAC',address:'88 Lakeview Ct, Raleigh, NC',phone:'',tech:'Jake T.',status:'Parts Pending',priority:'High',notes:'Waiting on blower motor from Johnstone.',dateCreated:'2025-04-14',tab:'active',deleted:false},
+  {id:'WO-003',pm:'AMH',type:'HVAC',address:'231 Birchwood Ave, Cary, NC',phone:'',tech:'Mike R.',status:'Pending-Complete',priority:'Medium',notes:'',dateCreated:'2025-04-10',tab:'invoiced',deleted:false},
+  {id:'WO-004',pm:'MSR',type:'Plumbing',address:'905 Maple St, Durham, NC',phone:'',tech:'Chris B.',status:'Open',priority:'Medium',notes:'Main shutoff valve leaking at handle.',dateCreated:'2025-04-25',tab:'active',deleted:false},
+  {id:'WO-005',pm:'AMH',type:'Plumbing',address:'17 Cedar Ridge Ln, Raleigh, NC',phone:'',tech:'',status:'Pending-Complete',priority:'Low',notes:'',dateCreated:'2025-04-24',tab:'active',deleted:false},
+  {id:'WO-006',pm:'Other',type:'Electrical',address:'330 Pine Bluff Rd, Chapel Hill, NC',phone:'',tech:'',status:'Open',priority:'Low',notes:'Panel upgrade quote delivered to client.',dateCreated:'2025-04-01',tab:'paid',deleted:false},
+];
+// Stat cards are built dynamically from current statuses/priorities in state
+function buildStatDefs(){
+  const defs=[];
+  // One card per active status
+  S.statuses.forEach(s=>{
+    const sc=SC[s]||'#6b7280';
+    defs.push({label:s,color:sc,f:o=>!o.deleted&&o.tab==='active'&&o.status===s});
+  });
+  // Invoiced and Paid tabs
+  defs.push({label:'Invoiced',color:'#6ba8f7',f:o=>!o.deleted&&o.tab==='invoiced'});
+  defs.push({label:'Paid',color:'#10b981',f:o=>!o.deleted&&o.tab==='paid'});
+  // One card per priority
+  S.priorities.forEach(p=>{
+    const pc=PC[p]||'#6b7280';
+    defs.push({label:p+' Priority',color:pc,f:o=>!o.deleted&&o.priority===p});
+  });
+  return defs;
+}
+
+let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIES],types:[...DTYPES],techs:[...DTECHS],
+  search:'',filterPM:'',filterType:'',filterStatus:'',filterPriority:'',
+  sortCol:'dateCreated',sortDir:'desc',view:'active',
+  modal:null,editOrder:null,manageModal:null,newItemName:'',newItemColor:'#888888',editingCell:null,
+  importItems:[],importSelected:new Set()};
+
+const KEY='wo_data';
+const OLD_KEYS=['wo_v4','wo_v3','wo_v2'];
+
+async function load(){
+  let loaded=false;
+  try{const r=await window.storage.get(KEY);if(r&&r.value){const d=JSON.parse(r.value);['orders','pms','statuses','priorities','types','techs'].forEach(k=>{if(d[k])S[k]=d[k];});loaded=true;}}catch(e){}
+  if(!loaded){for(const ok of OLD_KEYS){try{const r=await window.storage.get(ok);if(r&&r.value){const d=JSON.parse(r.value);['orders','pms','statuses','priorities','types','techs'].forEach(k=>{if(d[k])S[k]=d[k];});loaded=true;await window.storage.set(KEY,r.value);break;}}catch(e){}}}
+  S.orders.forEach(o=>{
+    if(!o.tab)o.tab=o.deleted?'active':(o.status==='Invoiced'?'invoiced':'active');
+    if(o.invoice&&!o.phone){o.phone=o.invoice;delete o.invoice;}
+    if(!o.phone)o.phone='';
+  });
+  if(!loaded)S.orders=SAMPLE.map(o=>({...o}));
+  // Check for pending imports from Chrome extension
+  checkExtensionImports();
+  render();
+}
+
+async function save(){
+  try{await window.storage.set(KEY,JSON.stringify({orders:S.orders,pms:S.pms,statuses:S.statuses,priorities:S.priorities,types:S.types,techs:S.techs}));}catch(e){}
+}
+
+// Poll for work orders captured by the Chrome extension
+async function checkExtensionImports(){
+  try{
+    const r=await window.storage.get('wo_extension_export');
+    if(r&&r.value){
+      const items=JSON.parse(r.value);
+      if(items&&items.length){
+        S.importItems=items;
+        S.importSelected=new Set(items.map((_,i)=>i));
+        S.modal='import';
+        render();
+      }
+    }
+  }catch(e){}
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function ea(s){return esc(s).replace(/'/g,'&#39;');}
+
+function nextId(customId){
+  if(customId&&customId.trim())return customId.trim();
+  const n=S.orders.map(o=>parseInt((o.id||'').replace(/[^0-9]/g,''))||0);
+  return 'WO-'+(Math.max(0,...n)+1).toString().padStart(3,'0');
+}
+
+function pmColor(name){const p=S.pms.find(x=>x.name===name);return p?p.color:'#6b7280';}
+function badge(t,c){c=c||'#6b7280';const h=c.replace('#','');const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);return`<span class="badge" style="background:rgba(${r},${g},${b},.18);color:${c}">${esc(t)}</span>`;}
+function fmtDate(d){if(!d)return'—';const[y,m,dy]=d.split('-');return`${m}/${dy}/${y.slice(2)}`;}
+function daysSince(d){if(!d)return 0;return Math.floor((Date.now()-new Date(d+'T00:00:00').getTime())/86400000);}
+function dateClass(d){const n=daysSince(d);return n>=14?'date-urgent':n>=7?'date-warn':'date-fresh';}
+function arrow(col){return S.sortCol===col?(S.sortDir==='asc'?' ↑':' ↓'):'';}
+function priClass(p){return PRICLASS[p]||'pri-none';}
+
+function filtered(){
+  const v=S.view;
+  let rows=v==='trash'?S.orders.filter(o=>o.deleted):S.orders.filter(o=>!o.deleted&&o.tab===v);
+  if(S.search){const q=S.search.toLowerCase();rows=rows.filter(o=>['id','address','tech','phone','pm','notes'].some(k=>(o[k]||'').toLowerCase().includes(q)));}
+  if(S.filterPM)rows=rows.filter(o=>o.pm===S.filterPM);
+  if(S.filterType)rows=rows.filter(o=>o.type===S.filterType);
+  if(S.filterStatus)rows=rows.filter(o=>o.status===S.filterStatus);
+  if(S.filterPriority)rows=rows.filter(o=>o.priority===S.filterPriority);
+  const col=S.sortCol,dir=S.sortDir==='asc'?1:-1;
+  rows.sort((a,b)=>{const av=a[col]||'',bv=b[col]||'';return av<bv?-dir:av>bv?dir:0;});
+  return rows;
+}
+
+function sort(col){S.sortDir=S.sortCol===col?(S.sortDir==='asc'?'desc':'asc'):'desc';S.sortCol=col;render();}
+function openAdd(){S.editOrder=null;S.modal='add';render();}
+function openEdit(id){S.editOrder=S.orders.find(o=>o.id===id);S.modal='edit';render();}
+function closeModal(){S.modal=null;S.editOrder=null;S.manageModal=null;S.editingCell=null;render();}
+function openManage(type){S.manageModal=type;S.newItemName='';S.newItemColor='#888888';render();}
+
+function saveOrder(e){
+  e.preventDefault();const f=e.target;
+  const customId=f.woId?f.woId.value.trim():'';
+  const data={
+    pm:f.pm.value.trim(),type:f.type.value,
+    address:f.address.value.trim(),phone:f.phone.value.trim(),
+    tech:f.tech.value,status:f.status.value,priority:f.priority.value,
+    notes:f.notes.value.trim(),dateCreated:f.dateCreated.value
+  };
+  if(data.tech&&!S.techs.includes(data.tech))S.techs.push(data.tech);
+  if(S.modal==='add'){
+    data.id=nextId(customId);
+    // Check for duplicate ID
+    if(S.orders.find(o=>o.id===data.id)){data.id=data.id+'-'+Date.now().toString().slice(-4);}
+    data.deleted=false;data.tab='active';S.orders.push(data);
+  } else {
+    const i=S.orders.findIndex(o=>o.id===S.editOrder.id);
+    S.orders[i]={...S.orders[i],...data};
+  }
+  save();S.modal=null;S.editOrder=null;render();
+}
+
+function startEdit(id,field){S.editingCell={id,field};render();setTimeout(()=>{const el=document.querySelector('[data-ef]');if(el)el.focus();},0);}
+function commitEdit(id,field,val){
+  const i=S.orders.findIndex(o=>o.id===id);
+  if(i>=0){S.orders[i][field]=val;if(field==='tech'&&val&&!S.techs.includes(val))S.techs.push(val);save();}
+  S.editingCell=null;render();
+}
+function cancelEdit(){S.editingCell=null;render();}
+
+function edCell(o,field,display,itype){
+  const ed=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field===field;
+  if(ed){
+    const v=ea(o[field]||'');
+    if(itype==='sel-status'){const opts=S.statuses.map(s=>`<option${s===o[field]?' selected':''}>${esc(s)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-type'){const opts=S.types.map(s=>`<option${s===o[field]?' selected':''}>${esc(s)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-pm'){const opts=S.pms.map(p=>`<option${p.name===o[field]?' selected':''}>${esc(p.name)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-tech'){const opts=['<option value="">— Unassigned —</option>',...S.techs.map(t=>`<option${t===o[field]?' selected':''}>${esc(t)}</option>`)].join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='date'){return`<td><div style="padding:2px 4px"><input type="date" class="cell-in" data-ef value="${v}" onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape')cancelEdit()"></div></td>`;}
+    return`<td><div style="padding:2px 4px"><input class="cell-in" data-ef value="${v}" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape')cancelEdit()"></div></td>`;
+  }
+  return`<td class="editable" onclick="startEdit('${o.id}','${field}')"><div class="tdi">${display}</div></td>`;
+}
+
+function sendToInvoiced(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';save();render();}
+function sendToPaid(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='paid';save();render();}
+function sendToActive(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='active';save();render();}
+function sendToInvoicedFromPaid(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';save();render();}
+function softDelete(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].deleted=true;save();render();}
+function restore(id){const i=S.orders.findIndex(o=>o.id===id);S.orders[i].deleted=false;save();render();}
+function hardDelete(id){if(!confirm('Permanently delete? Cannot be undone.'))return;S.orders=S.orders.filter(o=>o.id!==id);save();render();}
+
+function addItem(){
+  const n=S.newItemName.trim();if(!n)return;
+  if(S.manageModal==='pms'){if(!S.pms.find(p=>p.name===n))S.pms.push({name:n,color:S.newItemColor});}
+  else if(S.manageModal==='statuses'){if(!S.statuses.includes(n))S.statuses.push(n);}
+  else if(S.manageModal==='priorities'){if(!S.priorities.includes(n))S.priorities.push(n);}
+  else if(S.manageModal==='types'){if(!S.types.includes(n))S.types.push(n);}
+  else if(S.manageModal==='techs'){if(!S.techs.includes(n))S.techs.push(n);}
+  S.newItemName='';save();render();
+}
+function removeItem(type,val){
+  if(type==='pms')S.pms=S.pms.filter(p=>p.name!==val);
+  else if(type==='statuses')S.statuses=S.statuses.filter(s=>s!==val);
+  else if(type==='priorities')S.priorities=S.priorities.filter(p=>p!==val);
+  else if(type==='types')S.types=S.types.filter(t=>t!==val);
+  else if(type==='techs')S.techs=S.techs.filter(t=>t!==val);
+  save();render();
+}
+function updatePMColor(name,color){const p=S.pms.find(x=>x.name===name);if(p){p.color=color;save();render();}}
+
+async function exportCSV(){
+  const rows=filtered();
+  const cols=['id','pm','type','address','phone','tech','status','priority','dateCreated','tab','notes'];
+  const lines=[cols.join(','),...rows.map(r=>cols.map(c=>`"${(r[c]||'').replace(/"/g,'""')}"`).join(','))];
+  const csv=lines.join('\n');
+  if(window.electronExport){await window.electronExport.saveCsv(csv);}
+  else{const b=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='work_orders.csv';a.click();}
+}
+
+// ── Extension import ──────────────────────────────────────────────────────────
+async function checkForImports(){
+  try{
+    const r=await window.storage.get('wo_extension_export');
+    if(r&&r.value){
+      const items=JSON.parse(r.value);
+      if(items&&items.length){
+        S.importItems=items;
+        S.importSelected=new Set(items.map((_,i)=>i));
+        S.modal='import';
+        render();
+        return;
+      }
+    }
+    alert('No pending imports found from the Chrome extension.\n\nIn the extension, use Export → "Send to Tracker" to push work orders here.');
+  }catch(e){alert('Could not read extension data.');}
+}
+
+function toggleImportSelect(i){
+  if(S.importSelected.has(i))S.importSelected.delete(i);
+  else S.importSelected.add(i);
+  render();
+}
+
+function confirmImport(){
+  const toImport=S.importItems.filter((_,i)=>S.importSelected.has(i));
+  const existingNums=S.orders.map(o=>parseInt((o.id||'').replace(/[^0-9]/g,''))||0);
+  let nextNum=Math.max(0,...existingNums)+1;
+  toImport.forEach(item=>{
+    const wo={
+      id:'WO-'+String(nextNum++).padStart(3,'0'),
+      pm:item.pm||'',type:item.type||'Other',
+      address:item.address||'',phone:item.phone||'',
+      tech:item.tech||'',status:item.status||'Open',
+      priority:item.priority||'Medium',
+      notes:item.notes||'',
+      dateCreated:item.dateCreated||new Date().toISOString().slice(0,10),
+      tab:'active',deleted:false
+    };
+    if(wo.tech&&!S.techs.includes(wo.tech))S.techs.push(wo.tech);
+    S.orders.push(wo);
+  });
+  // Clear the pending import queue
+  window.storage.set('wo_extension_export','[]').catch(()=>{});
+  save();
+  S.modal=null;S.importItems=[];S.importSelected=new Set();
+  render();
+}
+
+// ── Modals ────────────────────────────────────────────────────────────────────
+function renderManageModal(){
+  const t=S.manageModal;
+  const titles={pms:'Manage PMs',statuses:'Manage Statuses',priorities:'Manage Priorities',types:'Manage Types',techs:'Manage Technicians'};
+  const items=t==='pms'?S.pms:t==='statuses'?S.statuses:t==='priorities'?S.priorities:t==='types'?S.types:S.techs;
+  const rows=t==='pms'?S.pms.map(p=>`<div class="mr"><input type="color" value="${esc(p.color)}" style="width:26px;height:24px" onchange="updatePMColor('${ea(p.name)}',this.value)"><span style="flex:1">${esc(p.name)}</span><button class="icon-btn del" onclick="removeItem('pms','${ea(p.name)}')">✕</button></div>`).join('')
+    :items.map(v=>`<div class="mr"><span style="flex:1">${esc(v)}</span><button class="icon-btn del" onclick="removeItem('${t}','${ea(v)}')">✕</button></div>`).join('');
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>${titles[t]||'Manage'}</h2><div>${rows||'<p style="color:var(--text2);font-size:11px;padding:6px 0">No items yet.</p>'}</div><div class="ar"><input type="text" placeholder="New name…" value="${esc(S.newItemName)}" oninput="S.newItemName=this.value" onkeydown="if(event.key==='Enter')addItem()">${t==='pms'?`<input type="color" value="${esc(S.newItemColor)}" style="width:28px;height:26px" onchange="S.newItemColor=this.value">`:''}  <button class="btn-primary" onclick="addItem()">+ Add</button></div><div class="mact"><button onclick="closeModal()">Done</button></div></div></div>`;
+}
+
+function renderImportModal(){
+  const items=S.importItems;
+  if(!items.length)return'';
+  const rows=items.map((item,i)=>{
+    const checked=S.importSelected.has(i);
+    return`<div class="import-item" onclick="toggleImportSelect(${i})">
+      <input type="checkbox" class="import-check" ${checked?'checked':''} onclick="event.stopPropagation();toggleImportSelect(${i})">
+      <div class="import-item-addr">${esc(item.address||'No address')}</div>
+      <div class="import-item-meta">${esc(item.pm||'—')} · ${esc(item.type||'—')} · ${esc(item.status||'Open')} · ${esc(item.priority||'Medium')}</div>
+      ${item.notes?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px">${esc(item.notes.slice(0,80))}</div>`:''}
+    </div>`;
+  }).join('');
+  return`<div class="modal-bg"><div class="modal"><h2>📥 Import from Chrome Extension</h2>
+    <p style="font-size:10px;color:var(--text1);margin-bottom:10px">${items.length} work order${items.length!==1?'s':''} captured. Select which to import:</p>
+    <div style="max-height:320px;overflow-y:auto">${rows}</div>
+    <div class="mact">
+      <button onclick="S.modal=null;S.importItems=[];render()">Cancel</button>
+      <button onclick="confirmImport()" class="btn-primary">Import Selected (${S.importSelected.size})</button>
+    </div>
+  </div></div>`;
+}
+
+function renderOrderModal(){
+  const isEdit=S.modal==='edit';
+  const o=S.editOrder||{status:S.statuses[0]||'Open',priority:S.priorities[1]||'Medium',type:S.types[0]||'HVAC',dateCreated:new Date().toISOString().slice(0,10)};
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>${isEdit?'Edit '+esc(o.id):'New Work Order'}</h2><form onsubmit="saveOrder(event)"><div class="fgrid">
+    ${!isEdit?`<div class="fg full"><label>WO Number (leave blank to auto-assign)</label><input name="woId" placeholder="e.g. WO-007 or portal reference number"></div>`:''}
+    <div class="fg"><label>PM / Client</label><select name="pm">${S.pms.map(p=>`<option${p.name===(o.pm||'')?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Type</label><select name="type">${S.types.map(t=>`<option${t===o.type?' selected':''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="fg full"><label>Address</label><input name="address" value="${esc(o.address||'')}" placeholder="Full service address" required></div>
+    <div class="fg"><label>Phone Number</label><input type="tel" name="phone" value="${esc(o.phone||'')}" placeholder="(555) 000-0000"></div>
+    <div class="fg"><label>Technician</label><select name="tech"><option value="">— Unassigned —</option>${S.techs.map(t=>`<option${t===(o.tech||'')?' selected':''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Status</label><select name="status">${S.statuses.map(s=>`<option${s===o.status?' selected':''}>${esc(s)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Priority</label><select name="priority">${S.priorities.map(p=>`<option${p===o.priority?' selected':''}>${esc(p)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Date Created</label><input type="date" name="dateCreated" value="${esc(o.dateCreated||new Date().toISOString().slice(0,10))}"></div>
+    <div class="fg full"><label>Notes</label><textarea name="notes" placeholder="Service notes, part numbers, follow-up items…">${esc(o.notes||'')}</textarea></div>
+  </div><div class="mact"><button type="button" onclick="closeModal()">Cancel</button><button type="submit" class="btn-primary">${isEdit?'Save Changes':'Add Work Order'}</button></div></form></div></div>`;
+}
+
+function render(){
+  const rows=filtered();
+  const v=S.view,isTrash=v==='trash',isInv=v==='invoiced',isPaid=v==='paid',isActive=v==='active';
+  const trashCount=S.orders.filter(o=>o.deleted).length;
+  const statsHtml=buildStatDefs().map(d=>`<div class="stat-card"><div class="stat-label">${d.label}</div><div class="stat-value" style="color:${d.color}">${S.orders.filter(d.f).length}</div></div>`).join('');
+  const pendingImports=0; // checked at load; button always shown
+
+  const tableRows=rows.map(o=>{
+    const sc=SC[o.status]||'#6b7280',tc=TC[o.type]||'#6b7280',pmc=pmColor(o.pm),dc=dateClass(o.dateCreated);
+    const pc=PC[o.priority]||'#6b7280';
+    const rowClass=priClass(o.priority);
+    const hasNotes=o.notes&&o.notes.trim().length>0;
+    const notesIcon=`<span class="notes-wrap"><span class="ni${hasNotes?' on':''}">📋</span>${hasNotes?`<div class="notes-tip">${esc(o.notes)}</div>`:''}</span>`;
+
+    if(isTrash)return`<tr class="${rowClass}">
+      <td><div class="tdi" style="display:flex;align-items:center;gap:5px"><strong>${esc(o.id)}</strong></div></td>
+      <td><div class="tdi">${badge(o.pm,pmc)}</div></td>
+      <td><div class="tdi">${badge(o.type,tc)}</div></td>
+      <td class="addr-cell"><div class="tdi" title="${ea(o.address)}">${esc(o.address)}</div></td>
+      <td><div class="tdi">${esc(o.phone)||'—'}</div></td>
+      <td><div class="tdi">${esc(o.tech)||'—'}</div></td>
+      <td><div class="tdi">${badge(o.status,sc)}</div></td>
+      <td><div class="tdi"><span class="${dc}">${fmtDate(o.dateCreated)}</span></div></td>
+      <td><div class="act-cell"><button class="icon-btn" onclick="restore('${o.id}')" title="Restore">↩ Restore</button><button class="icon-btn del" onclick="hardDelete('${o.id}')" title="Delete permanently">✕</button></div></td>
+    </tr>`;
+
+    const woCell=`<td><div class="tdi" style="display:flex;align-items:center;gap:4px"><strong>${esc(o.id)}</strong>${notesIcon}</div></td>`;
+    const pmCell=edCell(o,'pm',badge(o.pm,pmc),'sel-pm');
+    const typeCell=edCell(o,'type',badge(o.type,tc),'sel-type');
+    const addrTd=edCell(o,'address',esc(o.address),'text').replace('<td ','<td class="addr-cell" ').replace('<td>','<td class="addr-cell">');
+    const phoneCell=edCell(o,'phone',esc(o.phone)||`<span style="color:var(--text2)">—</span>`,'text');
+    const techCell=edCell(o,'tech',esc(o.tech)||`<span style="color:var(--text2)">—</span>`,'sel-tech');
+    const statusCell=edCell(o,'status',badge(o.status,sc),'sel-status');
+    const dateCell=edCell(o,'dateCreated',`<span class="${dc}">${fmtDate(o.dateCreated)}</span>`,'date');
+
+    let acts='';
+    if(isActive)acts=`<button class="inv-btn" onclick="sendToInvoiced('${o.id}')" title="Send to Invoiced">Invoice →</button><button class="icon-btn" onclick="openEdit('${o.id}')" title="Edit">✎</button><button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">🗑</button>`;
+    else if(isInv)acts=`<button class="paid-btn" onclick="sendToPaid('${o.id}')" title="Mark Paid">Paid →</button><button class="rev-btn" onclick="sendToActive('${o.id}')" title="Back to Active">← Active</button><button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">🗑</button>`;
+    else if(isPaid)acts=`<button class="rev-btn" onclick="sendToInvoicedFromPaid('${o.id}')" title="Back to Invoiced">← Invoice</button><button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">🗑</button>`;
+
+    return`<tr class="${rowClass}">${woCell}${pmCell}${typeCell}${addrTd}${phoneCell}${techCell}${statusCell}${dateCell}<td><div class="act-cell">${acts}</div></td></tr>`;
+  }).join('');
+
+  const emptyMsg=isTrash?'Trash is empty':`No work orders in ${v}`;
+  const viewTotal=S.orders.filter(o=>isTrash?o.deleted:(!o.deleted&&o.tab===v)).length;
+
+  let modalHtml='';
+  if(S.manageModal)modalHtml=renderManageModal();
+  else if(S.modal==='import')modalHtml=renderImportModal();
+  else if(S.modal)modalHtml=renderOrderModal();
+
+  document.getElementById('app').innerHTML=`
+    ${modalHtml}
+    <div class="header">
+      <div class="header-left"><h1>Work Order Tracker</h1><p>Gamble Plumbing Heating and Air — Raleigh/Durham</p></div>
+      <div class="header-right">
+        <button class="import-btn" onclick="checkForImports()">📥 Import from Extension</button>
+        <button onclick="openManage('pms')">⚙ PMs</button>
+        <button onclick="openManage('techs')">⚙ Techs</button>
+        <button onclick="openManage('statuses')">⚙ Statuses</button>
+        <button onclick="openManage('priorities')">⚙ Priorities</button>
+        <button onclick="openManage('types')">⚙ Types</button>
+        <button onclick="exportCSV()">⬇ CSV</button>
+        <button class="btn-primary" onclick="openAdd()">+ Add Work Order</button>
+      </div>
+    </div>
+    <div class="stats-grid">${statsHtml}</div>
+    <div class="tabs">
+      <button class="tab${v==='active'?' active':''}" onclick="S.view='active';render()">Active (${S.orders.filter(o=>!o.deleted&&o.tab==='active').length})</button>
+      <button class="tab${v==='invoiced'?' active':''}" onclick="S.view='invoiced';render()">📄 Invoiced (${S.orders.filter(o=>!o.deleted&&o.tab==='invoiced').length})</button>
+      <button class="tab${v==='paid'?' active':''}" onclick="S.view='paid';render()">✅ Paid (${S.orders.filter(o=>!o.deleted&&o.tab==='paid').length})</button>
+      <button class="tab${v==='trash'?' active':''}" onclick="S.view='trash';render()">🗑 Trash (${trashCount})</button>
+    </div>
+    <div class="filters"><div class="filter-row">
+      <input type="text" placeholder="Search WO#, address, tech, phone, PM, notes…" value="${esc(S.search)}" oninput="S.search=this.value;render()">
+      <select onchange="S.filterPM=this.value;render()"><option value="">All PMs</option>${S.pms.map(p=>`<option${S.filterPM===p.name?' selected':''}>${esc(p.name)}</option>`).join('')}</select>
+      <select onchange="S.filterType=this.value;render()"><option value="">All Types</option>${S.types.map(t=>`<option${S.filterType===t?' selected':''}>${esc(t)}</option>`).join('')}</select>
+      <select onchange="S.filterStatus=this.value;render()"><option value="">All Statuses</option>${S.statuses.map(s=>`<option${S.filterStatus===s?' selected':''}>${esc(s)}</option>`).join('')}</select>
+      <select onchange="S.filterPriority=this.value;render()"><option value="">All Priorities</option>${S.priorities.map(p=>`<option${S.filterPriority===p?' selected':''}>${esc(p)}</option>`).join('')}</select>
+      <button onclick="S.search='';S.filterPM='';S.filterType='';S.filterStatus='';S.filterPriority='';render()">Clear</button>
+    </div></div>
+    <div class="table-outer">
+      <div class="table-scroll"><table>
+        <thead><tr>
+          <th onclick="sort('id')" style="min-width:100px">WO #${arrow('id')}</th>
+          <th onclick="sort('pm')" style="min-width:55px">PM${arrow('pm')}</th>
+          <th onclick="sort('type')" style="min-width:80px">Type${arrow('type')}</th>
+          <th onclick="sort('address')" style="min-width:155px">Address${arrow('address')}</th>
+          <th onclick="sort('phone')" style="min-width:100px">Phone${arrow('phone')}</th>
+          <th onclick="sort('tech')" style="min-width:78px">Tech${arrow('tech')}</th>
+          <th onclick="sort('status')" style="min-width:110px">Status${arrow('status')}</th>
+          <th onclick="sort('dateCreated')" style="min-width:70px">Date${arrow('dateCreated')}</th>
+          <th style="min-width:${isActive?'155px':isInv?'158px':isPaid?'105px':'95px'}"></th>
+        </tr></thead>
+        <tbody>${tableRows||`<tr><td colspan="9" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
+      </table></div>
+      <div class="footer-bar">
+        <span>
+          ${v.charAt(0).toUpperCase()+v.slice(1)} · Showing ${rows.length} of ${viewTotal} ·
+          Row color: <span style="color:#ef4444">■</span> High &nbsp;<span style="color:#f59e0b">■</span> Medium &nbsp;<span style="color:#10b981">■</span> Low &nbsp;<span style="color:#6ba8f7">■</span> Warranty ·
+          <span style="color:#f0f0f0">■</span> &lt;1wk <span style="color:#f59e0b">■</span> 1–2wk <span style="color:#ef4444">■</span> 2wk+ date
+        </span>
+      </div>
+    </div>`;
+}
+
+// ── Extension native bridge ──────────────────────────────────────────────────
+if(window.extensionBridge){
+  window.extensionBridge.onImport(function(orders){
+    if(!orders||!orders.length)return;
+    S.importItems=orders;
+    S.importSelected=new Set(orders.map((_,i)=>i));
+    S.modal='import';
+    render();
+    if(window.extensionBridge)window.extensionBridge.acknowledge();
+  });
+}
+
+// ── Auto-updater UI ───────────────────────────────────────────────────────────
+if(window.updater){
+  window.updater.onStatus(function(data){
+    const banner=document.getElementById('update-banner');
+    const msg=document.getElementById('update-msg');
+    if(!banner||!msg)return;
+    if(data.status==='available'){
+      msg.textContent='⬆ Update v'+data.version+' downloading…';
+      banner.classList.add('show');
+    } else if(data.status==='downloading'){
+      msg.textContent='⬆ Downloading update… '+data.percent+'%';
+      banner.classList.add('show');
+    } else if(data.status==='ready'){
+      msg.textContent='✓ Update v'+data.version+' ready — restart to install';
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
+  });
+}
+function installUpdate(){
+  if(window.updater)window.updater.install();
+}
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Work Order Tracker</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg0:#111;--bg1:#1c1c1c;--bg2:#262626;--bg3:#303030;--border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.13);--text0:#f0f0f0;--text1:#aaa;--text2:#555;--r:6px;--rlg:10px;--font:'DM Mono','Consolas','Courier New',monospace;--cellPadY:6px;--cellPadX:9px;--rowFs:11px;--baseFs:12px}
+html.theme-light{--bg0:#fafafa;--bg1:#ffffff;--bg2:#f0f0f0;--bg3:#e0e0e0;--border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.18);--text0:#111;--text1:#555;--text2:#999}
+html.density-compact{--cellPadY:3px;--cellPadX:6px;--rowFs:10.5px;--baseFs:11px}
+html.density-roomy{--cellPadY:9px;--cellPadX:12px;--rowFs:12.5px;--baseFs:13px}
+html,body{height:100%;background:var(--bg0);color:var(--text0);font-family:var(--font);font-size:var(--baseFs);-webkit-font-smoothing:antialiased;overflow:hidden}
+.app{display:flex;flex-direction:column;height:100vh;padding:10px 14px 8px;gap:8px;overflow:hidden}
+.header{display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header-left h1{font-size:15px;font-weight:600;letter-spacing:-.3px}
+.header-left p{font-size:10px;color:var(--text1);margin-top:1px}
+.header-right{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+button{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border-radius:var(--r);border:.5px solid var(--border2);background:var(--bg2);color:var(--text0);font-size:11px;font-family:var(--font);cursor:pointer;white-space:nowrap;transition:background .1s}
+button:hover{background:var(--bg3)}
+.btn-primary{background:var(--text0);color:var(--bg0);border-color:var(--text0);font-weight:600}
+.btn-primary:hover{opacity:.88;background:var(--text0)}
+.icon-btn{background:none;border:none;padding:2px 5px;color:var(--text1);font-size:13px;border-radius:4px}
+.icon-btn:hover{background:var(--bg3);color:var(--text0)}
+.icon-btn.del:hover{color:#ef4444;background:rgba(239,68,68,.15)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:5px;flex-shrink:0}
+.stat-card{background:var(--bg1);border-radius:var(--r);padding:6px 9px;border:1.5px solid transparent}
+.stat-label{font-size:9px;color:var(--text1);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-value{font-size:17px;font-weight:700}
+.tabs{display:flex;gap:4px;flex-shrink:0}
+.tab{background:var(--bg1);color:var(--text1);border-color:var(--border);font-size:11px}
+.tab.active{background:var(--text0);color:var(--bg0);border-color:var(--text0);font-weight:600}
+.filters{background:var(--bg1);border:.5px solid var(--border);border-radius:var(--rlg);padding:7px 10px;flex-shrink:0}
+.filter-row{display:flex;gap:5px;align-items:center}
+.filter-row input[type=text]{flex:2;min-width:0}
+.filter-row select{flex:1;min-width:0}
+input[type=text],input[type=date],input[type=tel],select,textarea{padding:5px 7px;border-radius:var(--r);border:.5px solid var(--border2);background:var(--bg2)!important;color:var(--text0)!important;font-size:11px;font-family:var(--font);outline:none;-webkit-box-shadow:0 0 0 1000px #262626 inset!important;-webkit-text-fill-color:#f0f0f0!important}
+input[type=text]:focus,input[type=date]:focus,input[type=tel]:focus,select:focus,textarea:focus{border-color:rgba(255,255,255,.32)}
+select option{background:var(--bg2)}
+.table-outer{background:var(--bg1);border:.5px solid var(--border);border-radius:var(--rlg);overflow:hidden;flex:1;display:flex;flex-direction:column;min-height:0}
+.table-scroll{overflow-y:auto;overflow-x:auto;flex:1}
+.table-scroll::-webkit-scrollbar{width:5px;height:5px}
+.table-scroll::-webkit-scrollbar-track{background:transparent}
+.table-scroll::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:3px}
+table{border-collapse:collapse;white-space:nowrap;width:100%}
+thead{position:sticky;top:0;z-index:2}
+th{background:var(--bg2);padding:var(--cellPadY) var(--cellPadX);text-align:left;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text1);border-bottom:.5px solid var(--border);cursor:pointer;user-select:none}
+th:hover{color:var(--text0)}
+th.sort-active{color:var(--text0)}
+td{padding:0;border-bottom:.5px solid var(--border);vertical-align:middle;font-size:var(--rowFs)}
+.tdi{padding:var(--cellPadY) var(--cellPadX);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+tr:last-child td{border-bottom:none}
+tr[data-priority]:hover td{filter:brightness(1.12)}
+.editable{cursor:text}
+.editable:hover .tdi{background:rgba(255,255,255,0.06);border-radius:4px}
+.cell-in{width:100%;background:var(--bg3);color:var(--text0);border:1px solid rgba(255,255,255,.28);border-radius:4px;padding:3px 6px;font-size:11px;font-family:var(--font);outline:none}
+.cell-sel{width:100%;background:var(--bg3);color:var(--text0);border:1px solid rgba(255,255,255,.28);border-radius:4px;padding:3px 4px;font-size:11px;font-family:var(--font);outline:none}
+.addr-cell .tdi{min-width:150px;max-width:220px}
+.addr-cell-inner{display:flex;align-items:center;gap:4px}
+.addr-link{cursor:pointer;color:var(--text0);flex:1;overflow:hidden;text-overflow:ellipsis}
+.addr-link:hover{color:#6ba8f7;text-decoration:underline}
+.addr-edit-icon{cursor:pointer;color:var(--text2);font-size:11px;padding:0 4px;flex-shrink:0;opacity:0;transition:opacity .1s}
+.addr-cell-inner:hover .addr-edit-icon{opacity:1}
+.addr-edit-icon:hover{color:var(--text0)}
+.phone-cell-inner{display:flex;align-items:center;gap:4px}
+.phone-link{cursor:pointer;color:var(--text0);flex:1;overflow:hidden;text-overflow:ellipsis}
+.phone-link:hover{color:#6ba8f7}
+.phone-copied{color:#10b981!important}
+.phone-edit-icon{cursor:pointer;color:var(--text2);font-size:11px;padding:0 4px;flex-shrink:0;opacity:0;transition:opacity .1s}
+.phone-cell-inner:hover .phone-edit-icon{opacity:1}
+.phone-edit-icon:hover{color:var(--text0)}
+.status-cell-inner{display:flex;align-items:center;gap:4px}
+.status-cycle{cursor:pointer}
+.status-cycle:hover{filter:brightness(1.25)}
+.status-edit-icon{cursor:pointer;color:var(--text2);font-size:10px;padding:0 4px;flex-shrink:0;opacity:0;transition:opacity .1s}
+.status-cell-inner:hover .status-edit-icon{opacity:1}
+.status-edit-icon:hover{color:var(--text0)}
+#toast-host{position:fixed;bottom:18px;right:18px;z-index:99999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.toast{background:var(--bg3);color:var(--text0);border:.5px solid var(--border2);border-radius:6px;padding:7px 12px;font-size:11px;box-shadow:0 6px 20px rgba(0,0,0,.5);opacity:0;transform:translateY(8px);transition:opacity .15s,transform .15s;pointer-events:auto;max-width:340px}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.err{border-color:rgba(239,68,68,.5);color:#fca5a5}
+.toast.ok{border-color:rgba(16,185,129,.5);color:#6ee7b7}
+.act-cell{display:flex;gap:2px;align-items:center;padding:0 5px;flex-wrap:nowrap}
+.badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;white-space:nowrap}
+.date-fresh{color:#f0f0f0}
+.date-warn{color:#f59e0b}
+.date-urgent{color:#ef4444;font-weight:600}
+.notes-wrap{display:inline-block}
+.ni{color:var(--text2);font-size:12px;cursor:default;margin-left:3px}
+.ni.on{color:#6ba8f7;cursor:pointer}
+#gtooltip{display:none;position:fixed;z-index:99999;background:var(--bg3);border:.5px solid var(--border2);border-radius:7px;padding:9px 11px;max-width:300px;min-width:120px;font-size:11px;line-height:1.6;color:var(--text0);box-shadow:0 8px 28px rgba(0,0,0,.7);white-space:pre-wrap;word-break:break-word;pointer-events:none}
+.inv-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(107,168,247,.15);color:#6ba8f7;border:.5px solid rgba(107,168,247,.3)}
+.inv-btn:hover{background:rgba(107,168,247,.28)}
+.paid-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(16,185,129,.15);color:#10b981;border:.5px solid rgba(16,185,129,.3)}
+.paid-btn:hover{background:rgba(16,185,129,.28)}
+.rev-btn{font-size:10px;padding:2px 7px;border-radius:4px;background:rgba(255,255,255,.07);color:var(--text1);border:.5px solid var(--border2)}
+.rev-btn:hover{background:var(--bg3);color:var(--text0)}
+.import-btn{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(139,92,246,.18);color:#a78bfa;border:.5px solid rgba(139,92,246,.35)}
+.import-btn:hover{background:rgba(139,92,246,.3)}
+.sync-btn{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(16,185,129,.15);color:#10b981;border:.5px solid rgba(16,185,129,.3)}
+.sync-btn:hover{background:rgba(16,185,129,.28)}
+.footer-bar{display:flex;align-items:center;justify-content:space-between;padding:5px 10px;border-top:.5px solid var(--border);font-size:10px;color:var(--text1);flex-shrink:0}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:var(--bg1);border-radius:12px;padding:18px;width:100%;max-width:520px;max-height:88vh;overflow-y:auto;border:.5px solid var(--border2)}
+.modal h2{font-size:13px;font-weight:600;margin-bottom:14px}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fg label{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text1)}
+.fg input,.fg select,.fg textarea{width:100%}
+textarea{min-height:55px;resize:vertical}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.fgrid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.full{grid-column:1/-1}
+.mact{display:flex;gap:6px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:.5px solid var(--border)}
+.mm{max-width:360px}
+.mr{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:.5px solid var(--border);cursor:default}
+.drag-handle{cursor:grab;color:var(--text2);font-size:14px;padding:0 2px;flex-shrink:0;user-select:none}
+.drag-handle:active{cursor:grabbing}
+.mr.drag-over{background:rgba(255,255,255,.06);border-radius:4px}
+.mr:last-child{border-bottom:none}
+.ar{display:flex;gap:6px;margin-top:10px;align-items:center}
+.ar input[type=text]{flex:1}
+input[type=color]{width:26px;height:24px;border:none;background:none;cursor:pointer;padding:0;border-radius:4px}
+.import-item{background:var(--bg2);border-radius:6px;padding:8px 10px;margin-bottom:6px;border:1px solid var(--border2);cursor:pointer}
+.import-item:hover{border-color:#a78bfa}
+.import-item-warn{border-color:rgba(245,158,11,.55)}
+.import-item-dup{font-size:10px;color:#f59e0b;margin-top:5px;padding-top:5px;border-top:.5px dashed rgba(245,158,11,.35)}
+.import-force{color:#a78bfa;cursor:pointer;text-decoration:underline;margin-left:4px}
+.import-force:hover{color:#c4b5fd}
+.bulk-bar{display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(167,139,250,.12);border:.5px solid rgba(167,139,250,.35);border-radius:var(--r);margin-bottom:5px;flex-shrink:0;flex-wrap:wrap;font-size:11px}
+.bulk-bar select{font-size:11px;padding:3px 6px}
+.bulk-bar button{font-size:10px;padding:3px 8px}
+.bulk-check-col{width:24px;padding:0 4px;text-align:center}
+.bulk-check{accent-color:#a78bfa;cursor:pointer}
+.col-hidden{display:none}
+.sticky-wo th:first-child:not(.bulk-check-col),.sticky-wo td:first-child:not(.bulk-check-col){position:sticky;left:0;z-index:1;background:var(--bg1)}
+.sticky-wo thead th:first-child:not(.bulk-check-col){z-index:3;background:var(--bg2)}
+.sticky-wo.has-bulk th:nth-child(2),.sticky-wo.has-bulk td:nth-child(2){position:sticky;left:24px;z-index:1;background:var(--bg1)}
+.sticky-wo.has-bulk thead th:nth-child(2){z-index:3;background:var(--bg2)}
+.hist-row{display:flex;gap:10px;align-items:flex-start;padding:5px 7px;background:var(--bg2);border-radius:4px;border:.5px solid var(--border)}
+.hist-ts{font-size:10px;color:var(--text2);min-width:110px;flex-shrink:0}
+.hist-act{font-size:11px;color:var(--text0);flex:1;word-break:break-word}
+.app.with-peek{display:grid;grid-template-columns:1fr 360px;grid-template-rows:auto auto auto auto auto 1fr;gap:8px}
+.app.with-peek > .header{grid-column:1;grid-row:1}
+.app.with-peek > .stats-grid{grid-column:1;grid-row:2}
+.app.with-peek > .tabs{grid-column:1;grid-row:3}
+.app.with-peek > .filters{grid-column:1;grid-row:4}
+.app.with-peek > .bulk-bar{grid-column:1;grid-row:5}
+.app.with-peek > .table-outer{grid-column:1;grid-row:6;min-height:0}
+.peek-pane{grid-column:2;grid-row:1 / -1;background:var(--bg1);border:.5px solid var(--border);border-radius:var(--rlg);padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;font-size:11px;min-height:0}
+.peek-head{display:flex;align-items:center;gap:6px;justify-content:space-between;flex-wrap:wrap}
+.peek-id{font-size:13px;font-weight:700}
+.peek-actions{display:flex;gap:4px;align-items:center}
+.peek-row{display:flex;flex-direction:column;gap:2px}
+.peek-label{font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px}
+.peek-val{font-size:11px;color:var(--text0);word-break:break-word;white-space:pre-wrap}
+.peek-link{color:#6ba8f7;cursor:pointer;text-decoration:underline}
+.peek-link:hover{color:#93c5fd}
+.peek-notes{background:var(--bg2);border:.5px solid var(--border);border-radius:5px;padding:8px 10px;min-height:60px;max-height:240px;overflow-y:auto;white-space:pre-wrap}
+.peek-empty{color:var(--text2);text-align:center;padding:30px 10px;font-size:11px}
+.peek-history-row{display:flex;gap:6px;padding:3px 0;border-bottom:.5px dotted var(--border);font-size:10px}
+.peek-history-row:last-child{border-bottom:none}
+.peek-history-ts{color:var(--text2);min-width:90px;flex-shrink:0}
+.peek-history-act{color:var(--text0);flex:1;word-break:break-word}
+.row-peeked{outline:1.5px solid #a78bfa;outline-offset:-2px}
+.import-item-addr{font-size:11px;color:var(--text0);font-weight:600}
+.import-item-meta{font-size:10px;color:var(--text1);margin-top:2px}
+.import-check{float:right;margin-top:2px;accent-color:#a78bfa;width:14px;height:14px}
+.update-banner{display:none;align-items:center;justify-content:space-between;padding:5px 14px;background:rgba(139,92,246,0.18);border-bottom:.5px solid rgba(139,92,246,0.35);flex-shrink:0;font-size:11px;color:#a78bfa}
+.update-banner.show{display:flex}
+.update-banner button{background:rgba(139,92,246,0.25);border:.5px solid rgba(139,92,246,0.5);color:#a78bfa;font-size:10px;padding:3px 10px}
+.update-banner button:hover{background:rgba(139,92,246,0.4)}
+</style>
+</head>
+<body>
+<div id="update-banner" class="update-banner"><span id="update-msg">&#x2B06; Update available</span><button onclick="installUpdate()">Restart &amp; Install</button></div>
+<div id="gtooltip"></div>
+<div id="toast-host"></div>
+<div class="app" id="app"></div>
+<script>
+const DSTATUSES=['Open','Bid Submitted','Bid Approved - Return','Parts Pending','Bid Approved - Complete','Submitted for Invoice','Pending-Complete','Closed'];
+const DPRIORITIES=['High','Medium','Low','Warranty'];
+const DTYPES=['HVAC','Plumbing','Electrical','Other'];
+const DTECHS=['Daniel','Andrew','Devyn'];
+const DPMS=[{name:'AMH',color:'#1a73e8'},{name:'MSR',color:'#10b981'},{name:'Other',color:'#6b7280'}];
+const DSC={'Open':'#10b981','Bid Submitted':'#a0e114','Bid Approved - Return':'#db0a0a','Parts Pending':'#f59e0b','Bid Approved - Complete':'#a23ef4','Submitted for Invoice':'#0b55ea','Pending-Complete':'#8b5cf6','Closed':'#4b5563'};
+const DPC={'High':'#ef4444','Medium':'#f59e0b','Low':'#10b981','Warranty':'#1a73e8'};
+function SC(s){return S.statusColors&&S.statusColors[s]?S.statusColors[s]:(DSC[s]||'#6b7280');}
+function PC(p){return S.priorityColors&&S.priorityColors[p]?S.priorityColors[p]:(DPC[p]||'#6b7280');}
+const TC={'HVAC':'#f59e0b','Plumbing':'#1a73e8','Electrical':'#8b5cf6','Other':'#6b7280'};
+const SAMPLE=[
+  {id:'WO-001',pm:'AMH',type:'HVAC',address:'412 Hillcrest Dr, Durham, NC',phone:'',tech:'Daniel',status:'Open',priority:'High',notes:'Thermostat replaced.',dateCreated:'2025-04-21',tab:'active',deleted:false,propertyId:'',bidAmount:''},
+  {id:'WO-002',pm:'MSR',type:'Plumbing',address:'88 Lakeview Ct, Raleigh, NC',phone:'',tech:'Andrew',status:'Parts Pending',priority:'High',notes:'Waiting on part.',dateCreated:'2025-04-14',tab:'active',deleted:false,propertyId:'',bidAmount:''},
+];
+function buildStatDefs(){
+  const defs=[];
+  S.statuses.forEach(s=>defs.push({label:s,color:SC(s),f:o=>!o.deleted&&o.tab==='active'&&o.status===s}));
+  defs.push({label:'Invoiced',color:S.statusColors['Invoiced']||'#6ba8f7',f:o=>!o.deleted&&o.tab==='invoiced'});
+  defs.push({label:'Paid',color:S.statusColors['Paid']||'#10b981',f:o=>!o.deleted&&o.tab==='paid'});
+  S.priorities.forEach(p=>defs.push({label:p,color:PC(p),f:o=>!o.deleted&&o.priority===p}));
+  return defs;
+}
+
+const DSETTINGS={
+  keyFocusSearch:'/',
+  keyFocusSearchCtrl:true,
+  keyEscClearsSearch:true,
+  autoFocusOnLaunch:true,
+  globalHotkey:'CommandOrControl+Shift+W',
+  autoSyncOnInvoice:true,
+  autoSyncDebounceMs:4000,
+  density:'comfortable',
+  theme:'dark',
+  hiddenCols:{active:[],invoiced:[],paid:[],trash:[]},
+  stickyWoCol:true
+};
+
+const ALL_COLS=[
+  {key:'id',label:'WO #'},
+  {key:'propertyId',label:'Prop ID'},
+  {key:'pm',label:'PM'},
+  {key:'type',label:'Type'},
+  {key:'address',label:'Address'},
+  {key:'bidAmount',label:'Bid'},
+  {key:'phone',label:'Phone'},
+  {key:'tech',label:'Tech'},
+  {key:'status',label:'Status'},
+  {key:'dateCreated',label:'Date'}
+];
+
+let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIES],types:[...DTYPES],techs:[...DTECHS],
+  statusColors:{...DSC},priorityColors:{...DPC},
+  settings:{...DSETTINGS},
+  presets:[],activePresetId:'',
+  search:'',filterPM:'',filterType:'',filterStatus:'',filterPriority:'',
+  sortKeys:[{col:'dateCreated',dir:'desc'}],
+  view:'active',modal:null,editOrder:null,manageModal:null,newItemName:'',newItemColor:'#888888',editingCell:null,
+  importItems:[],importSelected:new Set(),dragSrcType:null,dragSrcIdx:null,
+  capturingHotkey:null,
+  bulkMode:false,bulkSelected:new Set(),
+  peekId:null,hoveredId:null};
+
+const KEY='wo_data';
+const OLD_KEYS=['wo_v4','wo_v3','wo_v2'];
+
+const HISTORY_MAX=40;
+function logHistory(id,action,detail){
+  const i=S.orders.findIndex(o=>o.id===id);if(i<0)return;
+  if(!Array.isArray(S.orders[i].history))S.orders[i].history=[];
+  S.orders[i].history.push({ts:Date.now(),action,detail:detail||''});
+  if(S.orders[i].history.length>HISTORY_MAX)S.orders[i].history=S.orders[i].history.slice(-HISTORY_MAX);
+}
+function fmtTs(ts){
+  try{const d=new Date(ts);const m=d.getMonth()+1,dy=d.getDate(),y=String(d.getFullYear()).slice(2);
+    let h=d.getHours(),mn=d.getMinutes();const ap=h>=12?'pm':'am';h=h%12||12;
+    return `${m}/${dy}/${y} ${h}:${String(mn).padStart(2,'0')}${ap}`;}catch(e){return '';}
+}
+
+const UNDO_MAX=30;
+const UNDO_STACK=[];
+function snapshot(label){
+  try{
+    UNDO_STACK.push({label:label||'change',orders:JSON.parse(JSON.stringify(S.orders)),ts:Date.now()});
+    if(UNDO_STACK.length>UNDO_MAX)UNDO_STACK.shift();
+  }catch(e){}
+}
+function undo(){
+  if(!UNDO_STACK.length){toast('Nothing to undo');return;}
+  const prev=UNDO_STACK.pop();
+  S.orders=prev.orders;
+  save();render();
+  toast('Undid: '+prev.label);
+}
+
+function formatPhone(v){
+  if(!v)return'';
+  const d=v.replace(/\D/g,'');
+  if(d.length===10)return'('+d.slice(0,3)+')-'+d.slice(3,6)+'-'+d.slice(6);
+  if(d.length===11&&d[0]==='1')return'('+d.slice(1,4)+')-'+d.slice(4,7)+'-'+d.slice(7);
+  return v;
+}
+
+async function load(){
+  let loaded=false;
+  try{const r=await window.storage.get(KEY);if(r&&r.value){const d=JSON.parse(r.value);['orders','pms','statuses','priorities','types','techs','statusColors','priorityColors','settings','presets'].forEach(k=>{if(d[k])S[k]=d[k];});loaded=true;}}catch(e){}
+  if(!loaded){for(const ok of OLD_KEYS){try{const r=await window.storage.get(ok);if(r&&r.value){const d=JSON.parse(r.value);['orders','pms','statuses','priorities','types','techs','statusColors','priorityColors','settings','presets'].forEach(k=>{if(d[k])S[k]=d[k];});loaded=true;await window.storage.set(KEY,r.value);break;}}catch(e){}}}
+  S.settings={...DSETTINGS,...(S.settings||{})};
+  if(!S.settings.hiddenCols)S.settings.hiddenCols={active:[],invoiced:[],paid:[],trash:[]};
+  ['active','invoiced','paid','trash'].forEach(t=>{if(!Array.isArray(S.settings.hiddenCols[t]))S.settings.hiddenCols[t]=[];});
+  applyTheme();applyDensity();
+  if(window.settingsBridge&&S.settings.globalHotkey)window.settingsBridge.setHotkey(S.settings.globalHotkey);
+  S.orders.forEach(o=>{
+    if(!o.tab)o.tab=o.deleted?'active':(o.status==='Invoiced'?'invoiced':'active');
+    if(o.invoice&&!o.phone){o.phone=o.invoice;delete o.invoice;}
+    if(!o.phone)o.phone='';
+    o.phone=formatPhone(o.phone);
+    if(!o.propertyId)o.propertyId='';
+    if(!o.bidAmount)o.bidAmount='';
+    if(o.dateOfService===undefined)o.dateOfService='';
+    if(o.portalLink===undefined)o.portalLink='';
+    if(!Array.isArray(o.history))o.history=[];
+  });
+  if(!loaded)S.orders=SAMPLE.map(o=>({...o}));
+  checkExtensionImports();
+  render();
+}
+
+async function save(){
+  try{await window.storage.set(KEY,JSON.stringify({orders:S.orders,pms:S.pms,statuses:S.statuses,priorities:S.priorities,types:S.types,techs:S.techs,statusColors:S.statusColors,priorityColors:S.priorityColors,settings:S.settings,presets:S.presets}));}catch(e){}
+}
+
+async function checkExtensionImports(){
+  try{
+    const r=await window.storage.get('wo_extension_export');
+    if(r&&r.value){
+      const items=JSON.parse(r.value);
+      if(items&&items.length){S.importItems=items;S.importSelected=new Set(items.map((_,i)=>i));S.modal='import';render();}
+    }
+  }catch(e){}
+}
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function ea(s){return esc(s).replace(/'/g,'&#39;');}
+
+function nextId(customId){
+  if(customId&&customId.trim())return customId.trim();
+  const n=S.orders.map(o=>parseInt((o.id||'').replace(/[^0-9]/g,''))||0);
+  return'WO-'+(Math.max(0,...n)+1).toString().padStart(3,'0');
+}
+
+function pmColor(name){const p=S.pms.find(x=>x.name===name);return p?p.color:'#6b7280';}
+function badge(t,c){c=c||'#6b7280';const h=c.replace('#','');const r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);return`<span class="badge" style="background:rgba(${r},${g},${b},.18);color:${c}">${esc(t)}</span>`;}
+function fmtDate(d){if(!d)return'&#x2014;';const[y,m,dy]=d.split('-');return`${m}/${dy}/${y.slice(2)}`;}
+function daysSince(d){if(!d)return 0;return Math.floor((Date.now()-new Date(d+'T00:00:00').getTime())/86400000);}
+function dateClass(d){const n=daysSince(d);return n>=14?'date-urgent':n>=7?'date-warn':'date-fresh';}
+function arrow(col){
+  const idx=S.sortKeys.findIndex(k=>k.col===col);
+  if(idx===-1)return'';
+  const sym=S.sortKeys[idx].dir==='asc'?'&#x2191;':'&#x2193;';
+  return S.sortKeys.length>1?` ${sym}${idx+1}`:` ${sym}`;
+}
+
+function filtered(){
+  const v=S.view;
+  let rows=v==='trash'?S.orders.filter(o=>o.deleted):S.orders.filter(o=>!o.deleted&&o.tab===v);
+  if(S.search){
+    const q=S.search.toLowerCase();
+    const qDigits=S.search.replace(/\D/g,'');
+    const isPhoneQuery=qDigits.length>=7;
+    rows=rows.filter(o=>{
+      if(isPhoneQuery){
+        const pd=(o.phone||'').replace(/\D/g,'');
+        if(pd&&pd.includes(qDigits))return true;
+      }
+      return ['id','address','tech','phone','pm','notes','propertyId'].some(k=>(o[k]||'').toLowerCase().includes(q));
+    });
+  }
+  if(S.filterPM)rows=rows.filter(o=>o.pm===S.filterPM);
+  if(S.filterType)rows=rows.filter(o=>o.type===S.filterType);
+  if(S.filterStatus)rows=rows.filter(o=>o.status===S.filterStatus);
+  if(S.filterPriority)rows=rows.filter(o=>o.priority===S.filterPriority);
+  rows.sort((a,b)=>{
+    for(const {col,dir} of S.sortKeys){
+      const d=dir==='asc'?1:-1;
+      if(col==='status'){
+        let ai=S.statuses.indexOf(a.status),bi=S.statuses.indexOf(b.status);
+        if(ai===-1)ai=9999;if(bi===-1)bi=9999;
+        if(ai!==bi)return(ai-bi)*d;
+      } else {
+        const av=a[col]||'',bv=b[col]||'';
+        if(av<bv)return-d;if(av>bv)return d;
+      }
+    }
+    return 0;
+  });
+  return rows;
+}
+
+function sort(col,e){
+  if(e&&e.shiftKey){
+    const idx=S.sortKeys.findIndex(k=>k.col===col);
+    if(idx===0){S.sortKeys[0].dir=S.sortKeys[0].dir==='asc'?'desc':'asc';}
+    else if(idx>0){S.sortKeys.splice(idx,1);}
+    else{S.sortKeys.push({col,dir:'desc'});}
+  } else {
+    if(S.sortKeys.length===1&&S.sortKeys[0].col===col){S.sortKeys[0].dir=S.sortKeys[0].dir==='asc'?'desc':'asc';}
+    else{S.sortKeys=[{col,dir:'desc'}];}
+  }
+  render();
+}
+
+function openAdd(){S.editOrder=null;S.modal='add';render();}
+function openEdit(id){S.editOrder=S.orders.find(o=>o.id===id);S.modal='edit';render();}
+function closeModal(){
+  if(S.capturingHotkey){S.capturingHotkey=false;if(window.settingsBridge&&window.settingsBridge.resumeHotkey)window.settingsBridge.resumeHotkey();}
+  S.modal=null;S.editOrder=null;S.manageModal=null;S.editingCell=null;render();
+}
+function openManage(type){S.manageModal=type;S.newItemName='';S.newItemColor='#888888';render();}
+function openSettings(){S.modal='settings';render();}
+function openHistory(id){S.modal='history';S.historyId=id;render();}
+
+function setHoveredRow(id){S.hoveredId=id||null;}
+function clearHoveredRow(id){if(S.hoveredId===id)S.hoveredId=null;}
+function peekHovered(){
+  const id=S.hoveredId;
+  if(!id){toast('Hover a row, then press Space','',1800);return;}
+  if(S.peekId===id){clearPeek();return;}
+  S.peekId=id;render();
+}
+function clearPeek(){S.peekId=null;render();}
+function togglePeek(){
+  if(S.peekId){clearPeek();return;}
+  const id=S.hoveredId||(filtered()[0]&&filtered()[0].id);
+  if(!id)return;
+  S.peekId=id;render();
+}
+
+function applyTheme(){
+  const h=document.documentElement;
+  h.classList.remove('theme-light','theme-dark');
+  h.classList.add('theme-'+(S.settings&&S.settings.theme==='light'?'light':'dark'));
+}
+function applyDensity(){
+  const h=document.documentElement;
+  h.classList.remove('density-compact','density-comfortable','density-roomy');
+  const d=(S.settings&&S.settings.density)||'comfortable';
+  h.classList.add('density-'+d);
+}
+function setTheme(t){S.settings.theme=t;save();applyTheme();render();}
+function setDensity(d){S.settings.density=d;save();applyDensity();render();}
+function toggleColHidden(view,key){
+  const arr=S.settings.hiddenCols[view]||[];
+  const idx=arr.indexOf(key);
+  if(idx>=0)arr.splice(idx,1);else arr.push(key);
+  S.settings.hiddenCols[view]=arr;save();render();
+}
+function isColHidden(view,key){
+  const arr=(S.settings&&S.settings.hiddenCols&&S.settings.hiddenCols[view])||[];
+  return arr.includes(key);
+}
+function setStickyWoCol(v){S.settings.stickyWoCol=!!v;save();render();}
+
+function applyPreset(id){
+  if(!id){S.activePresetId='';return;}
+  const p=(S.presets||[]).find(x=>x.id===id);
+  if(!p){S.activePresetId='';return;}
+  S.activePresetId=id;
+  S.search=p.search||'';
+  S.filterPM=p.filterPM||'';
+  S.filterType=p.filterType||'';
+  S.filterStatus=p.filterStatus||'';
+  S.filterPriority=p.filterPriority||'';
+  if(p.view)S.view=p.view;
+  render();
+}
+function savePreset(){
+  const name=prompt('Name this preset:');
+  if(!name||!name.trim())return;
+  const id='p_'+Date.now().toString(36);
+  const p={id,name:name.trim(),search:S.search,filterPM:S.filterPM,filterType:S.filterType,filterStatus:S.filterStatus,filterPriority:S.filterPriority,view:S.view};
+  S.presets=[...(S.presets||[]),p];
+  S.activePresetId=id;
+  save();render();
+  toast('Saved preset: '+p.name,'ok',2000);
+}
+function deletePreset(id){
+  if(!id)return;
+  if(!confirm('Delete this preset?'))return;
+  S.presets=(S.presets||[]).filter(p=>p.id!==id);
+  if(S.activePresetId===id)S.activePresetId='';
+  save();render();
+}
+function toggleBulkMode(){
+  S.bulkMode=!S.bulkMode;
+  if(!S.bulkMode)S.bulkSelected=new Set();
+  render();
+}
+function bulkToggle(id){
+  if(S.bulkSelected.has(id))S.bulkSelected.delete(id);else S.bulkSelected.add(id);
+  render();
+}
+function bulkSelectAll(){
+  const rows=filtered();
+  if(S.bulkSelected.size===rows.length)S.bulkSelected=new Set();
+  else S.bulkSelected=new Set(rows.map(o=>o.id));
+  render();
+}
+function bulkClear(){S.bulkSelected=new Set();render();}
+function bulkApply(field,value){
+  if(!S.bulkSelected.size)return;
+  snapshot('bulk '+field);
+  const ids=S.bulkSelected;
+  let changed=0;
+  S.orders.forEach(o=>{
+    if(!ids.has(o.id))return;
+    if(o[field]!==value){
+      const oldVal=o[field];
+      o[field]=value;changed++;
+      logHistory(o.id,'bulk '+field,(oldVal||'(empty)')+' → '+(value||'(empty)'));
+    }
+    if(field==='tech'&&value&&!S.techs.includes(value))S.techs.push(value);
+  });
+  save();render();
+  toast('Updated '+changed+' order'+(changed===1?'':'s'),'ok',2200);
+}
+function bulkSendToInvoiced(){
+  if(!S.bulkSelected.size)return;
+  snapshot('bulk send to invoiced');
+  S.orders.forEach(o=>{if(S.bulkSelected.has(o.id)){o.tab='invoiced';logHistory(o.id,'sent to Invoiced (bulk)');}});
+  save();render();scheduleAutoSync();
+  toast('Sent '+S.bulkSelected.size+' to Invoiced','ok',2200);
+}
+function bulkDelete(){
+  if(!S.bulkSelected.size)return;
+  if(!confirm('Move '+S.bulkSelected.size+' work order(s) to trash?'))return;
+  snapshot('bulk delete');
+  S.orders.forEach(o=>{if(S.bulkSelected.has(o.id)){o.deleted=true;logHistory(o.id,'sent to Trash (bulk)');}});
+  S.bulkSelected=new Set();
+  save();render();
+}
+
+function updatePreset(){
+  const id=S.activePresetId;if(!id)return;
+  const i=(S.presets||[]).findIndex(p=>p.id===id);if(i<0)return;
+  S.presets[i]={...S.presets[i],search:S.search,filterPM:S.filterPM,filterType:S.filterType,filterStatus:S.filterStatus,filterPriority:S.filterPriority,view:S.view};
+  save();toast('Preset updated','ok',1800);
+}
+function setSetting(k,v){S.settings[k]=v;save();render();if(k==='globalHotkey'&&window.settingsBridge){window.settingsBridge.setHotkey(v);}}
+function resetSettings(){if(!confirm('Reset all settings to defaults?'))return;S.settings=JSON.parse(JSON.stringify(DSETTINGS));save();applyTheme();applyDensity();render();if(window.settingsBridge){window.settingsBridge.setHotkey(DSETTINGS.globalHotkey);}}
+function startCaptureHotkey(){
+  S.capturingHotkey=true;
+  if(window.settingsBridge&&window.settingsBridge.pauseHotkey)window.settingsBridge.pauseHotkey();
+  render();
+  setTimeout(()=>{const el=document.getElementById('hotkey-capture');if(el)el.focus();},0);
+}
+function cancelCaptureHotkey(){
+  S.capturingHotkey=false;
+  if(window.settingsBridge&&window.settingsBridge.resumeHotkey)window.settingsBridge.resumeHotkey();
+  render();
+}
+function captureHotkeyKey(e){
+  e.preventDefault();e.stopPropagation();
+  if(!S.capturingHotkey)return;
+  if(e.key==='Escape'){cancelCaptureHotkey();return;}
+  const k=e.key;
+  if(['Control','Shift','Alt','Meta','OS','ContextMenu'].includes(k))return;
+  const mods=[];
+  if(e.ctrlKey||e.metaKey)mods.push('CommandOrControl');
+  if(e.altKey)mods.push('Alt');
+  if(e.shiftKey)mods.push('Shift');
+  let main;
+  if(k.length===1){main=k.toUpperCase();}
+  else if(/^F\d{1,2}$/.test(k)){main=k;}
+  else if(k===' '){main='Space';}
+  else{main=k;}
+  if(!mods.length){S.capturingHotkey=false;if(window.settingsBridge&&window.settingsBridge.resumeHotkey)window.settingsBridge.resumeHotkey();render();toast('Global hotkey requires a modifier (Ctrl/Alt/Shift)','err',3000);return;}
+  const combo=[...mods,main].join('+');
+  S.settings.globalHotkey=combo;S.capturingHotkey=false;save();
+  if(window.settingsBridge)window.settingsBridge.setHotkey(combo);
+  render();
+}
+
+function saveOrder(e){
+  e.preventDefault();const f=e.target;
+  const customId=f.woId?f.woId.value.trim():'';
+  const data={
+    pm:f.pm.value.trim(),type:f.type.value,
+    address:f.address.value.trim(),phone:formatPhone(f.phone.value.trim()),
+    tech:f.tech.value,status:f.status.value,priority:f.priority.value,
+    notes:f.notes.value.trim(),dateCreated:f.dateCreated.value,
+    dateOfService:f.dateOfService?f.dateOfService.value:'',
+    portalLink:f.portalLink?f.portalLink.value.trim():'',
+    propertyId:f.propertyId?f.propertyId.value.trim():'',
+    bidAmount:f.bidAmount?f.bidAmount.value.trim():''
+  };
+  if(data.tech&&!S.techs.includes(data.tech))S.techs.push(data.tech);
+  if(S.modal==='add'){
+    snapshot('add order');
+    data.id=nextId(customId);
+    if(S.orders.find(o=>o.id===data.id)){data.id=data.id+'-'+Date.now().toString().slice(-4);}
+    data.deleted=false;data.tab='active';data.history=[{ts:Date.now(),action:'created',detail:''}];
+    S.orders.push(data);
+  } else {
+    const i=S.orders.findIndex(o=>o.id===S.editOrder.id);
+    const newId=customId||S.editOrder.id;
+    if(newId!==S.editOrder.id&&S.orders.find((o,j)=>o.id===newId&&j!==i)){toast('WO # "'+newId+'" already exists','err',3000);return;}
+    snapshot('edit order');
+    data.id=newId;
+    S.orders[i]={...S.orders[i],...data};
+    logHistory(newId,'edited via modal');
+  }
+  save();S.modal=null;S.editOrder=null;render();
+}
+
+function startEdit(id,field){S.editingCell={id,field};render();setTimeout(()=>{const el=document.querySelector('[data-ef]');if(el)el.focus();},0);}
+function commitEdit(id,field,val){
+  const i=S.orders.findIndex(o=>o.id===id);
+  if(i>=0){
+    if(field==='id'){
+      if(!val||val.trim()===''){S.editingCell=null;render();return;}
+      val=val.trim();
+      if(val!==id&&S.orders.find((o,j)=>o.id===val&&j!==i)){toast('WO # "'+val+'" already exists','err',3000);S.editingCell=null;render();return;}
+    }
+    if(field==='phone')val=formatPhone(val);
+    if(S.orders[i][field]!==val){
+      snapshot('edit '+field);
+      const oldVal=S.orders[i][field];
+      S.orders[i][field]=val;
+      logHistory(S.orders[i].id,'edit '+field,(oldVal||'(empty)')+' → '+(val||'(empty)'));
+      if(field==='tech'&&val&&!S.techs.includes(val))S.techs.push(val);
+      save();
+    }
+  }
+  S.editingCell=null;render();
+}
+function cancelEdit(){S.editingCell=null;render();}
+
+function edCell(o,field,display,itype){
+  const ed=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field===field;
+  if(ed){
+    const v=ea(o[field]||'');
+    if(itype==='sel-status'){const opts=S.statuses.map(s=>`<option${s===o[field]?' selected':''}>${esc(s)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-type'){const opts=S.types.map(s=>`<option${s===o[field]?' selected':''}>${esc(s)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-pm'){const opts=S.pms.map(p=>`<option${p.name===o[field]?' selected':''}>${esc(p.name)}</option>`).join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='sel-tech'){const opts=['<option value="">&#x2014; Unassigned &#x2014;</option>',...S.techs.map(t=>`<option${t===o[field]?' selected':''}>${esc(t)}</option>`)].join('');return`<td><div style="padding:2px 4px"><select class="cell-sel" data-ef onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Escape')cancelEdit()">${opts}</select></div></td>`;}
+    if(itype==='date'){return`<td><div style="padding:2px 4px"><input type="date" class="cell-in" data-ef value="${v}" onchange="commitEdit('${o.id}','${field}',this.value)" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape')cancelEdit()"></div></td>`;}
+    return`<td><div style="padding:2px 4px"><input type="text" class="cell-in" data-ef value="${v}" onblur="commitEdit('${o.id}','${field}',this.value)" onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape')cancelEdit()"></div></td>`;
+  }
+  return`<td class="editable" onclick="startEdit('${o.id}','${field}')"><div class="tdi">${display}</div></td>`;
+}
+
+function showNote(e,text){
+  const tip=document.getElementById('gtooltip');if(!tip)return;
+  tip.textContent=text;tip.style.display='block';
+  const r=e.target.getBoundingClientRect();
+  let left=r.left,top=r.bottom+8;
+  const tw=tip.offsetWidth,th=tip.offsetHeight;
+  if(left+tw>window.innerWidth-12)left=Math.max(8,window.innerWidth-tw-12);
+  if(top+th>window.innerHeight-12)top=Math.max(8,r.top-th-8);
+  tip.style.left=left+'px';tip.style.top=top+'px';
+}
+function hideNote(){const tip=document.getElementById('gtooltip');if(tip)tip.style.display='none';}
+
+function openMaps(addr){
+  if(!addr||!addr.trim())return;
+  const url='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(addr.trim());
+  if(window.shell&&window.shell.openExternal){window.shell.openExternal(url);}
+  else{window.open(url,'_blank');}
+}
+
+function cycleStatus(id,evt){
+  if(!evt)return;
+  const i=S.orders.findIndex(o=>o.id===id);if(i<0)return;
+  const cur=S.orders[i].status;
+  const list=S.statuses;if(!list.length)return;
+  let idx=list.indexOf(cur);
+  if(idx===-1)idx=0;
+  const dir=evt.shiftKey?-1:1;
+  const next=list[(idx+dir+list.length)%list.length];
+  snapshot('cycle status');
+  const old=S.orders[i].status;
+  S.orders[i].status=next;
+  logHistory(id,'status',(old||'(empty)')+' → '+next);
+  save();render();
+}
+
+function copyPhone(phone,evt){
+  if(!phone)return;
+  const digits=phone.replace(/\D/g,'');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(digits).then(()=>flashCopied(evt)).catch(()=>{});
+  }
+}
+function flashCopied(evt){
+  if(!evt||!evt.target)return;
+  const el=evt.target.closest('.phone-link');if(!el)return;
+  const orig=el.textContent;
+  el.dataset.orig=orig;
+  el.textContent='Copied!';
+  el.classList.add('phone-copied');
+  setTimeout(()=>{el.textContent=orig;el.classList.remove('phone-copied');},900);
+}
+
+let _autoSyncTimer=null;
+function scheduleAutoSync(){
+  if(!S.settings||!S.settings.autoSyncOnInvoice)return;
+  if(!window.workbook)return;
+  if(_autoSyncTimer)clearTimeout(_autoSyncTimer);
+  const ms=Number(S.settings.autoSyncDebounceMs)||4000;
+  _autoSyncTimer=setTimeout(()=>{_autoSyncTimer=null;syncWorkbook(true);},ms);
+}
+
+async function syncWorkbook(silent){
+  if(!window.workbook){if(!silent)toast('Sync unavailable — run sync_to_lookup.py manually','err',3500);return;}
+  if(!silent)toast('Syncing workbook…','',1500);
+  const r=await window.workbook.sync();
+  if(r.ok){toast(silent?'Auto-synced workbook':'Workbook synced','ok',2200);}
+  else{toast('Sync failed: '+((r.err||r.error||'Unknown error').toString().split('\n')[0]),'err',5000);}
+}
+
+function sendToInvoiced(id){snapshot('send to invoiced');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';logHistory(id,'sent to Invoiced');save();render();scheduleAutoSync();}
+function sendToPaid(id){snapshot('mark paid');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='paid';logHistory(id,'marked Paid');save();render();}
+function sendToActive(id){snapshot('back to active');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='active';logHistory(id,'back to Active');save();render();}
+function sendToInvoicedFromPaid(id){snapshot('back to invoiced');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';logHistory(id,'back to Invoiced');save();render();}
+function softDelete(id){snapshot('delete');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].deleted=true;logHistory(id,'sent to Trash');save();render();}
+function restore(id){snapshot('restore');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].deleted=false;logHistory(id,'restored from Trash');save();render();}
+function hardDelete(id){if(!confirm('Permanently delete? Cannot be undone.'))return;snapshot('permanent delete');S.orders=S.orders.filter(o=>o.id!==id);save();render();}
+
+function addItem(){
+  const n=S.newItemName.trim();if(!n)return;
+  if(S.manageModal==='pms'){if(!S.pms.find(p=>p.name===n))S.pms.push({name:n,color:S.newItemColor});}
+  else if(S.manageModal==='statuses'){if(!S.statuses.includes(n)){S.statuses.push(n);S.statusColors[n]=S.newItemColor;}}
+  else if(S.manageModal==='priorities'){if(!S.priorities.includes(n)){S.priorities.push(n);S.priorityColors[n]=S.newItemColor;}}
+  else if(S.manageModal==='types'){if(!S.types.includes(n))S.types.push(n);}
+  else if(S.manageModal==='techs'){if(!S.techs.includes(n))S.techs.push(n);}
+  S.newItemName='';save();render();
+}
+function removeItem(type,val){
+  if(type==='pms')S.pms=S.pms.filter(p=>p.name!==val);
+  else if(type==='statuses'){S.statuses=S.statuses.filter(s=>s!==val);delete S.statusColors[val];}
+  else if(type==='priorities'){S.priorities=S.priorities.filter(p=>p!==val);delete S.priorityColors[val];}
+  else if(type==='types')S.types=S.types.filter(t=>t!==val);
+  else if(type==='techs')S.techs=S.techs.filter(t=>t!==val);
+  save();render();
+}
+function updatePMColor(name,color){const p=S.pms.find(x=>x.name===name);if(p){p.color=color;save();render();}}
+function updateStatusColor(name,color){S.statusColors[name]=color;save();render();}
+function updatePriorityColor(name,color){S.priorityColors[name]=color;save();render();}
+
+let _dragType=null,_dragIdx=null;
+function dragStart(e,type,i){_dragType=type;_dragIdx=i;e.dataTransfer.effectAllowed='move';}
+function dragOver(e){e.preventDefault();e.dataTransfer.dropEffect='move';e.currentTarget.classList.add('drag-over');}
+function dragLeave(e){e.currentTarget.classList.remove('drag-over');}
+function dragDrop(e,type,targetIdx){
+  e.preventDefault();e.currentTarget.classList.remove('drag-over');
+  if(_dragType!==type||_dragIdx===targetIdx||_dragIdx===null)return;
+  if(type==='pms'){const[item]=S.pms.splice(_dragIdx,1);S.pms.splice(targetIdx,0,item);}
+  else if(type==='statuses'){const[item]=S.statuses.splice(_dragIdx,1);S.statuses.splice(targetIdx,0,item);}
+  else if(type==='priorities'){const[item]=S.priorities.splice(_dragIdx,1);S.priorities.splice(targetIdx,0,item);}
+  else if(type==='types'){const[item]=S.types.splice(_dragIdx,1);S.types.splice(targetIdx,0,item);}
+  else if(type==='techs'){const[item]=S.techs.splice(_dragIdx,1);S.techs.splice(targetIdx,0,item);}
+  _dragType=null;_dragIdx=null;save();render();
+}
+function dragEnd(){_dragType=null;_dragIdx=null;document.querySelectorAll('.drag-over').forEach(el=>el.classList.remove('drag-over'));}
+
+async function exportCSV(){
+  const rows=filtered();
+  const cols=['id','propertyId','pm','type','address','bidAmount','phone','tech','status','priority','dateCreated','dateOfService','portalLink','tab','notes'];
+  const lines=[cols.join(','),...rows.map(r=>cols.map(c=>`"${(r[c]||'').replace(/"/g,'""')}"`).join(','))];
+  const csv=lines.join('\n');
+  if(window.electronExport){await window.electronExport.saveCsv(csv);}
+  else{const b=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='work_orders.csv';a.click();}
+}
+
+async function checkForImports(){
+  try{
+    const r=await window.storage.get('wo_extension_export');
+    if(r&&r.value){
+      const items=JSON.parse(r.value);
+      if(items&&items.length){S.importItems=items;S.importSelected=new Set(items.map((_,i)=>i));S.modal='import';render();return;}
+    }
+    toast('No pending imports — use extension Export → "Send to Tracker"','',3500);
+  }catch(e){toast('Could not read extension data','err',3000);}
+}
+
+function toggleImportSelect(i){if(S.importSelected.has(i))S.importSelected.delete(i);else S.importSelected.add(i);render();}
+
+function findDuplicate(item){
+  const norm=s=>(s||'').toString().trim().toLowerCase().replace(/\s+/g,' ');
+  const addr=norm(item.address);
+  const pid=norm(item.propertyId);
+  const ph=(item.phone||'').replace(/\D/g,'');
+  for(const o of S.orders){
+    if(o.deleted)continue;
+    if(pid&&norm(o.propertyId)===pid)return {order:o,reason:'Property ID'};
+    if(addr&&norm(o.address)===addr)return {order:o,reason:'Address'};
+    if(ph&&ph.length>=10&&(o.phone||'').replace(/\D/g,'')===ph)return {order:o,reason:'Phone'};
+  }
+  return null;
+}
+
+function confirmImport(){
+  const toImport=S.importItems.filter((_,i)=>S.importSelected.has(i));
+  if(!toImport.length){toast('No items selected','',1800);return;}
+  snapshot('import '+toImport.length+' order(s)');
+  const existingNums=S.orders.map(o=>parseInt((o.id||'').replace(/[^0-9]/g,''))||0);
+  let nextNum=Math.max(0,...existingNums)+1;
+  let dupSkipped=0;
+  toImport.forEach(item=>{
+    if(!item.__forceImport){
+      const dup=findDuplicate(item);
+      if(dup){dupSkipped++;return;}
+    }
+    const wo={id:'WO-'+String(nextNum++).padStart(3,'0'),pm:item.pm||'',type:item.type||'Other',
+      address:item.address||'',phone:formatPhone(item.phone||''),tech:item.tech||'',status:item.status||'Open',
+      priority:item.priority||'Medium',notes:item.notes||'',
+      dateCreated:item.dateCreated||new Date().toISOString().slice(0,10),
+      tab:'active',deleted:false,propertyId:item.propertyId||'',bidAmount:item.bidAmount||'',
+      dateOfService:item.dateOfService||'',portalLink:item.portalLink||''};
+    if(wo.tech&&!S.techs.includes(wo.tech))S.techs.push(wo.tech);
+    S.orders.push(wo);
+  });
+  window.storage.set('wo_extension_export','[]').catch(()=>{});
+  save();S.modal=null;S.importItems=[];S.importSelected=new Set();render();
+  const imported=toImport.length-dupSkipped;
+  if(dupSkipped>0)toast('Imported '+imported+' · skipped '+dupSkipped+' duplicate(s)','ok',3500);
+  else if(imported>0)toast('Imported '+imported+' work order'+(imported===1?'':'s'),'ok',2200);
+}
+
+function forceImportOne(idx){
+  const item=S.importItems[idx];if(!item)return;
+  item.__forceImport=true;
+  S.importSelected.add(idx);
+  render();
+}
+
+function renderManageModal(){
+  const t=S.manageModal;
+  const titles={pms:'Manage PMs',statuses:'Manage Statuses',priorities:'Manage Priorities',types:'Manage Types',techs:'Manage Technicians'};
+  const items=t==='pms'?S.pms:t==='statuses'?S.statuses:t==='priorities'?S.priorities:t==='types'?S.types:S.techs;
+  let rows='';
+  if(t==='pms'){
+    rows=S.pms.map((p,i)=>`
+      <div class="mr" draggable="true" ondragstart="dragStart(event,'pms',${i})" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dragDrop(event,'pms',${i})" ondragend="dragEnd()">
+        <span class="drag-handle">&#x2630;</span>
+        <input type="color" value="${esc(p.color)}" style="width:26px;height:24px;border:none;background:none;cursor:pointer;padding:0" onchange="updatePMColor('${ea(p.name)}',this.value)">
+        <span style="flex:1">${esc(p.name)}</span>
+        <button class="icon-btn del" onclick="removeItem('pms','${ea(p.name)}')">&#x2715;</button>
+      </div>`).join('');
+  } else if(t==='statuses'){
+    rows=S.statuses.map((v,i)=>`
+      <div class="mr" draggable="true" ondragstart="dragStart(event,'statuses',${i})" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dragDrop(event,'statuses',${i})" ondragend="dragEnd()">
+        <span class="drag-handle">&#x2630;</span>
+        <input type="color" value="${esc(SC(v))}" style="width:26px;height:24px;border:none;background:none;cursor:pointer;padding:0" onchange="updateStatusColor('${ea(v)}',this.value)">
+        <span style="flex:1">${esc(v)}</span>
+        <button class="icon-btn del" onclick="removeItem('statuses','${ea(v)}')">&#x2715;</button>
+      </div>`).join('');
+  } else if(t==='priorities'){
+    rows=S.priorities.map((v,i)=>`
+      <div class="mr" draggable="true" ondragstart="dragStart(event,'priorities',${i})" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dragDrop(event,'priorities',${i})" ondragend="dragEnd()">
+        <span class="drag-handle">&#x2630;</span>
+        <input type="color" value="${esc(PC(v))}" style="width:26px;height:24px;border:none;background:none;cursor:pointer;padding:0" onchange="updatePriorityColor('${ea(v)}',this.value)">
+        <span style="flex:1">${esc(v)}</span>
+        <button class="icon-btn del" onclick="removeItem('priorities','${ea(v)}')">&#x2715;</button>
+      </div>`).join('');
+  } else {
+    rows=items.map((v,i)=>`
+      <div class="mr" draggable="true" ondragstart="dragStart(event,'${t}',${i})" ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dragDrop(event,'${t}',${i})" ondragend="dragEnd()">
+        <span class="drag-handle">&#x2630;</span>
+        <span style="flex:1">${esc(v)}</span>
+        <button class="icon-btn del" onclick="removeItem('${t}','${ea(v)}')">&#x2715;</button>
+      </div>`).join('');
+  }
+  const showColor=t==='pms'||t==='statuses'||t==='priorities';
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>${titles[t]||'Manage'}</h2>
+    <p style="font-size:9px;color:var(--text2);margin-bottom:8px">Drag &#x2630; to reorder${showColor?' &middot; Click color swatch to change color':''}</p>
+    <div>${rows||'<p style="color:var(--text2);font-size:11px;padding:6px 0">No items yet.</p>'}</div>
+    <div class="ar">
+      <input type="text" placeholder="New name&hellip;" value="${esc(S.newItemName)}" oninput="S.newItemName=this.value" onkeydown="if(event.key==='Enter')addItem()">
+      ${showColor?`<input type="color" value="${esc(S.newItemColor)}" style="width:28px;height:26px;border:none;background:none;cursor:pointer;padding:0" onchange="S.newItemColor=this.value">`:''}
+      <button class="btn-primary" onclick="addItem()">+ Add</button>
+    </div>
+    <div class="mact"><button onclick="closeModal()">Done</button></div>
+  </div></div>`;
+}
+
+function renderImportModal(){
+  const items=S.importItems;if(!items.length)return'';
+  const rows=items.map((item,i)=>{
+    const checked=S.importSelected.has(i);
+    const dup=item.__forceImport?null:findDuplicate(item);
+    const dupBanner=dup?`<div class="import-item-dup">&#x26A0; Likely duplicate of ${esc(dup.order.id)} (matched ${esc(dup.reason)}) <a onclick="event.stopPropagation();forceImportOne(${i})" class="import-force">Import anyway</a></div>`:'';
+    return`<div class="import-item${dup?' import-item-warn':''}" onclick="toggleImportSelect(${i})">
+      <input type="checkbox" class="import-check" ${checked?'checked':''} onclick="event.stopPropagation();toggleImportSelect(${i})">
+      <div class="import-item-addr">${esc(item.address||'No address')}</div>
+      <div class="import-item-meta">${esc(item.pm||'&#x2014;')} &middot; ${esc(item.type||'&#x2014;')} &middot; ${esc(item.status||'Open')} &middot; ${esc(item.priority||'Medium')}</div>
+      ${item.notes?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px">${esc(item.notes.slice(0,80))}</div>`:''}
+      ${dupBanner}
+    </div>`;
+  }).join('');
+  return`<div class="modal-bg"><div class="modal"><h2>&#x1F4E5; Import from Chrome Extension</h2>
+    <p style="font-size:10px;color:var(--text1);margin-bottom:10px">${items.length} work order${items.length!==1?'s':''} captured. Select which to import:</p>
+    <div style="max-height:320px;overflow-y:auto">${rows}</div>
+    <div class="mact">
+      <button onclick="S.modal=null;S.importItems=[];render()">Cancel</button>
+      <button onclick="confirmImport()" class="btn-primary">Import Selected (${S.importSelected.size})</button>
+    </div>
+  </div></div>`;
+}
+
+function renderHistoryModal(){
+  const id=S.historyId;const o=S.orders.find(x=>x.id===id);
+  if(!o)return'';
+  const h=(o.history||[]).slice().reverse();
+  const rows=h.length?h.map(e=>`<div class="hist-row"><div class="hist-ts">${esc(fmtTs(e.ts))}</div><div class="hist-act"><strong>${esc(e.action)}</strong>${e.detail?` — <span style="color:var(--text1)">${esc(e.detail)}</span>`:''}</div></div>`).join(''):'<p style="color:var(--text2);font-size:11px;padding:6px 0">No history yet.</p>';
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>&#x231A; History — ${esc(o.id)}</h2>
+    <div style="max-height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:5px">${rows}</div>
+    <div class="mact"><button onclick="closeModal()" class="btn-primary">Close</button></div>
+  </div></div>`;
+}
+
+function renderSettingsModal(){
+  const s=S.settings;
+  const hotkeyDisplay=S.capturingHotkey?'<em style="color:#a78bfa">Press keys&hellip; (Esc to cancel)</em>':esc(s.globalHotkey||'(none)');
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>&#x2699; Settings</h2>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Focus-Search Key (single key, no modifier)</label>
+      <input type="text" maxlength="1" value="${esc(s.keyFocusSearch||'/')}" oninput="setSetting('keyFocusSearch',this.value||'/')" style="width:60px">
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Press this key anywhere outside a field to jump to search. Default: /</p>
+    </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optCtrlF" ${s.keyFocusSearchCtrl?'checked':''} onchange="setSetting('keyFocusSearchCtrl',this.checked)" style="width:auto">
+      <label for="optCtrlF" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Ctrl+F also focuses search</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optEsc" ${s.keyEscClearsSearch?'checked':''} onchange="setSetting('keyEscClearsSearch',this.checked)" style="width:auto">
+      <label for="optEsc" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Esc clears search when focused</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optAutoFocus" ${s.autoFocusOnLaunch?'checked':''} onchange="setSetting('autoFocusOnLaunch',this.checked)" style="width:auto">
+      <label for="optAutoFocus" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Auto-focus search on launch</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optAutoSync" ${s.autoSyncOnInvoice?'checked':''} onchange="setSetting('autoSyncOnInvoice',this.checked)" style="width:auto">
+      <label for="optAutoSync" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Auto-sync workbook when sending to Invoiced</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Auto-sync debounce (ms)</label>
+      <input type="number" min="500" max="60000" step="500" value="${esc(String(s.autoSyncDebounceMs||4000))}" oninput="setSetting('autoSyncDebounceMs',Math.max(500,Math.min(60000,parseInt(this.value)||4000)))" style="width:120px">
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Batches multiple Invoice moves into one sync.</p>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Global Hotkey (works when tracker is minimized)</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <div id="hotkey-capture" tabindex="0" style="flex:1;padding:6px 8px;background:var(--bg2);border:.5px solid ${S.capturingHotkey?'#a78bfa':'var(--border2)'};border-radius:4px;font-size:11px;min-height:28px;outline:none">${hotkeyDisplay}</div>
+        ${S.capturingHotkey?`<button onclick="cancelCaptureHotkey()">Cancel</button>`:`<button onclick="startCaptureHotkey()">Rebind</button>`}
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Brings tracker forward and focuses search. Requires a modifier (Ctrl/Alt/Shift).</p>
+    </div>
+    <div style="border-top:.5px solid var(--border);margin:14px 0 10px"></div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Theme</label>
+      <div style="display:flex;gap:6px">
+        <button class="${s.theme!=='light'?'btn-primary':''}" onclick="setTheme('dark')">Dark</button>
+        <button class="${s.theme==='light'?'btn-primary':''}" onclick="setTheme('light')">Light</button>
+      </div>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Density</label>
+      <div style="display:flex;gap:6px">
+        <button class="${s.density==='compact'?'btn-primary':''}" onclick="setDensity('compact')">Compact</button>
+        <button class="${(!s.density||s.density==='comfortable')?'btn-primary':''}" onclick="setDensity('comfortable')">Comfortable</button>
+        <button class="${s.density==='roomy'?'btn-primary':''}" onclick="setDensity('roomy')">Roomy</button>
+      </div>
+    </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optStickyWo" ${s.stickyWoCol?'checked':''} onchange="setStickyWoCol(this.checked)" style="width:auto">
+      <label for="optStickyWo" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Sticky WO# column when scrolling horizontally</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Visible Columns (per tab)</label>
+      <div style="display:flex;gap:4px;margin-bottom:5px;flex-wrap:wrap">
+        ${['active','invoiced','paid','trash'].map(t=>`<button class="${S.view===t?'btn-primary':''}" onclick="S.view='${t}';render()">${t}</button>`).join('')}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${ALL_COLS.map(c=>{
+          const hidden=isColHidden(S.view,c.key);
+          return `<button class="${hidden?'':'btn-primary'}" onclick="toggleColHidden('${S.view}','${c.key}')" style="font-size:10px;padding:3px 8px">${hidden?'&#x2718; ':'&#x2713; '}${esc(c.label)}</button>`;
+        }).join('')}
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:5px">Click to toggle. Settings apply to the currently-selected tab above.</p>
+    </div>
+    <div class="mact">
+      <button onclick="resetSettings()">Reset to Defaults</button>
+      <button onclick="closeModal()" class="btn-primary">Done</button>
+    </div>
+  </div></div>`;
+}
+
+function renderOrderModal(){
+  const isEdit=S.modal==='edit';
+  const o=S.editOrder||{status:S.statuses[0]||'Open',priority:S.priorities[1]||'Medium',type:S.types[0]||'HVAC',dateCreated:new Date().toISOString().slice(0,10)};
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>${isEdit?'Edit '+esc(o.id):'New Work Order'}</h2><form onsubmit="saveOrder(event)"><div class="fgrid">
+    <div class="fg full"><label>WO Number${isEdit?'':' (leave blank to auto-assign)'}</label><input type="text" name="woId" value="${esc(o.id||'')}" placeholder="e.g. WO-007 or portal reference number"></div>
+    <div class="fg"><label>PM / Client</label><select name="pm">${S.pms.map(p=>`<option${p.name===(o.pm||'')?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Type</label><select name="type">${S.types.map(t=>`<option${t===o.type?' selected':''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Property ID</label><input type="text" name="propertyId" value="${esc(o.propertyId||'')}" placeholder="Portal property ID"></div>
+    <div class="fg"><label>Bid Amount</label><input type="text" name="bidAmount" value="${esc(o.bidAmount||'')}" placeholder="0.00"></div>
+    <div class="fg full"><label>Address</label><input type="text" name="address" value="${esc(o.address||'')}" placeholder="Full service address" required></div>
+    <div class="fg"><label>Phone Number</label><input type="tel" name="phone" value="${esc(o.phone||'')}" placeholder="(555)-000-0000"></div>
+    <div class="fg"><label>Technician</label><select name="tech"><option value="">&#x2014; Unassigned &#x2014;</option>${S.techs.map(t=>`<option${t===(o.tech||'')?' selected':''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Status</label><select name="status">${S.statuses.map(s=>`<option${s===o.status?' selected':''}>${esc(s)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Priority</label><select name="priority">${S.priorities.map(p=>`<option${p===o.priority?' selected':''}>${esc(p)}</option>`).join('')}</select></div>
+    <div class="fg"><label>Date Created</label><input type="date" name="dateCreated" value="${esc(o.dateCreated||new Date().toISOString().slice(0,10))}"></div>
+    <div class="fg"><label>Date of Service</label><input type="date" name="dateOfService" value="${esc(o.dateOfService||'')}"></div>
+    <div class="fg full"><label>Portal Link</label><input type="text" name="portalLink" value="${esc(o.portalLink||'')}" placeholder="https://portal.example.com/wo/12345"></div>
+    <div class="fg full"><label>Notes</label><textarea name="notes" placeholder="Service notes, part numbers, follow-up items&hellip;">${esc(o.notes||'')}</textarea></div>
+  </div><div class="mact"><button type="button" onclick="closeModal()">Cancel</button><button type="submit" class="btn-primary">${isEdit?'Save Changes':'Add Work Order'}</button></div></form></div></div>`;
+}
+
+function renderPeekPane(){
+  const id=S.peekId;
+  if(!id)return `<aside class="peek-pane"><div class="peek-empty">Hover a row and press Space to peek · Esc to close</div></aside>`;
+  const o=S.orders.find(x=>x.id===id);
+  if(!o)return `<aside class="peek-pane"><div class="peek-empty">WO not found</div></aside>`;
+  const sc=SC(o.status)||'#6b7280',pmc=pmColor(o.pm),tc=TC[o.type]||'#6b7280';
+  const hist=(o.history||[]).slice().reverse().slice(0,12);
+  const histHtml=hist.length?hist.map(e=>`<div class="peek-history-row"><div class="peek-history-ts">${esc(fmtTs(e.ts))}</div><div class="peek-history-act"><strong>${esc(e.action)}</strong>${e.detail?` — <span style="color:var(--text1)">${esc(e.detail)}</span>`:''}</div></div>`).join(''):'<div style="color:var(--text2);font-size:10px">No history yet</div>';
+  return `<aside class="peek-pane">
+    <div class="peek-head">
+      <span class="peek-id">${esc(o.id)}</span>
+      <div class="peek-actions">
+        <button class="icon-btn" onclick="openEdit('${o.id}')" title="Edit">&#x270E;</button>
+        <button class="icon-btn" onclick="clearPeek()" title="Close (Esc)">&#x2715;</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap">${badge(o.status,sc)}${badge(o.priority,PC(o.priority))}${o.pm?badge(o.pm,pmc):''}${o.type?badge(o.type,tc):''}</div>
+    <div class="peek-row"><div class="peek-label">Address</div><div class="peek-val">${o.address?`<span class="peek-link" onclick="openMaps('${ea(o.address)}')" title="Open in Google Maps">${esc(o.address)}</span>`:'<span style="color:var(--text2)">—</span>'}</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="peek-row"><div class="peek-label">Phone</div><div class="peek-val">${o.phone?`<span class="peek-link" onclick="copyPhone('${ea(o.phone)}',event)" title="Click to copy">${esc(o.phone)}</span>`:'<span style="color:var(--text2)">—</span>'}</div></div>
+      <div class="peek-row"><div class="peek-label">Tech</div><div class="peek-val">${esc(o.tech)||'<span style="color:var(--text2)">—</span>'}</div></div>
+      <div class="peek-row"><div class="peek-label">Property ID</div><div class="peek-val">${esc(o.propertyId)||'<span style="color:var(--text2)">—</span>'}</div></div>
+      <div class="peek-row"><div class="peek-label">Bid</div><div class="peek-val">${esc(o.bidAmount)||'<span style="color:var(--text2)">—</span>'}</div></div>
+      <div class="peek-row"><div class="peek-label">Created</div><div class="peek-val">${fmtDate(o.dateCreated)}</div></div>
+      <div class="peek-row"><div class="peek-label">Service Date</div><div class="peek-val">${o.dateOfService?fmtDate(o.dateOfService):'<span style="color:var(--text2)">—</span>'}</div></div>
+    </div>
+    ${o.portalLink?`<div class="peek-row"><div class="peek-label">Portal</div><div class="peek-val"><span class="peek-link" onclick="if(window.shell)window.shell.openExternal('${ea(o.portalLink)}');else window.open('${ea(o.portalLink)}','_blank')">${esc(o.portalLink)}</span></div></div>`:''}
+    <div class="peek-row"><div class="peek-label">Notes</div><div class="peek-notes">${o.notes?esc(o.notes):'<span style="color:var(--text2)">No notes</span>'}</div></div>
+    <div class="peek-row"><div class="peek-label">Recent History</div><div>${histHtml}</div></div>
+  </aside>`;
+}
+
+function render(){
+  const rows=filtered();
+  const v=S.view,isTrash=v==='trash',isInv=v==='invoiced',isPaid=v==='paid',isActive=v==='active';
+  const trashCount=S.orders.filter(o=>o.deleted).length;
+  const statsHtml=buildStatDefs().map(d=>`<div class="stat-card"><div class="stat-label">${d.label}</div><div class="stat-value" style="color:${d.color}">${S.orders.filter(d.f).length}</div></div>`).join('');
+
+  const hidCls=k=>isColHidden(v,k)?' col-hidden':'';
+  const tableRows=rows.map(o=>{
+    const sc=SC(o.status)||'#6b7280',tc=TC[o.type]||'#6b7280',pmc=pmColor(o.pm),dc=dateClass(o.dateCreated);
+    const hasNotes=o.notes&&o.notes.trim().length>0;
+    const notesIcon=`<span class="notes-wrap" onclick="event.stopPropagation()"><span class="ni${hasNotes?' on':''}" ${hasNotes?`data-notes="${ea(o.notes)}" onmouseenter="showNote(event,this.dataset.notes)" onmouseleave="hideNote()"`:''}>&#x1F4CB;</span></span>`;
+    const priColor=PC(o.priority);const ph=priColor.replace('#','');const prr=parseInt(ph.substr(0,2),16),prg=parseInt(ph.substr(2,2),16),prb=parseInt(ph.substr(4,2),16);const rowStyle=`background:rgba(${prr},${prg},${prb},0.08)`;
+
+    const bulkCell=S.bulkMode&&!isTrash?`<td class="bulk-check-col"><input type="checkbox" class="bulk-check" ${S.bulkSelected.has(o.id)?'checked':''} onclick="event.stopPropagation();bulkToggle('${o.id}')"></td>`:'';
+
+    if(isTrash)return`<tr data-priority="${esc(o.priority)}" style="${rowStyle}">
+      <td class="${hidCls('id')}"><div class="tdi"><strong>${esc(o.id)}</strong></div></td>
+      <td class="${hidCls('propertyId')}"><div class="tdi">${esc(o.propertyId)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
+      <td class="${hidCls('pm')}"><div class="tdi">${badge(o.pm,pmc)}</div></td>
+      <td class="${hidCls('type')}"><div class="tdi">${badge(o.type,tc)}</div></td>
+      <td class="addr-cell ${hidCls('address')}"><div class="tdi" title="${ea(o.address)}">${esc(o.address)}</div></td>
+      <td class="${hidCls('bidAmount')}"><div class="tdi">${esc(o.bidAmount)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
+      <td class="${hidCls('phone')}"><div class="tdi">${esc(o.phone)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
+      <td class="${hidCls('tech')}"><div class="tdi">${esc(o.tech)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
+      <td class="${hidCls('status')}"><div class="tdi">${badge(o.status,sc)}</div></td>
+      <td class="${hidCls('dateCreated')}"><div class="tdi"><span class="${dc}">${fmtDate(o.dateCreated)}</span></div></td>
+      <td><div class="act-cell"><button class="icon-btn" onclick="restore('${o.id}')" title="Restore">&#x21A9; Restore</button><button class="icon-btn del" onclick="hardDelete('${o.id}')" title="Delete permanently">&#x2715;</button></div></td>
+    </tr>`;
+
+    const woCell=edCell(o,'id',`<div style="display:flex;align-items:center;gap:4px"><strong>${esc(o.id)}</strong>${notesIcon}</div>`,'text');
+    const propCell=edCell(o,'propertyId',esc(o.propertyId)||`<span style="color:var(--text2)">&#x2014;</span>`,'text');
+    const pmCell=edCell(o,'pm',badge(o.pm,pmc),'sel-pm');
+    const typeCell=edCell(o,'type',badge(o.type,tc),'sel-type');
+    const addrInner=o.address?`<span class="addr-link" onclick="event.stopPropagation();openMaps('${ea(o.address)}')" title="Open in Google Maps">${esc(o.address)}</span><span class="addr-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','address')" title="Edit address">&#x270E;</span>`:`<span style="color:var(--text2)">&#x2014;</span>`;
+    const addrEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='address';
+    const addrTd=addrEditing?edCell(o,'address',esc(o.address),'text').replace('<td ','<td class="addr-cell" ').replace('<td>','<td class="addr-cell">'):`<td class="addr-cell"><div class="tdi addr-cell-inner">${addrInner}</div></td>`;
+    const bidCell=edCell(o,'bidAmount',esc(o.bidAmount)||`<span style="color:var(--text2)">&#x2014;</span>`,'text');
+    const phoneEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='phone';
+    const phoneCell=phoneEditing?edCell(o,'phone',esc(o.phone)||`<span style="color:var(--text2)">&#x2014;</span>`,'text'):(o.phone?`<td><div class="tdi phone-cell-inner"><span class="phone-link" onclick="event.stopPropagation();copyPhone('${ea(o.phone)}',event)" title="Click to copy digits">${esc(o.phone)}</span><span class="phone-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','phone')" title="Edit">&#x270E;</span></div></td>`:`<td class="editable" onclick="startEdit('${o.id}','phone')"><div class="tdi"><span style="color:var(--text2)">&#x2014;</span></div></td>`);
+    const techCell=edCell(o,'tech',esc(o.tech)||`<span style="color:var(--text2)">&#x2014;</span>`,'sel-tech');
+    const statusEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='status';
+    const statusCell=statusEditing?edCell(o,'status',badge(o.status,sc),'sel-status'):`<td><div class="tdi status-cell-inner"><span class="status-cycle" onclick="event.stopPropagation();cycleStatus('${o.id}',event)" title="Click: next status · Shift+click: previous">${badge(o.status,sc)}</span><span class="status-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','status')" title="Pick from list">&#x25BE;</span></div></td>`;
+    const dateCell=edCell(o,'dateCreated',`<span class="${dc}">${fmtDate(o.dateCreated)}</span>`,'date');
+
+    let acts='';
+    const histBtn=`<button class="icon-btn" onclick="openHistory('${o.id}')" title="View history">&#x231A;</button>`;
+    if(isActive)acts=`<button class="inv-btn" onclick="sendToInvoiced('${o.id}')" title="Send to Invoiced">Invoice &#x2192;</button><button class="icon-btn" onclick="openEdit('${o.id}')" title="Edit">&#x270E;</button>${histBtn}<button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">&#x1F5D1;</button>`;
+    else if(isInv)acts=`<button class="paid-btn" onclick="sendToPaid('${o.id}')" title="Mark Paid">Paid &#x2192;</button><button class="rev-btn" onclick="sendToActive('${o.id}')" title="Back to Active">&#x2190; Active</button>${histBtn}<button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">&#x1F5D1;</button>`;
+    else if(isPaid)acts=`<button class="rev-btn" onclick="sendToInvoicedFromPaid('${o.id}')" title="Back to Invoiced">&#x2190; Invoice</button>${histBtn}<button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">&#x1F5D1;</button>`;
+
+    const wrap=(html,key)=>{
+      if(!isColHidden(v,key))return html;
+      if(/^<td\s+class="/.test(html)){return html.replace(/^<td\s+class="/,'<td class="col-hidden ');}
+      return html.replace(/^<td(\s|>)/, '<td class="col-hidden"$1');
+    };
+    const woC=wrap(woCell,'id'),propC=wrap(propCell,'propertyId'),pmC=wrap(pmCell,'pm'),typeC=wrap(typeCell,'type'),addrC=wrap(addrTd,'address'),bidC=wrap(bidCell,'bidAmount'),phoneC=wrap(phoneCell,'phone'),techC=wrap(techCell,'tech'),statusC=wrap(statusCell,'status'),dateC=wrap(dateCell,'dateCreated');
+    const peekedCls=S.peekId===o.id?' row-peeked':'';
+    return`<tr data-priority="${esc(o.priority)}" data-id="${esc(o.id)}" class="${peekedCls.trim()}" style="${rowStyle}" onmouseenter="setHoveredRow('${o.id}')" onmouseleave="clearHoveredRow('${o.id}')">${bulkCell}${woC}${propC}${pmC}${typeC}${addrC}${bidC}${phoneC}${techC}${statusC}${dateC}<td><div class="act-cell">${acts}</div></td></tr>`;
+  }).join('');
+
+  const emptyMsg=isTrash?'Trash is empty':`No work orders in ${v}`;
+  const viewTotal=S.orders.filter(o=>isTrash?o.deleted:(!o.deleted&&o.tab===v)).length;
+  const sortHint=S.sortKeys.length>1?` &nbsp;&#x21C5; Shift+click header to multi-sort`:'&nbsp;&#x21C5; Shift+click column header to add sort';
+
+  let modalHtml='';
+  if(S.manageModal)modalHtml=renderManageModal();
+  else if(S.modal==='import')modalHtml=renderImportModal();
+  else if(S.modal==='settings')modalHtml=renderSettingsModal();
+  else if(S.modal==='history')modalHtml=renderHistoryModal();
+  else if(S.modal)modalHtml=renderOrderModal();
+
+  const _prevSearch=document.getElementById('search-input');
+  const _searchHadFocus=_prevSearch&&document.activeElement===_prevSearch;
+  const _searchSelStart=_searchHadFocus?_prevSearch.selectionStart:null;
+  const _searchSelEnd=_searchHadFocus?_prevSearch.selectionEnd:null;
+
+  const appEl=document.getElementById('app');
+  if(S.peekId)appEl.classList.add('with-peek');else appEl.classList.remove('with-peek');
+  const peekHtml=S.peekId?renderPeekPane():'';
+
+  appEl.innerHTML=`
+    ${modalHtml}
+    <div class="header">
+      <div class="header-left"><h1>Work Order Tracker</h1><p>Gamble Plumbing Heating and Air &mdash; Raleigh/Durham</p></div>
+      <div class="header-right">
+        <button class="import-btn" onclick="checkForImports()">&#x1F4E5; Import from Extension</button>
+        <button class="sync-btn" onclick="syncWorkbook()">&#x21BB; Sync Workbook</button>
+        <button onclick="openManage('pms')">&#x2699; PMs</button>
+        <button onclick="openManage('techs')">&#x2699; Techs</button>
+        <button onclick="openManage('statuses')">&#x2699; Statuses</button>
+        <button onclick="openManage('priorities')">&#x2699; Priorities</button>
+        <button onclick="openManage('types')">&#x2699; Types</button>
+        <button onclick="openSettings()">&#x2699; Settings</button>
+        <button onclick="toggleBulkMode()" style="${S.bulkMode?'background:rgba(167,139,250,.25);border-color:rgba(167,139,250,.5);color:#a78bfa':''}">&#x2611; Bulk</button>
+        <button onclick="togglePeek()" title="Open peek pane (hover row + Space · Esc to close)" style="${S.peekId?'background:rgba(167,139,250,.25);border-color:rgba(167,139,250,.5);color:#a78bfa':''}">&#x1F50D; Peek</button>
+        <button onclick="exportCSV()">&#x2B07; CSV</button>
+        <button class="btn-primary" onclick="openAdd()">+ Add Work Order</button>
+      </div>
+    </div>
+    <div class="stats-grid">${statsHtml}</div>
+    <div class="tabs">
+      <button class="tab${v==='active'?' active':''}" onclick="S.view='active';render()">Active (${S.orders.filter(o=>!o.deleted&&o.tab==='active').length})</button>
+      <button class="tab${v==='invoiced'?' active':''}" onclick="S.view='invoiced';render()">&#x1F4C4; Invoiced (${S.orders.filter(o=>!o.deleted&&o.tab==='invoiced').length})</button>
+      <button class="tab${v==='paid'?' active':''}" onclick="S.view='paid';render()">&#x2705; Paid (${S.orders.filter(o=>!o.deleted&&o.tab==='paid').length})</button>
+      <button class="tab${v==='trash'?' active':''}" onclick="S.view='trash';render()">&#x1F5D1; Trash (${trashCount})</button>
+    </div>
+    <div class="filters"><div class="filter-row">
+      <input type="text" id="search-input" placeholder="Search WO#, address, tech, phone, PM, notes&hellip; (press / to focus)" value="${esc(S.search)}" oninput="S.search=this.value;S.activePresetId='';render()">
+      <select onchange="S.filterPM=this.value;S.activePresetId='';render()"><option value="">All PMs</option>${S.pms.map(p=>`<option${S.filterPM===p.name?' selected':''}>${esc(p.name)}</option>`).join('')}</select>
+      <select onchange="S.filterType=this.value;S.activePresetId='';render()"><option value="">All Types</option>${S.types.map(t=>`<option${S.filterType===t?' selected':''}>${esc(t)}</option>`).join('')}</select>
+      <select onchange="S.filterStatus=this.value;S.activePresetId='';render()"><option value="">All Statuses</option>${S.statuses.map(s=>`<option${S.filterStatus===s?' selected':''}>${esc(s)}</option>`).join('')}</select>
+      <select onchange="S.filterPriority=this.value;S.activePresetId='';render()"><option value="">All Priorities</option>${S.priorities.map(p=>`<option${S.filterPriority===p?' selected':''}>${esc(p)}</option>`).join('')}</select>
+      <button onclick="S.search='';S.filterPM='';S.filterType='';S.filterStatus='';S.filterPriority='';S.activePresetId='';render()">Clear</button>
+    </div>
+    <div class="filter-row" style="margin-top:6px;gap:5px">
+      <span style="font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px">Presets:</span>
+      <select onchange="applyPreset(this.value)" style="flex:0 1 200px"><option value="">— Select —</option>${(S.presets||[]).map(p=>`<option value="${esc(p.id)}"${S.activePresetId===p.id?' selected':''}>${esc(p.name)}</option>`).join('')}</select>
+      <button onclick="savePreset()" title="Save current filters as a new preset">+ Save</button>
+      ${S.activePresetId?`<button onclick="updatePreset()" title="Overwrite current preset with current filters">Update</button><button class="icon-btn del" onclick="deletePreset('${esc(S.activePresetId)}')" title="Delete preset">&#x2715;</button>`:''}
+    </div></div>
+    ${S.bulkMode&&!isTrash?`<div class="bulk-bar">
+      <strong>Bulk:</strong> <span>${S.bulkSelected.size} selected</span>
+      <button onclick="bulkSelectAll()">Select all visible</button>
+      <button onclick="bulkClear()">Clear</button>
+      <span style="border-left:.5px solid var(--border2);height:14px;margin:0 4px"></span>
+      <select onchange="if(this.value){bulkApply('status',this.value);this.value='';}"><option value="">Set status&hellip;</option>${S.statuses.map(s=>`<option>${esc(s)}</option>`).join('')}</select>
+      <select onchange="if(this.value){bulkApply('priority',this.value);this.value='';}"><option value="">Set priority&hellip;</option>${S.priorities.map(p=>`<option>${esc(p)}</option>`).join('')}</select>
+      <select onchange="bulkApply('tech',this.value);this.value='';"><option value="">Set tech&hellip;</option><option value="">— Unassigned —</option>${S.techs.map(t=>`<option>${esc(t)}</option>`).join('')}</select>
+      <select onchange="if(this.value){bulkApply('pm',this.value);this.value='';}"><option value="">Set PM&hellip;</option>${S.pms.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select>
+      ${isActive?`<button class="inv-btn" onclick="bulkSendToInvoiced()">Invoice &#x2192;</button>`:''}
+      <button class="icon-btn del" onclick="bulkDelete()">&#x1F5D1; Trash</button>
+      <span style="margin-left:auto"></span>
+      <button onclick="toggleBulkMode()">Exit bulk mode</button>
+    </div>`:''}
+    <div class="table-outer">
+      <div class="table-scroll"><table class="${S.settings&&S.settings.stickyWoCol?'sticky-wo':''} ${S.bulkMode&&!isTrash?'has-bulk':''}">
+        <thead><tr>
+          ${S.bulkMode&&!isTrash?`<th class="bulk-check-col"><input type="checkbox" class="bulk-check" ${rows.length>0&&S.bulkSelected.size===rows.length?'checked':''} onclick="bulkSelectAll()" title="Select all visible"></th>`:''}
+          <th onclick="sort('id',event)" class="${S.sortKeys.find(k=>k.col==='id')?'sort-active':''} ${isColHidden(v,'id')?'col-hidden':''}" style="min-width:110px">WO #${arrow('id')}</th>
+          <th onclick="sort('propertyId',event)" class="${S.sortKeys.find(k=>k.col==='propertyId')?'sort-active':''} ${isColHidden(v,'propertyId')?'col-hidden':''}" style="min-width:80px">Prop ID${arrow('propertyId')}</th>
+          <th onclick="sort('pm',event)" class="${S.sortKeys.find(k=>k.col==='pm')?'sort-active':''} ${isColHidden(v,'pm')?'col-hidden':''}" style="min-width:55px">PM${arrow('pm')}</th>
+          <th onclick="sort('type',event)" class="${S.sortKeys.find(k=>k.col==='type')?'sort-active':''} ${isColHidden(v,'type')?'col-hidden':''}" style="min-width:80px">Type${arrow('type')}</th>
+          <th onclick="sort('address',event)" class="${S.sortKeys.find(k=>k.col==='address')?'sort-active':''} ${isColHidden(v,'address')?'col-hidden':''}" style="min-width:155px">Address${arrow('address')}</th>
+          <th onclick="sort('bidAmount',event)" class="${S.sortKeys.find(k=>k.col==='bidAmount')?'sort-active':''} ${isColHidden(v,'bidAmount')?'col-hidden':''}" style="min-width:70px">Bid${arrow('bidAmount')}</th>
+          <th onclick="sort('phone',event)" class="${S.sortKeys.find(k=>k.col==='phone')?'sort-active':''} ${isColHidden(v,'phone')?'col-hidden':''}" style="min-width:110px">Phone${arrow('phone')}</th>
+          <th onclick="sort('tech',event)" class="${S.sortKeys.find(k=>k.col==='tech')?'sort-active':''} ${isColHidden(v,'tech')?'col-hidden':''}" style="min-width:78px">Tech${arrow('tech')}</th>
+          <th onclick="sort('status',event)" class="${S.sortKeys.find(k=>k.col==='status')?'sort-active':''} ${isColHidden(v,'status')?'col-hidden':''}" style="min-width:130px">Status${arrow('status')}</th>
+          <th onclick="sort('dateCreated',event)" class="${S.sortKeys.find(k=>k.col==='dateCreated')?'sort-active':''} ${isColHidden(v,'dateCreated')?'col-hidden':''}" style="min-width:70px">Date${arrow('dateCreated')}</th>
+          <th style="min-width:${isActive?'185px':isInv?'190px':isPaid?'135px':'95px'}"></th>
+        </tr></thead>
+        <tbody>${tableRows||`<tr><td colspan="${S.bulkMode&&!isTrash?12:11}" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
+      </table></div>
+      <div class="footer-bar">
+        <span>
+          ${v.charAt(0).toUpperCase()+v.slice(1)} &middot; Showing ${rows.length} of ${viewTotal} &middot;
+          Row color: <span style="color:#ef4444">&#x25A0;</span> High &nbsp;<span style="color:#f59e0b">&#x25A0;</span> Medium &nbsp;<span style="color:#10b981">&#x25A0;</span> Low &nbsp;<span style="color:#6ba8f7">&#x25A0;</span> Warranty &middot;
+          <span style="color:#f0f0f0">&#x25A0;</span> &lt;1wk <span style="color:#f59e0b">&#x25A0;</span> 1&ndash;2wk <span style="color:#ef4444">&#x25A0;</span> 2wk+ date &middot;${sortHint}
+        </span>
+      </div>
+    </div>
+    ${peekHtml}`;
+
+  if(_searchHadFocus){
+    const el=document.getElementById('search-input');
+    if(el){
+      el.focus();
+      try{el.setSelectionRange(_searchSelStart,_searchSelEnd);}catch(e){}
+    }
+  }
+}
+
+if(window.extensionBridge){
+  window.extensionBridge.onImport(function(orders){
+    if(!orders||!orders.length)return;
+    S.importItems=orders;S.importSelected=new Set(orders.map((_,i)=>i));S.modal='import';render();
+    if(window.extensionBridge)window.extensionBridge.acknowledge();
+  });
+}
+
+if(window.updater){
+  window.updater.onStatus(function(data){
+    const banner=document.getElementById('update-banner');const msg=document.getElementById('update-msg');
+    if(!banner||!msg)return;
+    if(data.status==='available'){msg.textContent='⬆ Update v'+data.version+' downloading…';banner.classList.add('show');}
+    else if(data.status==='downloading'){msg.textContent='⬆ Downloading update… '+data.percent+'%';banner.classList.add('show');}
+    else if(data.status==='ready'){msg.textContent='✓ Update v'+data.version+' ready — restart to install';banner.classList.add('show');}
+    else{banner.classList.remove('show');}
+  });
+}
+function installUpdate(){if(window.updater)window.updater.install();}
+
+function toast(msg,kind,ms){
+  const host=document.getElementById('toast-host');if(!host)return;
+  const el=document.createElement('div');
+  el.className='toast'+(kind?' '+kind:'');el.textContent=msg;
+  host.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),200);},ms||2200);
+}
+
+function focusSearch(){
+  const el=document.getElementById('search-input');
+  if(el){el.focus();el.select();}
+}
+
+document.addEventListener('paste',function(e){
+  const t=e.target;if(!t||t.tagName!=='INPUT')return;
+  const isPhone=t.name==='phone'||t.type==='tel';
+  if(!isPhone)return;
+  const text=(e.clipboardData&&e.clipboardData.getData('text'))||'';
+  const formatted=formatPhone(text);
+  if(formatted&&formatted!==text){
+    e.preventDefault();
+    const start=t.selectionStart||0,end=t.selectionEnd||0;
+    const cur=t.value||'';
+    t.value=cur.slice(0,start)+formatted+cur.slice(end);
+    try{t.setSelectionRange(start+formatted.length,start+formatted.length);}catch(_){}
+    t.dispatchEvent(new Event('input',{bubbles:true}));
+  }
+});
+
+// Keyboard shortcuts: configurable focus-search key + Ctrl+F + Esc clear + Ctrl+Z undo
+document.addEventListener('keydown',function(e){
+  if(S.capturingHotkey){captureHotkeyKey(e);return;}
+  const tag=(e.target&&e.target.tagName)||'';
+  const inField=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
+  if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&e.key.toLowerCase()==='z'&&!inField){e.preventDefault();undo();return;}
+  if(e.key===' '&&!inField&&!S.modal){e.preventDefault();peekHovered();return;}
+  if(e.key==='Escape'&&!inField&&S.peekId&&!S.modal){e.preventDefault();clearPeek();return;}
+  if(S.settings.keyFocusSearchCtrl&&(e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();focusSearch();return;}
+  const fk=S.settings.keyFocusSearch||'/';
+  if(e.key===fk&&!inField){e.preventDefault();focusSearch();return;}
+  if(S.settings.keyEscClearsSearch&&e.key==='Escape'&&e.target&&e.target.id==='search-input'){
+    if(S.search){S.search='';render();setTimeout(focusSearch,0);}
+    else{e.target.blur();}
+  }
+});
+
+if(window.focusSearchBridge){window.focusSearchBridge.on(focusSearch);}
+
+load();
+setTimeout(()=>{if(S.settings&&S.settings.autoFocusOnLaunch)focusSearch();},400);
+</script>
+</body>
+</html>
