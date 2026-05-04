@@ -789,7 +789,16 @@ function confirmImport(){
       const dup=findDuplicate(item);
       if(dup){dupSkipped++;return;}
     }
-    const wo={id:'WO-'+String(nextNum++).padStart(3,'0'),pm:item.pm||'',type:item.type||'Other',
+    // Prefer the portal-supplied WO# (item.woId) for the tracker's id field;
+    // fall back to a sequential WO-### if missing or already used.
+    const portalWo=(item.woId||'').toString().trim();
+    let woId='';
+    if(portalWo&&!S.orders.find(o=>o.id===portalWo)){
+      woId=portalWo;
+    } else {
+      woId='WO-'+String(nextNum++).padStart(3,'0');
+    }
+    const wo={id:woId,pm:item.pm||'',type:item.type||'Other',
       address:item.address||'',phone:formatPhone(item.phone||''),tech:item.tech||'',status:item.status||'Open',
       priority:item.priority||'Medium',notes:item.notes||'',
       dateCreated:item.dateCreated||new Date().toISOString().slice(0,10),
@@ -868,10 +877,14 @@ function renderImportModal(){
     const checked=S.importSelected.has(i);
     const dup=item.__forceImport?null:findDuplicate(item);
     const dupBanner=dup?`<div class="import-item-dup">&#x26A0; Likely duplicate of ${esc(dup.order.id)} (matched ${esc(dup.reason)}) <a onclick="event.stopPropagation();forceImportOne(${i})" class="import-force">Import anyway</a></div>`:'';
+    const woTag=item.woId?`<span style="color:var(--accent);font-weight:600">WO ${esc(item.woId)}</span> &middot; `:'';
+    const pidTag=item.propertyId?` &middot; <span style="color:var(--text1)">Prop ${esc(item.propertyId)}</span>`:'';
+    const linkTag=item.portalLink?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">&#x1F517; ${esc(item.portalLink)}</div>`:'';
     return`<div class="import-item${dup?' import-item-warn':''}" onclick="toggleImportSelect(${i})">
       <input type="checkbox" class="import-check" ${checked?'checked':''} onclick="event.stopPropagation();toggleImportSelect(${i})">
-      <div class="import-item-addr">${esc(item.address||'No address')}</div>
-      <div class="import-item-meta">${esc(item.pm||'&#x2014;')} &middot; ${esc(item.type||'&#x2014;')} &middot; ${esc(item.status||'Open')} &middot; ${esc(item.priority||'Medium')}</div>
+      <div class="import-item-addr">${woTag}${esc(item.address||'No address')}</div>
+      <div class="import-item-meta">${esc(item.pm||'&#x2014;')} &middot; ${esc(item.type||'&#x2014;')} &middot; ${esc(item.status||'Open')} &middot; ${esc(item.priority||'Medium')}${pidTag}</div>
+      ${linkTag}
       ${item.notes?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px">${esc(item.notes.slice(0,80))}</div>`:''}
       ${dupBanner}
     </div>`;
