@@ -210,7 +210,8 @@ const DSETTINGS={
   density:'comfortable',
   theme:'dark',
   hiddenCols:{active:[],invoiced:[],paid:[],trash:[]},
-  stickyWoCol:true
+  stickyWoCol:true,
+  workbookPath:''
 };
 
 const ALL_COLS=[
@@ -688,10 +689,15 @@ function scheduleAutoSync(){
   _autoSyncTimer=setTimeout(()=>{_autoSyncTimer=null;syncWorkbook(true);},ms);
 }
 
+async function chooseWorkbook(){
+  if(!window.workbook||!window.workbook.choose){toast('File picker unavailable','err',2500);return;}
+  const r=await window.workbook.choose(S.settings.workbookPath||'');
+  if(r&&r.path){setSetting('workbookPath',r.path);toast('Workbook path saved','ok',2000);}
+}
 async function syncWorkbook(silent){
   if(!window.workbook){if(!silent)toast('Sync unavailable — run sync_to_lookup.py manually','err',3500);return;}
   if(!silent)toast('Syncing workbook…','',1500);
-  const r=await window.workbook.sync();
+  const r=await window.workbook.sync(S.settings.workbookPath||'');
   if(r.ok){toast(silent?'Auto-synced workbook':'Workbook synced','ok',2200);}
   else{toast('Sync failed: '+((r.err||r.error||'Unknown error').toString().split('\n')[0]),'err',5000);}
 }
@@ -939,6 +945,15 @@ function renderSettingsModal(){
       <label>Auto-sync debounce (ms)</label>
       <input type="number" min="500" max="60000" step="500" value="${esc(String(s.autoSyncDebounceMs||4000))}" oninput="setSetting('autoSyncDebounceMs',Math.max(500,Math.min(60000,parseInt(this.value)||4000)))" style="width:120px">
       <p style="font-size:9px;color:var(--text2);margin-top:3px">Batches multiple Invoice moves into one sync.</p>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>RazorSync Invoice Tracker Workbook</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" value="${esc(s.workbookPath||'')}" placeholder="(auto-detect: Desktop\\WORK ORDERS\\RazorSync_Invoice_Tracker.xlsx)" onchange="setSetting('workbookPath',this.value.trim())" style="flex:1">
+        <button onclick="chooseWorkbook()">Browse&hellip;</button>
+        ${s.workbookPath?`<button onclick="setSetting('workbookPath','')">Clear</button>`:''}
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Leave blank to use the default location. Click Browse to point at the workbook anywhere on disk.</p>
     </div>
     <div class="fg" style="margin-bottom:10px">
       <label>Global Hotkey (works when tracker is minimized)</label>

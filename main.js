@@ -212,20 +212,33 @@ ipcMain.handle('resume-global-hotkey', () => registerGlobalHotkey(currentHotkey)
 ipcMain.handle('open-external', (_e, url) => { try { shell.openExternal(url); return true; } catch(e) { return false; } });
 
 // ── IPC: Workbook Sync ────────────────────────────────────────────────────────
-ipcMain.handle('sync-workbook', () => new Promise((resolve) => {
+function resolveWorkbookPath(overridePath) {
+  // Priority: explicit setting -> auto-detect chain.
+  if (overridePath && overridePath.trim() && fs.existsSync(overridePath.trim())) {
+    return overridePath.trim();
+  }
+  const userProfile = app.getPath('home');
+  const candidates = [
+    path.join(userProfile, 'OneDrive', 'Desktop', 'WORK ORDERS', 'RazorSync_Invoice_Tracker.xlsx'),
+    app.isPackaged
+      ? path.join(path.dirname(app.getPath('exe')), 'RazorSync_Invoice_Tracker.xlsx')
+      : path.join(app.getPath('appData'), '..', 'Local', 'Programs', 'Work Order Tracker', 'RazorSync_Invoice_Tracker.xlsx'),
+  ];
+  return candidates.find(p => fs.existsSync(p)) || (overridePath || candidates[0]);
+}
+
+ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
   const scriptPath = app.isPackaged
     ? path.join(process.resourcesPath, 'sync_to_lookup.py')
     : path.join(__dirname, 'sync_to_lookup.py');
 
-  // Workbook lives next to the exe when packaged; fall back to default install
-  // dir when running in dev (appData is %APPDATA%, parent is AppData)
-  const exeDir = app.isPackaged
-    ? path.dirname(app.getPath('exe'))
-    : path.join(app.getPath('appData'), '..', 'Local', 'Programs', 'Work Order Tracker');
-  const wbPath = path.join(exeDir, 'RazorSync_Invoice_Tracker.xlsx');
+  const wbPath = resolveWorkbookPath(overridePath);
 
   if (!fs.existsSync(scriptPath)) {
     return resolve({ ok: false, out: '', err: `sync_to_lookup.py not found at ${scriptPath}` });
+  }
+  if (!fs.existsSync(wbPath)) {
+    return resolve({ ok: false, out: '', err: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings -> RazorSync Invoice Tracker Workbook.` });
   }
 
   let out = '', err = '';
@@ -235,6 +248,21 @@ ipcMain.handle('sync-workbook', () => new Promise((resolve) => {
   py.on('close',  code  => resolve({ ok: code === 0, out, err }));
   py.on('error',  e     => resolve({ ok: false, out, err: e.message }));
 }));
+
+ipcMain.handle('choose-workbook', async (_e, currentPath) => {
+  const defaultDir = currentPath && fs.existsSync(path.dirname(currentPath))
+    ? path.dirname(currentPath)
+    : path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'WORK ORDERS');
+  const result = await dialog.showOpenDialog({
+    title: 'Select RazorSync Invoice Tracker Workbook',
+    defaultPath: defaultDir,
+    filters: [{ name: 'Excel Workbook', extensions: ['xlsx', 'xlsm'] }],
+    properties: ['openFile']
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths.length) return { path: '' };
+  return { path: result.filePaths[0] };
+});
+
 ipcMain.handle('import-acknowledged', () => ({ ok: true }));
 ipcMain.handle('export-csv', async (_e, csv) => {
   const { canceled, filePath } = await dialog.showSaveDialog({ title: 'Export Work Orders', defaultPath: 'work_orders.csv', filters: [{ name: 'CSV Files', extensions: ['csv'] }] });
