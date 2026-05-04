@@ -1,6 +1,6 @@
 {
   "name": "work-order-tracker",
-  "version": "2.2.3",
+  "version": "2.3.0",
   "description": "Work Order Tracker – Gamble Plumbing Heating and Air",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,8 @@
     "publish": {
       "provider": "github",
       "owner": "willemkaraffa",
-      "repo": "Work-Order-Tracker"
+      "repo": "Work-Order-Tracker",
+      "releaseType": "release"
     },
     "win": {
       "target": "nsis",

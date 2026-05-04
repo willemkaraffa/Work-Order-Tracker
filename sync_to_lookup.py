@@ -1,13 +1,27 @@
 """
 sync_to_lookup.py
 Reads work orders from wo-data.json and writes them into the
-Lookup sheet of RazorSync_Invoice_Tracker.xlsx.
+'Invoice Import' sheet of RazorSync_Invoice_Tracker.xlsx.
 
-Usage (manual):
+Layout (RazorSync-import-ready):
+    A: Invoice #     - blank (filled from RazorSync after invoice creation)
+    B: Customer Name - 'American Homes 4 Rent' (AMH), 'Main Street Renewal' (MSR), or pm verbatim
+    C: Service Address
+    D: Date          - blank
+    E: Item/Service  - blank (manual selection from Service Items library dropdown)
+    F: Unit Price    - bidAmount when present, else blank
+    G: Tax           - formula auto-fills from library by Item/Service
+    H: Memo          - 'WO #' for non-AMH; 'WO # | PropID: NC#######' for AMH
+
+Existing data rows are cleared before write. The 'Service Items' library tab is untouched.
+
+Usage:
     python sync_to_lookup.py [path/to/RazorSync_Invoice_Tracker.xlsx]
 
-If no workbook path is given, looks in %LOCALAPPDATA%\\Programs\\Work Order Tracker\\
-then falls back to the script's own directory.
+If no path given, looks in:
+    %USERPROFILE%\\OneDrive\\Desktop\\WORK ORDERS\\
+    %LOCALAPPDATA%\\Programs\\Work Order Tracker\\
+    script directory.
 
 Requirements: pip install openpyxl
 """
@@ -17,17 +31,22 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
 HERE    = Path(__file__).parent
 WO_JSON = Path(os.environ.get("APPDATA", "")) / "work-order-tracker" / "wo-data.json"
 
-def resolve_workbook(argv_path: str | None) -> Path:
-    """Return the workbook Path, trying several locations."""
+SHEET_NAME = "Invoice Import"
+
+CUSTOMER_MAP = {
+    "AMH": "American Homes 4 Rent",
+    "MSR": "Main Street Renewal",
+}
+
+def resolve_workbook(argv_path):
     if argv_path:
         p = Path(argv_path)
         if p.exists():
             return p
-        sys.exit(f"Workbook not found at provided path:\n  {p}")
+        sys.exit("Workbook not found at provided path:\n  " + str(p))
 
     candidates = [
         Path(os.environ.get("USERPROFILE", "")) / "OneDrive" / "Desktop" / "WORK ORDERS" / "RazorSync_Invoice_Tracker.xlsx",
@@ -42,77 +61,90 @@ def resolve_workbook(argv_path: str | None) -> Path:
         "Run: python sync_to_lookup.py \"C:\\path\\to\\RazorSync_Invoice_Tracker.xlsx\""
     )
 
-# ── Styles ────────────────────────────────────────────────────────────────────
 CELL_FONT   = Font(name="Arial", size=10)
-CELL_ALIGN  = Alignment(horizontal="left", vertical="center")
+ALIGN_LEFT  = Alignment(horizontal="left", vertical="center")
+ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
 THIN        = Side(border_style="thin", color="BFBFBF")
 CELL_BORDER = Border(left=THIN, right=THIN, bottom=THIN)
 
 def load_orders():
     if not WO_JSON.exists():
-        sys.exit(f"Cannot find wo-data.json at:\n  {WO_JSON}")
+        sys.exit("Cannot find wo-data.json at:\n  " + str(WO_JSON))
     raw    = json.loads(WO_JSON.read_text(encoding="utf-8"))
     data   = json.loads(raw["wo_data"])
     orders = [o for o in data.get("orders", []) if not o.get("deleted", False)]
-    print(f"Loaded {len(orders)} active work orders from wo-data.json")
+    print("Loaded " + str(len(orders)) + " active work orders from wo-data.json")
     return orders
 
-def build_notes(o: dict) -> str:
-    """
-    Combine notes fields into a single Notes string.
-    Property ID is included only for AMH orders (per manager workflow).
-    Phone is always included when present.
-    """
-    parts = []
-    if o.get("pm", "") == "AMH" and o.get("propertyId", "").strip():
-        parts.append(f"PropID: {o['propertyId'].strip()}")
-    if o.get("phone", "").strip():
-        parts.append(f"Ph: {o['phone'].strip()}")
-    if o.get("notes", "").strip():
-        parts.append(o["notes"].strip())
-    return " | ".join(parts)
+def customer_name(pm):
+    pm = (pm or "").strip()
+    return CUSTOMER_MAP.get(pm, pm)
 
-def write_lookup(orders, workbook_path: Path):
+def memo_for(o):
+    wo = (o.get("id") or "").strip()
+    if wo:
+        base = wo if wo.upper().startswith("WO") else "WO " + wo
+    else:
+        base = ""
+    if o.get("pm") == "AMH":
+        pid = (o.get("propertyId") or "").strip()
+        if pid:
+            return (base + " | PropID: " + pid) if base else "PropID: " + pid
+    return base
+
+def parse_bid(v):
+    if v in (None, ""):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace("$", "").replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def write_invoice_import(orders, workbook_path):
     wb = load_workbook(workbook_path)
-    if "Lookup" not in wb.sheetnames:
-        sys.exit(f"Sheet 'Lookup' not found in {workbook_path.name}")
-    ws = wb["Lookup"]
+    if SHEET_NAME not in wb.sheetnames:
+        sys.exit("Sheet '" + SHEET_NAME + "' not found in " + workbook_path.name)
+    ws = wb[SHEET_NAME]
 
-    # Clear existing data rows (keep header row 1)
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        for cell in row:
-            cell.value = None
+    # Clear existing values in cols A-H from row 2 down (preserve formatting and DV).
+    last_row = max(ws.max_row, 2)
+    for r in range(2, last_row + 1):
+        for c in range(1, 9):
+            ws.cell(r, c).value = None
 
-    # Lookup sheet columns:
-    # A: Invoice #  B: Work Order #  C: Property   D: Portal Link
-    # E: Portal Status  F: Bid Amount  G: Technician
-    # H: Date of Service  I: Job Type  J: Notes
     for ri, o in enumerate(orders, start=2):
-        row_data = [
-            o.get("id", ""),            # A – Invoice # (fill from RazorSync later)
-            o.get("id", ""),            # B – Work Order #
-            o.get("address", ""),       # C – Property
-            o.get("portalLink", ""),    # D – Portal Link
-            o.get("status", ""),        # E – Portal Status
-            o.get("bidAmount", ""),     # F – Bid Amount
-            o.get("tech", ""),          # G – Technician
-            o.get("dateOfService") or o.get("dateCreated", ""),   # H – Date of Service
-            o.get("type", ""),          # I – Job Type
-            build_notes(o),             # J – Notes (propId only for AMH)
-        ]
-        for ci, val in enumerate(row_data, 1):
-            cell            = ws.cell(ri, ci, value=val)
-            cell.font       = CELL_FONT
-            cell.alignment  = CELL_ALIGN
-            cell.border     = CELL_BORDER
-        ws.cell(ri, 8).number_format = "MM/DD/YYYY"
+        ws.cell(ri, 1).value = ""                                  # A Invoice #
+        ws.cell(ri, 2).value = customer_name(o.get("pm", ""))      # B Customer Name
+        ws.cell(ri, 3).value = o.get("address", "")                # C Service Address
+        ws.cell(ri, 4).value = ""                                  # D Date (blank)
+        ws.cell(ri, 5).value = ""                                  # E Item/Service (manual)
+        bid = parse_bid(o.get("bidAmount"))
+        ws.cell(ri, 6).value = bid if bid is not None else None    # F Unit Price (override)
+        ws.cell(ri, 7).value = (
+            "=IFERROR(IF(E" + str(ri) + "=\"\",\"\",VLOOKUP(E" + str(ri) +
+            ",'Service Items'!A:D,4,FALSE)),\"\")"
+        )                                                          # G Tax formula
+        ws.cell(ri, 8).value = memo_for(o)                         # H Memo
+
+        for c in range(1, 9):
+            cell = ws.cell(ri, c)
+            cell.font   = CELL_FONT
+            cell.border = CELL_BORDER
+            cell.alignment = ALIGN_RIGHT if c == 6 else ALIGN_LEFT
+        ws.cell(ri, 4).number_format = "MM/DD/YYYY"
+        ws.cell(ri, 6).number_format = "$#,##0.00;($#,##0.00);-"
 
     wb.save(workbook_path)
-    print(f"Done — {len(orders)} rows written to Lookup in {workbook_path.name}")
-    print("Reminder: update column A (Invoice #) once RazorSync invoice numbers are assigned.")
+    print("Done - " + str(len(orders)) + " rows written to '" + SHEET_NAME + "' in " + workbook_path.name)
+    print("Reminder: pick Item/Service per row, then fill column A (Invoice #) after RazorSync assigns numbers.")
 
 if __name__ == "__main__":
     argv_path = sys.argv[1] if len(sys.argv) > 1 else None
     workbook_path = resolve_workbook(argv_path)
     orders = load_orders()
-    write_lookup(orders, workbook_path)
+    write_invoice_import(orders, workbook_path)
