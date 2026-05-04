@@ -30,6 +30,7 @@ def resolve_workbook(argv_path: str | None) -> Path:
         sys.exit(f"Workbook not found at provided path:\n  {p}")
 
     candidates = [
+        Path(os.environ.get("USERPROFILE", "")) / "OneDrive" / "Desktop" / "WORK ORDERS" / "RazorSync_Invoice_Tracker.xlsx",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Work Order Tracker" / "RazorSync_Invoice_Tracker.xlsx",
         HERE / "RazorSync_Invoice_Tracker.xlsx",
     ]
