@@ -96,7 +96,7 @@ function startBridgeServer(win) {
         const store = readStore();
         const data  = store['wo_data'] ? JSON.parse(store['wo_data']) : {};
         const config = {
-          statuses:   data.statuses   || ['Open','In Progress','Parts Pending','Pending-Complete','Closed'],
+          statuses:   data.statuses   || ['Open','Bid Submitted','Bid Approved - Return','Parts Pending','Bid Approved - Complete','Pending-Complete','Closed'],
           priorities: data.priorities || ['High','Medium','Low','Warranty'],
           types:      data.types      || ['HVAC','Plumbing','Electrical','Other'],
           pms:        (data.pms       || []).map(p => p.name || p),

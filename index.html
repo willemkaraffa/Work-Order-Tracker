@@ -74,6 +74,10 @@ tr[data-priority]:hover td{filter:brightness(1.12)}
 .status-edit-icon{cursor:pointer;color:var(--text2);font-size:10px;padding:0 4px;flex-shrink:0;opacity:0;transition:opacity .1s}
 .status-cell-inner:hover .status-edit-icon{opacity:1}
 .status-edit-icon:hover{color:var(--text0)}
+.wo-flag{display:inline-block;font-size:13px;line-height:1;cursor:pointer;padding:0 2px;user-select:none}
+.wo-flag-emerg{color:#ef4444}
+.wo-flag-warranty{color:#1a73e8}
+.wo-flag:hover{filter:brightness(1.3)}
 #toast-host{position:fixed;bottom:18px;right:18px;z-index:99999;display:flex;flex-direction:column;gap:6px;pointer-events:none}
 .toast{background:var(--bg3);color:var(--text0);border:.5px solid var(--border2);border-radius:6px;padding:7px 12px;font-size:11px;box-shadow:0 6px 20px rgba(0,0,0,.5);opacity:0;transform:translateY(8px);transition:opacity .15s,transform .15s;pointer-events:auto;max-width:340px}
 .toast.show{opacity:1;transform:translateY(0)}
@@ -176,12 +180,13 @@ input[type=color]{width:26px;height:24px;border:none;background:none;cursor:poin
 <div id="toast-host"></div>
 <div class="app" id="app"></div>
 <script>
-const DSTATUSES=['Open','Bid Submitted','Bid Approved - Return','Parts Pending','Bid Approved - Complete','Submitted for Invoice','Pending-Complete','Closed'];
+const DSTATUSES=['Open','Bid Submitted','Bid Approved - Return','Parts Pending','Bid Approved - Complete','Pending-Complete','Closed'];
 const DPRIORITIES=['High','Medium','Low','Warranty'];
 const DTYPES=['HVAC','Plumbing','Electrical','Other'];
 const DTECHS=['Daniel','Andrew','Devyn'];
 const DPMS=[{name:'AMH',color:'#1a73e8'},{name:'MSR',color:'#10b981'},{name:'Other',color:'#6b7280'}];
-const DSC={'Open':'#10b981','Bid Submitted':'#a0e114','Bid Approved - Return':'#db0a0a','Parts Pending':'#f59e0b','Bid Approved - Complete':'#a23ef4','Submitted for Invoice':'#0b55ea','Pending-Complete':'#8b5cf6','Closed':'#4b5563'};
+const DSC={'Open':'#10b981','Bid Submitted':'#a0e114','Bid Approved - Return':'#db0a0a','Parts Pending':'#f59e0b','Bid Approved - Complete':'#a23ef4','Submitted for Invoice':'#0b55ea','Paid in Full':'#10b981','Pending-Complete':'#8b5cf6','Closed':'#4b5563'};
+function displayStatus(o){if(!o)return'';if(o.tab==='invoiced')return'Submitted for Invoice';if(o.tab==='paid')return'Paid in Full';return o.status||'';}
 const DPC={'High':'#ef4444','Medium':'#f59e0b','Low':'#10b981','Warranty':'#1a73e8'};
 function SC(s){return S.statusColors&&S.statusColors[s]?S.statusColors[s]:(DSC[s]||'#6b7280');}
 function PC(p){return S.priorityColors&&S.priorityColors[p]?S.priorityColors[p]:(DPC[p]||'#6b7280');}
@@ -211,7 +216,8 @@ const DSETTINGS={
   theme:'dark',
   hiddenCols:{active:[],invoiced:[],paid:[],trash:[]},
   stickyWoCol:true,
-  workbookPath:''
+  workbookPath:'',
+  warrantyDisplay:'flag'
 };
 
 const ALL_COLS=[
@@ -286,6 +292,8 @@ async function load(){
   S.settings={...DSETTINGS,...(S.settings||{})};
   if(!S.settings.hiddenCols)S.settings.hiddenCols={active:[],invoiced:[],paid:[],trash:[]};
   ['active','invoiced','paid','trash'].forEach(t=>{if(!Array.isArray(S.settings.hiddenCols[t]))S.settings.hiddenCols[t]=[];});
+  // Migration: deprecate 'Submitted for Invoice' and 'Paid in Full' as user-pickable statuses (now hardcoded by tab).
+  if(Array.isArray(S.statuses))S.statuses=S.statuses.filter(s=>s!=='Submitted for Invoice'&&s!=='Paid in Full');
   applyTheme();applyDensity();
   if(window.settingsBridge&&S.settings.globalHotkey)window.settingsBridge.setHotkey(S.settings.globalHotkey);
   S.orders.forEach(o=>{
@@ -294,6 +302,9 @@ async function load(){
     if(!o.phone)o.phone='';
     o.phone=formatPhone(o.phone);
     if(!o.propertyId)o.propertyId='';
+    if(o.city===undefined)o.city='';
+    if(o.emergency===undefined)o.emergency=false;
+    if(o.warranty===undefined)o.warranty=false;
     if(!o.bidAmount)o.bidAmount='';
     if(o.dateOfService===undefined)o.dateOfService='';
     if(o.portalLink===undefined)o.portalLink='';
@@ -351,7 +362,7 @@ function filtered(){
         const pd=(o.phone||'').replace(/\D/g,'');
         if(pd&&pd.includes(qDigits))return true;
       }
-      return ['id','address','tech','phone','pm','notes','propertyId'].some(k=>(o[k]||'').toLowerCase().includes(q));
+      return ['id','address','city','tech','phone','pm','notes','propertyId'].some(k=>(o[k]||'').toLowerCase().includes(q));
     });
   }
   if(S.filterPM)rows=rows.filter(o=>o.pm===S.filterPM);
@@ -392,9 +403,15 @@ function openAdd(){S.editOrder=null;S.modal='add';render();}
 function openEdit(id){S.editOrder=S.orders.find(o=>o.id===id);S.modal='edit';render();}
 function closeModal(){
   if(S.capturingHotkey){S.capturingHotkey=false;if(window.settingsBridge&&window.settingsBridge.resumeHotkey)window.settingsBridge.resumeHotkey();}
-  S.modal=null;S.editOrder=null;S.manageModal=null;S.editingCell=null;render();
+  // If a Manage modal was opened from Settings, returning closes only Manage
+  // and reveals Settings again. Otherwise close everything.
+  if(S.manageModal&&S._manageReturnsToSettings){S.manageModal=null;S._manageReturnsToSettings=false;S.modal='settings';render();return;}
+  S.modal=null;S.editOrder=null;S.manageModal=null;S.editingCell=null;S._manageReturnsToSettings=false;render();
 }
-function openManage(type){S.manageModal=type;S.newItemName='';S.newItemColor='#888888';render();}
+function openManage(type){
+  if(S.modal==='settings')S._manageReturnsToSettings=true;
+  S.manageModal=type;S.newItemName='';S.newItemColor='#888888';render();
+}
 function openSettings(){S.modal='settings';render();}
 function openHistory(id){S.modal='history';S.historyId=id;render();}
 
@@ -570,7 +587,10 @@ function saveOrder(e){
     dateOfService:f.dateOfService?f.dateOfService.value:'',
     portalLink:f.portalLink?f.portalLink.value.trim():'',
     propertyId:f.propertyId?f.propertyId.value.trim():'',
-    bidAmount:f.bidAmount?f.bidAmount.value.trim():''
+    bidAmount:f.bidAmount?f.bidAmount.value.trim():'',
+    emergency:f.emergency?!!f.emergency.checked:false,
+    warranty:f.warranty?!!f.warranty.checked:false,
+    city:f.city?f.city.value.trim():''
   };
   if(data.tech&&!S.techs.includes(data.tech))S.techs.push(data.tech);
   if(S.modal==='add'){
@@ -702,6 +722,15 @@ async function syncWorkbook(silent){
   else{toast('Sync failed: '+((r.err||r.error||'Unknown error').toString().split('\n')[0]),'err',5000);}
 }
 
+function toggleFlag(id,field){
+  const i=S.orders.findIndex(o=>o.id===id);if(i<0)return;
+  if(field!=='emergency'&&field!=='warranty')return;
+  snapshot('toggle '+field);
+  const cur=!!S.orders[i][field];
+  S.orders[i][field]=!cur;
+  logHistory(id,field+': '+(cur?'cleared':'set'));
+  save();render();
+}
 function sendToInvoiced(id){snapshot('send to invoiced');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';logHistory(id,'sent to Invoiced');save();render();scheduleAutoSync();}
 function sendToPaid(id){snapshot('mark paid');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='paid';logHistory(id,'marked Paid');save();render();}
 function sendToActive(id){snapshot('back to active');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='active';logHistory(id,'back to Active');save();render();}
@@ -749,7 +778,7 @@ function dragEnd(){_dragType=null;_dragIdx=null;document.querySelectorAll('.drag
 
 async function exportCSV(){
   const rows=filtered();
-  const cols=['id','propertyId','pm','type','address','bidAmount','phone','tech','status','priority','dateCreated','dateOfService','portalLink','tab','notes'];
+  const cols=['id','propertyId','pm','type','address','city','bidAmount','phone','tech','status','priority','emergency','warranty','dateCreated','dateOfService','portalLink','tab','notes'];
   const lines=[cols.join(','),...rows.map(r=>cols.map(c=>`"${(r[c]||'').replace(/"/g,'""')}"`).join(','))];
   const csv=lines.join('\n');
   if(window.electronExport){await window.electronExport.saveCsv(csv);}
@@ -809,7 +838,8 @@ function confirmImport(){
       priority:item.priority||'Medium',notes:item.notes||'',
       dateCreated:item.dateCreated||new Date().toISOString().slice(0,10),
       tab:'active',deleted:false,propertyId:item.propertyId||'',bidAmount:item.bidAmount||'',
-      dateOfService:item.dateOfService||'',portalLink:item.portalLink||''};
+      dateOfService:item.dateOfService||'',portalLink:item.portalLink||'',city:item.city||'',
+      emergency:!!item.emergency,warranty:!!item.warranty};
     if(wo.tech&&!S.techs.includes(wo.tech))S.techs.push(wo.tech);
     S.orders.push(wo);
   });
@@ -885,11 +915,12 @@ function renderImportModal(){
     const dupBanner=dup?`<div class="import-item-dup">&#x26A0; Likely duplicate of ${esc(dup.order.id)} (matched ${esc(dup.reason)}) <a onclick="event.stopPropagation();forceImportOne(${i})" class="import-force">Import anyway</a></div>`:'';
     const woTag=item.woId?`<span style="color:var(--accent);font-weight:600">WO ${esc(item.woId)}</span> &middot; `:'';
     const pidTag=item.propertyId?` &middot; <span style="color:var(--text1)">Prop ${esc(item.propertyId)}</span>`:'';
+    const cityTag=item.city?` &middot; <span style="color:var(--text1)">${esc(item.city)}</span>`:'';
     const linkTag=item.portalLink?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">&#x1F517; ${esc(item.portalLink)}</div>`:'';
     return`<div class="import-item${dup?' import-item-warn':''}" onclick="toggleImportSelect(${i})">
       <input type="checkbox" class="import-check" ${checked?'checked':''} onclick="event.stopPropagation();toggleImportSelect(${i})">
       <div class="import-item-addr">${woTag}${esc(item.address||'No address')}</div>
-      <div class="import-item-meta">${esc(item.pm||'&#x2014;')} &middot; ${esc(item.type||'&#x2014;')} &middot; ${esc(item.status||'Open')} &middot; ${esc(item.priority||'Medium')}${pidTag}</div>
+      <div class="import-item-meta">${esc(item.pm||'&#x2014;')} &middot; ${esc(item.type||'&#x2014;')} &middot; ${esc(item.status||'Open')} &middot; ${esc(item.priority||'Medium')}${cityTag}${pidTag}</div>
       ${linkTag}
       ${item.notes?`<div class="import-item-meta" style="color:var(--text2);margin-top:2px">${esc(item.notes.slice(0,80))}</div>`:''}
       ${dupBanner}
@@ -965,6 +996,18 @@ function renderSettingsModal(){
     </div>
     <div style="border-top:.5px solid var(--border);margin:14px 0 10px"></div>
     <div class="fg" style="margin-bottom:10px">
+      <label>Lists</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <button onclick="openManage('pms')">&#x2699; PMs</button>
+        <button onclick="openManage('techs')">&#x2699; Techs</button>
+        <button onclick="openManage('statuses')">&#x2699; Statuses</button>
+        <button onclick="openManage('priorities')">&#x2699; Priorities</button>
+        <button onclick="openManage('types')">&#x2699; Types</button>
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:5px">Manage the dropdown options used throughout the tracker.</p>
+    </div>
+    <div style="border-top:.5px solid var(--border);margin:14px 0 10px"></div>
+    <div class="fg" style="margin-bottom:10px">
       <label>Theme</label>
       <div style="display:flex;gap:6px">
         <button class="${s.theme!=='light'?'btn-primary':''}" onclick="setTheme('dark')">Dark</button>
@@ -982,6 +1025,14 @@ function renderSettingsModal(){
     <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
       <input type="checkbox" id="optStickyWo" ${s.stickyWoCol?'checked':''} onchange="setStickyWoCol(this.checked)" style="width:auto">
       <label for="optStickyWo" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Sticky WO# column when scrolling horizontally</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Warranty Display</label>
+      <div style="display:flex;gap:6px">
+        <button class="${(s.warrantyDisplay||'flag')==='flag'?'btn-primary':''}" onclick="setSetting('warrantyDisplay','flag')">Blue Flag Icon</button>
+        <button class="${s.warrantyDisplay==='highlight'?'btn-primary':''}" onclick="setSetting('warrantyDisplay','highlight')">Row Highlight</button>
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">How to mark work orders flagged as Warranty.</p>
     </div>
     <div class="fg" style="margin-bottom:10px">
       <label>Visible Columns (per tab)</label>
@@ -1013,6 +1064,7 @@ function renderOrderModal(){
     <div class="fg"><label>Property ID</label><input type="text" name="propertyId" value="${esc(o.propertyId||'')}" placeholder="Portal property ID"></div>
     <div class="fg"><label>Bid Amount</label><input type="text" name="bidAmount" value="${esc(o.bidAmount||'')}" placeholder="0.00"></div>
     <div class="fg full"><label>Address</label><input type="text" name="address" value="${esc(o.address||'')}" placeholder="Full service address" required></div>
+    <div class="fg"><label>City</label><input type="text" name="city" value="${esc(o.city||'')}" placeholder="Auto-derived from Address"></div>
     <div class="fg"><label>Phone Number</label><input type="tel" name="phone" value="${esc(o.phone||'')}" placeholder="(555)-000-0000"></div>
     <div class="fg"><label>Technician</label><select name="tech"><option value="">&#x2014; Unassigned &#x2014;</option>${S.techs.map(t=>`<option${t===(o.tech||'')?' selected':''}>${esc(t)}</option>`).join('')}</select></div>
     <div class="fg"><label>Status</label><select name="status">${S.statuses.map(s=>`<option${s===o.status?' selected':''}>${esc(s)}</option>`).join('')}</select></div>
@@ -1020,6 +1072,16 @@ function renderOrderModal(){
     <div class="fg"><label>Date Created</label><input type="date" name="dateCreated" value="${esc(o.dateCreated||new Date().toISOString().slice(0,10))}"></div>
     <div class="fg"><label>Date of Service</label><input type="date" name="dateOfService" value="${esc(o.dateOfService||'')}"></div>
     <div class="fg full"><label>Portal Link</label><input type="text" name="portalLink" value="${esc(o.portalLink||'')}" placeholder="https://portal.example.com/wo/12345"></div>
+    <div class="fg full" style="flex-direction:row;gap:18px;align-items:center">
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0);cursor:pointer">
+        <input type="checkbox" name="emergency" ${o.emergency?'checked':''} style="width:auto;margin:0">
+        <span style="color:#ef4444">&#x2691;</span> Emergency (same-day / after-hours fee approved)
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0);cursor:pointer">
+        <input type="checkbox" name="warranty" ${o.warranty?'checked':''} style="width:auto;margin:0">
+        <span style="color:#1a73e8">&#x2691;</span> Warranty (parts/material under coverage)
+      </label>
+    </div>
     <div class="fg full"><label>Notes</label><textarea name="notes" placeholder="Service notes, part numbers, follow-up items&hellip;">${esc(o.notes||'')}</textarea></div>
   </div><div class="mact"><button type="button" onclick="closeModal()">Cancel</button><button type="submit" class="btn-primary">${isEdit?'Save Changes':'Add Work Order'}</button></div></form></div></div>`;
 }
@@ -1029,7 +1091,8 @@ function renderPeekPane(){
   if(!id)return `<aside class="peek-pane"><div class="peek-empty">Hover a row and press Space to peek · Esc to close</div></aside>`;
   const o=S.orders.find(x=>x.id===id);
   if(!o)return `<aside class="peek-pane"><div class="peek-empty">WO not found</div></aside>`;
-  const sc=SC(o.status)||'#6b7280',pmc=pmColor(o.pm),tc=TC[o.type]||'#6b7280';
+  const dispStatus=displayStatus(o);
+  const sc=SC(dispStatus)||'#6b7280',pmc=pmColor(o.pm),tc=TC[o.type]||'#6b7280';
   const hist=(o.history||[]).slice().reverse().slice(0,12);
   const histHtml=hist.length?hist.map(e=>`<div class="peek-history-row"><div class="peek-history-ts">${esc(fmtTs(e.ts))}</div><div class="peek-history-act"><strong>${esc(e.action)}</strong>${e.detail?` — <span style="color:var(--text1)">${esc(e.detail)}</span>`:''}</div></div>`).join(''):'<div style="color:var(--text2);font-size:10px">No history yet</div>';
   return `<aside class="peek-pane">
@@ -1040,12 +1103,13 @@ function renderPeekPane(){
         <button class="icon-btn" onclick="clearPeek()" title="Close (Esc)">&#x2715;</button>
       </div>
     </div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap">${badge(o.status,sc)}${badge(o.priority,PC(o.priority))}${o.pm?badge(o.pm,pmc):''}${o.type?badge(o.type,tc):''}</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${badge(dispStatus,sc)}${o.emergency?'<span class="wo-flag wo-flag-emerg" title="Emergency">&#x2691;</span>':''}${o.warranty?'<span class="wo-flag wo-flag-warranty" title="Warranty">&#x2691;</span>':''}${o.pm?badge(o.pm,pmc):''}${o.type?badge(o.type,tc):''}</div>
     <div class="peek-row"><div class="peek-label">Address</div><div class="peek-val">${o.address?`<span class="peek-link" onclick="openMaps('${ea(o.address)}')" title="Open in Google Maps">${esc(o.address)}</span>`:'<span style="color:var(--text2)">—</span>'}</div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
       <div class="peek-row"><div class="peek-label">Phone</div><div class="peek-val">${o.phone?`<span class="peek-link" onclick="copyPhone('${ea(o.phone)}',event)" title="Click to copy">${esc(o.phone)}</span>`:'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Tech</div><div class="peek-val">${esc(o.tech)||'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Property ID</div><div class="peek-val">${esc(o.propertyId)||'<span style="color:var(--text2)">—</span>'}</div></div>
+      <div class="peek-row"><div class="peek-label">City</div><div class="peek-val">${esc(o.city)||'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Bid</div><div class="peek-val">${esc(o.bidAmount)||'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Created</div><div class="peek-val">${fmtDate(o.dateCreated)}</div></div>
       <div class="peek-row"><div class="peek-label">Service Date</div><div class="peek-val">${o.dateOfService?fmtDate(o.dateOfService):'<span style="color:var(--text2)">—</span>'}</div></div>
@@ -1064,10 +1128,13 @@ function render(){
 
   const hidCls=k=>isColHidden(v,k)?' col-hidden':'';
   const tableRows=rows.map(o=>{
-    const sc=SC(o.status)||'#6b7280',tc=TC[o.type]||'#6b7280',pmc=pmColor(o.pm),dc=dateClass(o.dateCreated);
+    const dispStatus=displayStatus(o);
+    const sc=SC(dispStatus)||'#6b7280',tc=TC[o.type]||'#6b7280',pmc=pmColor(o.pm),dc=dateClass(o.dateCreated);
     const hasNotes=o.notes&&o.notes.trim().length>0;
     const notesIcon=`<span class="notes-wrap" onclick="event.stopPropagation()"><span class="ni${hasNotes?' on':''}" ${hasNotes?`data-notes="${ea(o.notes)}" onmouseenter="showNote(event,this.dataset.notes)" onmouseleave="hideNote()"`:''}>&#x1F4CB;</span></span>`;
-    const priColor=PC(o.priority);const ph=priColor.replace('#','');const prr=parseInt(ph.substr(0,2),16),prg=parseInt(ph.substr(2,2),16),prb=parseInt(ph.substr(4,2),16);const rowStyle=`background:rgba(${prr},${prg},${prb},0.08)`;
+    const warrantyHL=o.warranty&&(S.settings.warrantyDisplay==='highlight');
+    const rowStyle=warrantyHL?'background:rgba(26,115,232,0.14)':'';
+    const flagsHtml=`${o.emergency?`<span class="wo-flag wo-flag-emerg" title="Emergency — same-day/after-hours fee approved" onclick="event.stopPropagation();toggleFlag('${o.id}','emergency')">&#x2691;</span>`:''}${o.warranty&&S.settings.warrantyDisplay!=='highlight'?`<span class="wo-flag wo-flag-warranty" title="Warranty — parts/material under coverage" onclick="event.stopPropagation();toggleFlag('${o.id}','warranty')">&#x2691;</span>`:''}`;
 
     const bulkCell=S.bulkMode&&!isTrash?`<td class="bulk-check-col"><input type="checkbox" class="bulk-check" ${S.bulkSelected.has(o.id)?'checked':''} onclick="event.stopPropagation();bulkToggle('${o.id}')"></td>`:'';
 
@@ -1080,12 +1147,12 @@ function render(){
       <td class="${hidCls('bidAmount')}"><div class="tdi">${esc(o.bidAmount)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('phone')}"><div class="tdi">${esc(o.phone)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('tech')}"><div class="tdi">${esc(o.tech)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
-      <td class="${hidCls('status')}"><div class="tdi">${badge(o.status,sc)}</div></td>
+      <td class="${hidCls('status')}"><div class="tdi">${badge(o.status,SC(o.status))}</div></td>
       <td class="${hidCls('dateCreated')}"><div class="tdi"><span class="${dc}">${fmtDate(o.dateCreated)}</span></div></td>
       <td><div class="act-cell"><button class="icon-btn" onclick="restore('${o.id}')" title="Restore">&#x21A9; Restore</button><button class="icon-btn del" onclick="hardDelete('${o.id}')" title="Delete permanently">&#x2715;</button></div></td>
     </tr>`;
 
-    const woCell=edCell(o,'id',`<div style="display:flex;align-items:center;gap:4px"><strong>${esc(o.id)}</strong>${notesIcon}</div>`,'text');
+    const woCell=edCell(o,'id',`<div style="display:flex;align-items:center;gap:4px"><strong>${esc(o.id)}</strong>${flagsHtml}${notesIcon}</div>`,'text');
     const propCell=edCell(o,'propertyId',esc(o.propertyId)||`<span style="color:var(--text2)">&#x2014;</span>`,'text');
     const pmCell=edCell(o,'pm',badge(o.pm,pmc),'sel-pm');
     const typeCell=edCell(o,'type',badge(o.type,tc),'sel-type');
@@ -1097,7 +1164,10 @@ function render(){
     const phoneCell=phoneEditing?edCell(o,'phone',esc(o.phone)||`<span style="color:var(--text2)">&#x2014;</span>`,'text'):(o.phone?`<td><div class="tdi phone-cell-inner"><span class="phone-link" onclick="event.stopPropagation();copyPhone('${ea(o.phone)}',event)" title="Click to copy digits">${esc(o.phone)}</span><span class="phone-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','phone')" title="Edit">&#x270E;</span></div></td>`:`<td class="editable" onclick="startEdit('${o.id}','phone')"><div class="tdi"><span style="color:var(--text2)">&#x2014;</span></div></td>`);
     const techCell=edCell(o,'tech',esc(o.tech)||`<span style="color:var(--text2)">&#x2014;</span>`,'sel-tech');
     const statusEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='status';
-    const statusCell=statusEditing?edCell(o,'status',badge(o.status,sc),'sel-status'):`<td><div class="tdi status-cell-inner"><span class="status-cycle" onclick="event.stopPropagation();cycleStatus('${o.id}',event)" title="Click: next status · Shift+click: previous">${badge(o.status,sc)}</span><span class="status-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','status')" title="Pick from list">&#x25BE;</span></div></td>`;
+    const statusLocked=isInv||isPaid;
+    const statusCell=statusLocked
+      ?`<td><div class="tdi">${badge(dispStatus,sc)}</div></td>`
+      :(statusEditing?edCell(o,'status',badge(o.status,sc),'sel-status'):`<td><div class="tdi status-cell-inner"><span class="status-cycle" onclick="event.stopPropagation();cycleStatus('${o.id}',event)" title="Click: next status · Shift+click: previous">${badge(o.status,sc)}</span><span class="status-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','status')" title="Pick from list">&#x25BE;</span></div></td>`);
     const dateCell=edCell(o,'dateCreated',`<span class="${dc}">${fmtDate(o.dateCreated)}</span>`,'date');
 
     let acts='';
@@ -1143,11 +1213,6 @@ function render(){
       <div class="header-right">
         <button class="import-btn" onclick="checkForImports()">&#x1F4E5; Import from Extension</button>
         <button class="sync-btn" onclick="syncWorkbook()">&#x21BB; Sync Workbook</button>
-        <button onclick="openManage('pms')">&#x2699; PMs</button>
-        <button onclick="openManage('techs')">&#x2699; Techs</button>
-        <button onclick="openManage('statuses')">&#x2699; Statuses</button>
-        <button onclick="openManage('priorities')">&#x2699; Priorities</button>
-        <button onclick="openManage('types')">&#x2699; Types</button>
         <button onclick="openSettings()">&#x2699; Settings</button>
         <button onclick="toggleBulkMode()" style="${S.bulkMode?'background:rgba(167,139,250,.25);border-color:rgba(167,139,250,.5);color:#a78bfa':''}">&#x2611; Bulk</button>
         <button onclick="togglePeek()" title="Open peek pane (hover row + Space · Esc to close)" style="${S.peekId?'background:rgba(167,139,250,.25);border-color:rgba(167,139,250,.5);color:#a78bfa':''}">&#x1F50D; Peek</button>

@@ -1,19 +1,26 @@
 """
 sync_to_lookup.py
-Reads work orders from wo-data.json and writes them into the
+Reads work orders from wo-data.json and writes Invoiced-tab orders into the
 'Invoice Import' sheet of RazorSync_Invoice_Tracker.xlsx.
 
-Layout (RazorSync-import-ready):
+Layout (RazorSync-import-ready, 7 columns):
     A: Invoice #     - blank (filled from RazorSync after invoice creation)
     B: Customer Name - 'American Homes 4 Rent' (AMH), 'Main Street Renewal' (MSR), or pm verbatim
     C: Service Address
-    D: Date          - blank
-    E: Item/Service  - blank (manual selection from Service Items library dropdown)
-    F: Unit Price    - bidAmount when present, else blank
-    G: Tax           - formula auto-fills from library by Item/Service
-    H: Memo          - 'WO #' for non-AMH; 'WO # | PropID: NC#######' for AMH
+    D: Date          - blank (manual)
+    E: Item/Service  - blank dropdown (Service Items library)
+    F: Unit Price    - VLOOKUP formula returning Price from Service Items (column C); blank when E blank
+    G: Memo          - 'WO #######' for non-AMH; 'WO ####### | NCXXXX' for AMH
 
-Existing data rows are cleared before write. The 'Service Items' library tab is untouched.
+Per-WO grouping:
+    - Anchor row: A-D + G populated; E and F left blank for the user to pick first item.
+    - One blank separator row inserted after each WO group.
+    - User adds additional service-item rows above the separator as needed; data
+      validation and the F-column VLOOKUP already extend across the sheet.
+
+Only WOs whose tab == 'invoiced' (and not deleted) are written. The
+'Service Items' library tab and existing data validation/formulas in the
+target row range are preserved on rewrite.
 
 Usage:
     python sync_to_lookup.py [path/to/RazorSync_Invoice_Tracker.xlsx]
@@ -41,6 +48,17 @@ CUSTOMER_MAP = {
     "MSR": "Main Street Renewal",
 }
 
+# Range of rows the script will clear and rewrite each sync. Anything below
+# this range is left alone (defensive in case user has notes far down).
+WRITE_ROW_MAX = 2000
+
+CELL_FONT   = Font(name="Arial", size=10)
+ALIGN_LEFT  = Alignment(horizontal="left", vertical="center")
+ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
+THIN        = Side(border_style="thin", color="BFBFBF")
+CELL_BORDER = Border(left=THIN, right=THIN, bottom=THIN)
+
+
 def resolve_workbook(argv_path):
     if argv_path:
         p = Path(argv_path)
@@ -61,24 +79,25 @@ def resolve_workbook(argv_path):
         "Run: python sync_to_lookup.py \"C:\\path\\to\\RazorSync_Invoice_Tracker.xlsx\""
     )
 
-CELL_FONT   = Font(name="Arial", size=10)
-ALIGN_LEFT  = Alignment(horizontal="left", vertical="center")
-ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
-THIN        = Side(border_style="thin", color="BFBFBF")
-CELL_BORDER = Border(left=THIN, right=THIN, bottom=THIN)
 
 def load_orders():
     if not WO_JSON.exists():
         sys.exit("Cannot find wo-data.json at:\n  " + str(WO_JSON))
     raw    = json.loads(WO_JSON.read_text(encoding="utf-8"))
     data   = json.loads(raw["wo_data"])
-    orders = [o for o in data.get("orders", []) if not o.get("deleted", False)]
-    print("Loaded " + str(len(orders)) + " active work orders from wo-data.json")
-    return orders
+    all_orders = data.get("orders", [])
+    invoiced = [
+        o for o in all_orders
+        if not o.get("deleted", False) and o.get("tab") == "invoiced"
+    ]
+    print("Loaded " + str(len(all_orders)) + " orders total; " + str(len(invoiced)) + " in Invoiced tab")
+    return invoiced
+
 
 def customer_name(pm):
     pm = (pm or "").strip()
     return CUSTOMER_MAP.get(pm, pm)
+
 
 def memo_for(o):
     wo = (o.get("id") or "").strip()
@@ -89,21 +108,19 @@ def memo_for(o):
     if o.get("pm") == "AMH":
         pid = (o.get("propertyId") or "").strip()
         if pid:
-            return (base + " | PropID: " + pid) if base else "PropID: " + pid
+            return (base + " | " + pid) if base else pid
     return base
 
-def parse_bid(v):
-    if v in (None, ""):
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip().replace("$", "").replace(",", "")
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
+
+def style_row(ws, row):
+    for c in range(1, 8):
+        cell = ws.cell(row, c)
+        cell.font   = CELL_FONT
+        cell.border = CELL_BORDER
+        cell.alignment = ALIGN_RIGHT if c == 6 else ALIGN_LEFT
+    ws.cell(row, 4).number_format = "MM/DD/YYYY"
+    ws.cell(row, 6).number_format = "$#,##0.00;($#,##0.00);-"
+
 
 def write_invoice_import(orders, workbook_path):
     wb = load_workbook(workbook_path)
@@ -111,37 +128,48 @@ def write_invoice_import(orders, workbook_path):
         sys.exit("Sheet '" + SHEET_NAME + "' not found in " + workbook_path.name)
     ws = wb[SHEET_NAME]
 
-    # Clear existing values in cols A-H from row 2 down (preserve formatting and DV).
+    # Clear values (cols A-G) for the managed range. The F-column VLOOKUP
+    # formula is restored below so user-inserted rows always pick up Unit Price.
     last_row = max(ws.max_row, 2)
-    for r in range(2, last_row + 1):
-        for c in range(1, 9):
+    for r in range(2, max(last_row, WRITE_ROW_MAX) + 1):
+        for c in range(1, 8):
             ws.cell(r, c).value = None
 
-    for ri, o in enumerate(orders, start=2):
-        ws.cell(ri, 1).value = ""                                  # A Invoice #
-        ws.cell(ri, 2).value = customer_name(o.get("pm", ""))      # B Customer Name
-        ws.cell(ri, 3).value = o.get("address", "")                # C Service Address
-        ws.cell(ri, 4).value = ""                                  # D Date (blank)
-        ws.cell(ri, 5).value = ""                                  # E Item/Service (manual)
-        bid = parse_bid(o.get("bidAmount"))
-        ws.cell(ri, 6).value = bid if bid is not None else None    # F Unit Price (override)
-        ws.cell(ri, 7).value = (
-            "=IFERROR(IF(E" + str(ri) + "=\"\",\"\",VLOOKUP(E" + str(ri) +
-            ",'Service Items'!A:D,4,FALSE)),\"\")"
-        )                                                          # G Tax formula
-        ws.cell(ri, 8).value = memo_for(o)                         # H Memo
+    row = 2
 
-        for c in range(1, 9):
-            cell = ws.cell(ri, c)
-            cell.font   = CELL_FONT
-            cell.border = CELL_BORDER
-            cell.alignment = ALIGN_RIGHT if c == 6 else ALIGN_LEFT
-        ws.cell(ri, 4).number_format = "MM/DD/YYYY"
-        ws.cell(ri, 6).number_format = "$#,##0.00;($#,##0.00);-"
+    def fill_unit_price_formula(r):
+        ws.cell(r, 6).value = (
+            "=IFERROR(IF(E" + str(r) + "=\"\",\"\","
+            "VLOOKUP(E" + str(r) + ",'Service Items'!A:C,3,FALSE)),\"\")"
+        )
+    for o in orders:
+        # Anchor row: header fields + memo. E and F left blank for first item pick.
+        ws.cell(row, 1).value = ""                                  # A Invoice #
+        ws.cell(row, 2).value = customer_name(o.get("pm", ""))      # B Customer Name
+        ws.cell(row, 3).value = o.get("address", "")                # C Service Address
+        ws.cell(row, 4).value = ""                                  # D Date
+        ws.cell(row, 5).value = ""                                  # E Item/Service
+        fill_unit_price_formula(row)                                # F Unit Price (VLOOKUP)
+        ws.cell(row, 7).value = memo_for(o)                          # G Memo
+        style_row(ws, row)
+        row += 1
+
+        # Blank separator row.
+        fill_unit_price_formula(row)
+        style_row(ws, row)
+        row += 1
+
+    # Restore VLOOKUP across the rest of the managed range so any row the user
+    # inserts auto-fills Unit Price from the Service Items library.
+    for r in range(row, WRITE_ROW_MAX + 1):
+        fill_unit_price_formula(r)
+        style_row(ws, r)
 
     wb.save(workbook_path)
-    print("Done - " + str(len(orders)) + " rows written to '" + SHEET_NAME + "' in " + workbook_path.name)
+    print("Done - " + str(len(orders)) + " WO group(s) written to '" + SHEET_NAME + "' in " + workbook_path.name)
     print("Reminder: pick Item/Service per row, then fill column A (Invoice #) after RazorSync assigns numbers.")
+    print("Insert additional rows above the blank separator to add more service items per WO.")
+
 
 if __name__ == "__main__":
     argv_path = sys.argv[1] if len(sys.argv) > 1 else None
