@@ -201,9 +201,9 @@ def _parse_other_block(text):
         parts = re.split(r"(?=\$\d)", segment)
         for part in parts:
             part = part.strip()
-            m = re.match(r"\$(\d+(?:\.\d+)?)\s+(.+)", part)
+            m = re.match(r"\$([\d,]+(?:\.\d+)?)\s+(.+)", part)
             if m:
-                price = float(m.group(1))
+                price = float(m.group(1).replace(",", ""))
                 name  = m.group(2).strip()
                 # Truncate at next $ sign if present
                 name = re.split(r"\s*\$\d", name)[0].strip()
