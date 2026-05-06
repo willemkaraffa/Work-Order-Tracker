@@ -246,11 +246,7 @@ const ALL_COLS=[
   {key:'phone',label:'Phone'},
   {key:'tech',label:'Tech'},
   {key:'status',label:'Status'},
-  {key:'dateCreated',label:'Date'},
-  {key:'dateOfService',label:'Svc Date'},
-  {key:'emergency',label:'Emerg'},
-  {key:'warranty',label:'Warranty'},
-  {key:'portalLink',label:'Portal'}
+  {key:'dateCreated',label:'Date'}
 ];
 
 let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIES],types:[...DTYPES],techs:[...DTECHS],
@@ -323,11 +319,7 @@ async function load(){
     o.phone=formatPhone(o.phone);
     if(!o.propertyId)o.propertyId='';
     if(o.city===undefined)o.city='';
-    if(o.emergency===undefined)o.emergency=false;
-    if(o.warranty===undefined)o.warranty=false;
     if(!o.bidAmount)o.bidAmount='';
-    if(o.dateOfService===undefined)o.dateOfService='';
-    if(o.portalLink===undefined)o.portalLink='';
     if(!Array.isArray(o.history))o.history=[];
   });
   if(!loaded)S.orders=SAMPLE.map(o=>({...o}));
@@ -604,12 +596,8 @@ function saveOrder(e){
     address:f.address.value.trim(),phone:formatPhone(f.phone.value.trim()),
     tech:f.tech.value,status:f.status.value,priority:f.priority.value,
     notes:f.notes.value.trim(),dateCreated:f.dateCreated.value,
-    dateOfService:f.dateOfService?f.dateOfService.value:'',
-    portalLink:f.portalLink?f.portalLink.value.trim():'',
     propertyId:f.propertyId?f.propertyId.value.trim():'',
     bidAmount:f.bidAmount?f.bidAmount.value.trim():'',
-    emergency:f.emergency?!!f.emergency.checked:false,
-    warranty:f.warranty?!!f.warranty.checked:false,
     city:f.city?f.city.value.trim():''
   };
   if(data.tech&&!S.techs.includes(data.tech))S.techs.push(data.tech);
@@ -804,7 +792,7 @@ function dragEnd(){_dragType=null;_dragIdx=null;document.querySelectorAll('.drag
 
 async function exportCSV(){
   const rows=filtered();
-  const cols=['id','propertyId','pm','type','address','city','bidAmount','phone','tech','status','priority','emergency','warranty','dateCreated','dateOfService','portalLink','tab','notes'];
+  const cols=['id','propertyId','pm','type','address','city','bidAmount','phone','tech','status','priority','dateCreated','tab','notes'];
   const lines=[cols.join(','),...rows.map(r=>cols.map(c=>`"${(r[c]||'').replace(/"/g,'""')}"`).join(','))];
   const csv=lines.join('\n');
   if(window.electronExport){await window.electronExport.saveCsv(csv);}
@@ -864,8 +852,7 @@ function confirmImport(){
       priority:item.priority||'Medium',notes:item.notes||'',
       dateCreated:item.dateCreated||new Date().toISOString().slice(0,10),
       tab:'active',deleted:false,propertyId:item.propertyId||'',bidAmount:item.bidAmount||'',
-      dateOfService:item.dateOfService||'',portalLink:item.portalLink||'',city:item.city||'',
-      emergency:!!item.emergency,warranty:!!item.warranty};
+      city:item.city||'',portalLink:item.portalLink||'',bidItems:item.bidItems||[]};
     if(wo.tech&&!S.techs.includes(wo.tech))S.techs.push(wo.tech);
     S.orders.push(wo);
   });
@@ -1053,14 +1040,6 @@ function renderSettingsModal(){
       <label for="optStickyWo" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Sticky WO# column when scrolling horizontally</label>
     </div>
     <div class="fg" style="margin-bottom:10px">
-      <label>Warranty Display</label>
-      <div style="display:flex;gap:6px">
-        <button class="${(s.warrantyDisplay||'flag')==='flag'?'btn-primary':''}" onclick="setSetting('warrantyDisplay','flag')">Blue Flag Icon</button>
-        <button class="${s.warrantyDisplay==='highlight'?'btn-primary':''}" onclick="setSetting('warrantyDisplay','highlight')">Row Highlight</button>
-      </div>
-      <p style="font-size:9px;color:var(--text2);margin-top:3px">How to mark work orders flagged as Warranty.</p>
-    </div>
-    <div class="fg" style="margin-bottom:10px">
       <label>Visible Columns (per tab)</label>
       <div style="display:flex;gap:4px;margin-bottom:5px;flex-wrap:wrap">
         ${['active','invoiced','paid','trash'].map(t=>`<button class="${S.view===t?'btn-primary':''}" onclick="S.view='${t}';render()">${t}</button>`).join('')}
@@ -1096,18 +1075,6 @@ function renderOrderModal(){
     <div class="fg"><label>Status</label><select name="status">${S.statuses.map(s=>`<option${s===o.status?' selected':''}>${esc(s)}</option>`).join('')}</select></div>
     <div class="fg"><label>Priority</label><select name="priority">${S.priorities.map(p=>`<option${p===o.priority?' selected':''}>${esc(p)}</option>`).join('')}</select></div>
     <div class="fg"><label>Date Created</label><input type="date" name="dateCreated" value="${esc(o.dateCreated||new Date().toISOString().slice(0,10))}"></div>
-    <div class="fg"><label>Date of Service</label><input type="date" name="dateOfService" value="${esc(o.dateOfService||'')}"></div>
-    <div class="fg full"><label>Portal Link</label><input type="text" name="portalLink" value="${esc(o.portalLink||'')}" placeholder="https://portal.example.com/wo/12345"></div>
-    <div class="fg full" style="flex-direction:row;gap:18px;align-items:center">
-      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0);cursor:pointer">
-        <input type="checkbox" name="emergency" ${o.emergency?'checked':''} style="width:auto;margin:0">
-        <span style="color:#ef4444">&#x2691;</span> Emergency (same-day / after-hours fee approved)
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0);cursor:pointer">
-        <input type="checkbox" name="warranty" ${o.warranty?'checked':''} style="width:auto;margin:0">
-        <span style="color:#1a73e8">&#x2691;</span> Warranty (parts/material under coverage)
-      </label>
-    </div>
     <div class="fg full"><label>Notes</label><textarea name="notes" placeholder="Service notes, part numbers, follow-up items&hellip;">${esc(o.notes||'')}</textarea></div>
   </div><div class="mact"><button type="button" onclick="closeModal()">Cancel</button><button type="submit" class="btn-primary">${isEdit?'Save Changes':'Add Work Order'}</button></div></form></div></div>`;
 }
@@ -1138,9 +1105,7 @@ function renderPeekPane(){
       <div class="peek-row"><div class="peek-label">City</div><div class="peek-val">${esc(o.city)||'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Bid</div><div class="peek-val">${esc(o.bidAmount)||'<span style="color:var(--text2)">—</span>'}</div></div>
       <div class="peek-row"><div class="peek-label">Created</div><div class="peek-val">${fmtDate(o.dateCreated)}</div></div>
-      <div class="peek-row"><div class="peek-label">Service Date</div><div class="peek-val">${o.dateOfService?fmtDate(o.dateOfService):'<span style="color:var(--text2)">—</span>'}</div></div>
     </div>
-    ${o.portalLink?`<div class="peek-row"><div class="peek-label">Portal</div><div class="peek-val"><span class="peek-link" onclick="if(window.shell)window.shell.openExternal('${ea(o.portalLink)}');else window.open('${ea(o.portalLink)}','_blank')">${esc(o.portalLink)}</span></div></div>`:''}
     <div class="peek-row"><div class="peek-label">Notes</div><div class="peek-notes">${o.notes?esc(o.notes):'<span style="color:var(--text2)">No notes</span>'}</div></div>
     <div class="peek-row"><div class="peek-label">Recent History</div><div>${histHtml}</div></div>
   </aside>`;
@@ -1177,10 +1142,6 @@ function render(){
       <td class="${hidCls('tech')}"><div class="tdi">${esc(o.tech)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('status')}"><div class="tdi">${badge(o.status,SC(o.status))}</div></td>
       <td class="${hidCls('dateCreated')}"><div class="tdi"><span class="${dc}">${fmtDate(o.dateCreated)}</span></div></td>
-      <td class="${hidCls('dateOfService')}"><div class="tdi">${o.dateOfService?fmtDate(o.dateOfService):'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
-      <td class="${hidCls('emergency')}"><div class="tdi">${o.emergency?'<span class="wo-flag wo-flag-emerg">&#x2691;</span>':''}</div></td>
-      <td class="${hidCls('warranty')}"><div class="tdi">${o.warranty?'<span class="wo-flag wo-flag-warranty">&#x2691;</span>':''}</div></td>
-      <td class="${hidCls('portalLink')}"><div class="tdi">${o.portalLink?`<span style="color:#6ba8f7;font-size:10px">&#x1F517;</span>`:'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td><div class="act-cell"><button class="icon-btn" onclick="restore('${o.id}')" title="Restore">&#x21A9; Restore</button><button class="icon-btn del" onclick="hardDelete('${o.id}')" title="Delete permanently">&#x2715;</button></div></td>
     </tr>`;
 
@@ -1202,11 +1163,6 @@ function render(){
       ?`<td><div class="tdi">${badge(dispStatus,sc)}</div></td>`
       :(statusEditing?edCell(o,'status',badge(o.status,sc),'sel-status'):`<td><div class="tdi status-cell-inner"><span class="status-cycle" onclick="event.stopPropagation();cycleStatus('${o.id}',event)" title="Click: next status · Shift+click: previous">${badge(o.status,sc)}</span><span class="status-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','status')" title="Pick from list">&#x25BE;</span></div></td>`);
     const dateCell=edCell(o,'dateCreated',`<span class="${dc}">${fmtDate(o.dateCreated)}</span>`,'date');
-    const svcDateCell=edCell(o,'dateOfService',o.dateOfService?fmtDate(o.dateOfService):`<span style="color:var(--text2)">&#x2014;</span>`,'date');
-    const emergCell=`<td><div class="tdi">${o.emergency?`<span class="wo-flag wo-flag-emerg" title="Emergency" onclick="event.stopPropagation();toggleFlag('${o.id}','emergency')">&#x2691;</span>`:''}</div></td>`;
-    const warrantyCell=`<td><div class="tdi">${o.warranty&&S.settings.warrantyDisplay!=='highlight'?`<span class="wo-flag wo-flag-warranty" title="Warranty" onclick="event.stopPropagation();toggleFlag('${o.id}','warranty')">&#x2691;</span>`:o.warranty?'<span style="color:#1a73e8;font-size:10px">HL</span>':''}</div></td>`;
-    const portalCell=o.portalLink?`<td><div class="tdi"><span class="peek-link" style="font-size:10px" onclick="event.stopPropagation();if(window.shell)window.shell.openExternal('${ea(o.portalLink)}');else window.open('${ea(o.portalLink)}','_blank')" title="${ea(o.portalLink)}">&#x1F517;</span></div></td>`:`<td><div class="tdi"><span style="color:var(--text2)">&#x2014;</span></div></td>`;
-
     let acts='';
     const histBtn=`<button class="icon-btn" onclick="openHistory('${o.id}')" title="View history">&#x231A;</button>`;
     if(isActive)acts=`<button class="inv-btn" onclick="sendToInvoiced('${o.id}')" title="Send to Invoiced">Invoice &#x2192;</button><button class="icon-btn" onclick="openEdit('${o.id}')" title="Edit">&#x270E;</button>${histBtn}<button class="icon-btn del" onclick="softDelete('${o.id}')" title="Trash">&#x1F5D1;</button>`;
@@ -1218,9 +1174,9 @@ function render(){
       if(/^<td\s+class="/.test(html)){return html.replace(/^<td\s+class="/,'<td class="col-hidden ');}
       return html.replace(/^<td(\s|>)/, '<td class="col-hidden"$1');
     };
-    const woC=wrap(woCell,'id'),propC=wrap(propCell,'propertyId'),pmC=wrap(pmCell,'pm'),typeC=wrap(typeCell,'type'),addrC=wrap(addrTd,'address'),cityC=wrap(cityCell,'city'),bidC=wrap(bidCell,'bidAmount'),phoneC=wrap(phoneCell,'phone'),techC=wrap(techCell,'tech'),statusC=wrap(statusCell,'status'),dateC=wrap(dateCell,'dateCreated'),svcC=wrap(svcDateCell,'dateOfService'),emergC=wrap(emergCell,'emergency'),warrC=wrap(warrantyCell,'warranty'),portC=wrap(portalCell,'portalLink');
+    const woC=wrap(woCell,'id'),propC=wrap(propCell,'propertyId'),pmC=wrap(pmCell,'pm'),typeC=wrap(typeCell,'type'),addrC=wrap(addrTd,'address'),cityC=wrap(cityCell,'city'),bidC=wrap(bidCell,'bidAmount'),phoneC=wrap(phoneCell,'phone'),techC=wrap(techCell,'tech'),statusC=wrap(statusCell,'status'),dateC=wrap(dateCell,'dateCreated');
     const peekedCls=S.peekId===o.id?' row-peeked':'';
-    return`<tr data-priority="${esc(o.priority)}" data-id="${esc(o.id)}" class="${peekedCls.trim()}" style="${rowStyle}" onmouseenter="setHoveredRow('${o.id}')" onmouseleave="clearHoveredRow('${o.id}')">${bulkCell}${woC}${propC}${pmC}${typeC}${addrC}${cityC}${bidC}${phoneC}${techC}${statusC}${dateC}${svcC}${emergC}${warrC}${portC}<td><div class="act-cell">${acts}</div></td></tr>`;
+    return`<tr data-priority="${esc(o.priority)}" data-id="${esc(o.id)}" class="${peekedCls.trim()}" style="${rowStyle}" onmouseenter="setHoveredRow('${o.id}')" onmouseleave="clearHoveredRow('${o.id}')">${bulkCell}${woC}${propC}${pmC}${typeC}${addrC}${cityC}${bidC}${phoneC}${techC}${statusC}${dateC}<td><div class="act-cell">${acts}</div></td></tr>`;
   }).join('');
 
   const emptyMsg=isTrash?'Trash is empty':`No work orders in ${v}`;
@@ -1307,13 +1263,9 @@ function render(){
           <th onclick="sort('tech',event)" class="${S.sortKeys.find(k=>k.col==='tech')?'sort-active':''} ${isColHidden(v,'tech')?'col-hidden':''}" style="min-width:78px">Tech${arrow('tech')}</th>
           <th onclick="sort('status',event)" class="${S.sortKeys.find(k=>k.col==='status')?'sort-active':''} ${isColHidden(v,'status')?'col-hidden':''}" style="min-width:130px">Status${arrow('status')}</th>
           <th onclick="sort('dateCreated',event)" class="${S.sortKeys.find(k=>k.col==='dateCreated')?'sort-active':''} ${isColHidden(v,'dateCreated')?'col-hidden':''}" style="min-width:70px">Date${arrow('dateCreated')}</th>
-          <th onclick="sort('dateOfService',event)" class="${S.sortKeys.find(k=>k.col==='dateOfService')?'sort-active':''} ${isColHidden(v,'dateOfService')?'col-hidden':''}" style="min-width:70px">Svc Date${arrow('dateOfService')}</th>
-          <th class="${isColHidden(v,'emergency')?'col-hidden':''}" style="min-width:50px">Emerg</th>
-          <th class="${isColHidden(v,'warranty')?'col-hidden':''}" style="min-width:60px">Warr</th>
-          <th onclick="sort('portalLink',event)" class="${S.sortKeys.find(k=>k.col==='portalLink')?'sort-active':''} ${isColHidden(v,'portalLink')?'col-hidden':''}" style="min-width:90px">Portal${arrow('portalLink')}</th>
           <th style="min-width:${isActive?'185px':isInv?'190px':isPaid?'135px':'95px'}"></th>
         </tr></thead>
-        <tbody>${tableRows||`<tr><td colspan="${(S.bulkMode&&!isTrash?1:0)+16}" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
+        <tbody>${tableRows||`<tr><td colspan="${(S.bulkMode&&!isTrash?1:0)+12}" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
       </table></div>
       <div class="footer-bar">
         <span>
