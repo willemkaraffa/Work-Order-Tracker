@@ -241,12 +241,28 @@ ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
     return resolve({ ok: false, out: '', err: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings -> RazorSync Invoice Tracker Workbook.` });
   }
 
+  // Try 'python' first; fall back to 'python3' (common on Windows where the
+  // Store stub redirects or the user installed via python.org with 'python3').
   let out = '', err = '';
-  const py = spawn('python', [scriptPath, wbPath], { windowsHide: true });
-  py.stdout.on('data', d => { out += d.toString(); });
-  py.stderr.on('data', d => { err += d.toString(); });
-  py.on('close',  code  => resolve({ ok: code === 0, out, err }));
-  py.on('error',  e     => resolve({ ok: false, out, err: e.message }));
+  function trySpawn(cmd) {
+    const py = spawn(cmd, [scriptPath, wbPath], { windowsHide: true });
+    py.stdout.on('data', d => { out += d.toString(); });
+    py.stderr.on('data', d => { err += d.toString(); });
+    py.on('close', code => resolve({ ok: code === 0, out, err }));
+    py.on('error', e => {
+      if (cmd === 'python' && e.code === 'ENOENT') {
+        // 'python' not found — retry with 'python3'
+        out = ''; err = '';
+        trySpawn('python3');
+      } else {
+        const hint = e.code === 'ENOENT'
+          ? 'Python not found. Install Python 3 and ensure "python" or "python3" is on your PATH.'
+          : e.message;
+        resolve({ ok: false, out, err: hint });
+      }
+    });
+  }
+  trySpawn('python');
 }));
 
 ipcMain.handle('choose-workbook', async (_e, currentPath) => {

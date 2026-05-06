@@ -195,12 +195,27 @@ const SAMPLE=[
   {id:'WO-001',pm:'AMH',type:'HVAC',address:'412 Hillcrest Dr, Durham, NC',phone:'',tech:'Daniel',status:'Open',priority:'High',notes:'Thermostat replaced.',dateCreated:'2025-04-21',tab:'active',deleted:false,propertyId:'',bidAmount:''},
   {id:'WO-002',pm:'MSR',type:'Plumbing',address:'88 Lakeview Ct, Raleigh, NC',phone:'',tech:'Andrew',status:'Parts Pending',priority:'High',notes:'Waiting on part.',dateCreated:'2025-04-14',tab:'active',deleted:false,propertyId:'',bidAmount:''},
 ];
-function buildStatDefs(){
+function buildStatCounts(){
+  // Single pass over all orders; returns {statusCounts, invoiced, paid, priorityCounts, trash}
+  const sc={},pc={},counts={invoiced:0,paid:0,trash:0};
+  S.statuses.forEach(s=>{sc[s]=0;});
+  S.priorities.forEach(p=>{pc[p]=0;});
+  for(const o of S.orders){
+    if(o.deleted){counts.trash++;continue;}
+    if(o.tab==='invoiced'){counts.invoiced++;}
+    else if(o.tab==='paid'){counts.paid++;}
+    else if(o.tab==='active'){if(sc[o.status]!==undefined)sc[o.status]++;}
+    if(pc[o.priority]!==undefined)pc[o.priority]++;
+  }
+  return{sc,pc,counts};
+}
+function buildStatDefs(statCounts){
+  const{sc,pc,counts}=statCounts;
   const defs=[];
-  S.statuses.forEach(s=>defs.push({label:s,color:SC(s),f:o=>!o.deleted&&o.tab==='active'&&o.status===s}));
-  defs.push({label:'Invoiced',color:S.statusColors['Invoiced']||'#6ba8f7',f:o=>!o.deleted&&o.tab==='invoiced'});
-  defs.push({label:'Paid',color:S.statusColors['Paid']||'#10b981',f:o=>!o.deleted&&o.tab==='paid'});
-  S.priorities.forEach(p=>defs.push({label:p,color:PC(p),f:o=>!o.deleted&&o.priority===p}));
+  S.statuses.forEach(s=>defs.push({label:s,color:SC(s),count:sc[s]||0}));
+  defs.push({label:'Invoiced',color:S.statusColors['Invoiced']||'#6ba8f7',count:counts.invoiced});
+  defs.push({label:'Paid',color:S.statusColors['Paid']||'#10b981',count:counts.paid});
+  S.priorities.forEach(p=>defs.push({label:p,color:PC(p),count:pc[p]||0}));
   return defs;
 }
 
@@ -226,11 +241,16 @@ const ALL_COLS=[
   {key:'pm',label:'PM'},
   {key:'type',label:'Type'},
   {key:'address',label:'Address'},
+  {key:'city',label:'City'},
   {key:'bidAmount',label:'Bid'},
   {key:'phone',label:'Phone'},
   {key:'tech',label:'Tech'},
   {key:'status',label:'Status'},
-  {key:'dateCreated',label:'Date'}
+  {key:'dateCreated',label:'Date'},
+  {key:'dateOfService',label:'Svc Date'},
+  {key:'emergency',label:'Emerg'},
+  {key:'warranty',label:'Warranty'},
+  {key:'portalLink',label:'Portal'}
 ];
 
 let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIES],types:[...DTYPES],techs:[...DTECHS],
@@ -700,6 +720,12 @@ function flashCopied(evt){
   setTimeout(()=>{el.textContent=orig;el.classList.remove('phone-copied');},900);
 }
 
+let _searchDebounceTimer=null;
+function scheduleSearchRender(){
+  if(_searchDebounceTimer)clearTimeout(_searchDebounceTimer);
+  _searchDebounceTimer=setTimeout(()=>{_searchDebounceTimer=null;render();},120);
+}
+
 let _autoSyncTimer=null;
 function scheduleAutoSync(){
   if(!S.settings||!S.settings.autoSyncOnInvoice)return;
@@ -1123,8 +1149,9 @@ function renderPeekPane(){
 function render(){
   const rows=filtered();
   const v=S.view,isTrash=v==='trash',isInv=v==='invoiced',isPaid=v==='paid',isActive=v==='active';
-  const trashCount=S.orders.filter(o=>o.deleted).length;
-  const statsHtml=buildStatDefs().map(d=>`<div class="stat-card"><div class="stat-label">${d.label}</div><div class="stat-value" style="color:${d.color}">${S.orders.filter(d.f).length}</div></div>`).join('');
+  const _statCounts=buildStatCounts();
+  const trashCount=_statCounts.counts.trash;
+  const statsHtml=buildStatDefs(_statCounts).map(d=>`<div class="stat-card"><div class="stat-label">${d.label}</div><div class="stat-value" style="color:${d.color}">${d.count}</div></div>`).join('');
 
   const hidCls=k=>isColHidden(v,k)?' col-hidden':'';
   const tableRows=rows.map(o=>{
@@ -1144,11 +1171,16 @@ function render(){
       <td class="${hidCls('pm')}"><div class="tdi">${badge(o.pm,pmc)}</div></td>
       <td class="${hidCls('type')}"><div class="tdi">${badge(o.type,tc)}</div></td>
       <td class="addr-cell ${hidCls('address')}"><div class="tdi" title="${ea(o.address)}">${esc(o.address)}</div></td>
+      <td class="${hidCls('city')}"><div class="tdi">${esc(o.city)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('bidAmount')}"><div class="tdi">${esc(o.bidAmount)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('phone')}"><div class="tdi">${esc(o.phone)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('tech')}"><div class="tdi">${esc(o.tech)||'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td class="${hidCls('status')}"><div class="tdi">${badge(o.status,SC(o.status))}</div></td>
       <td class="${hidCls('dateCreated')}"><div class="tdi"><span class="${dc}">${fmtDate(o.dateCreated)}</span></div></td>
+      <td class="${hidCls('dateOfService')}"><div class="tdi">${o.dateOfService?fmtDate(o.dateOfService):'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
+      <td class="${hidCls('emergency')}"><div class="tdi">${o.emergency?'<span class="wo-flag wo-flag-emerg">&#x2691;</span>':''}</div></td>
+      <td class="${hidCls('warranty')}"><div class="tdi">${o.warranty?'<span class="wo-flag wo-flag-warranty">&#x2691;</span>':''}</div></td>
+      <td class="${hidCls('portalLink')}"><div class="tdi">${o.portalLink?`<span style="color:#6ba8f7;font-size:10px">&#x1F517;</span>`:'<span style="color:var(--text2)">&#x2014;</span>'}</div></td>
       <td><div class="act-cell"><button class="icon-btn" onclick="restore('${o.id}')" title="Restore">&#x21A9; Restore</button><button class="icon-btn del" onclick="hardDelete('${o.id}')" title="Delete permanently">&#x2715;</button></div></td>
     </tr>`;
 
@@ -1159,6 +1191,7 @@ function render(){
     const addrInner=o.address?`<span class="addr-link" onclick="event.stopPropagation();openMaps('${ea(o.address)}')" title="Open in Google Maps">${esc(o.address)}</span><span class="addr-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','address')" title="Edit address">&#x270E;</span>`:`<span style="color:var(--text2)">&#x2014;</span>`;
     const addrEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='address';
     const addrTd=addrEditing?edCell(o,'address',esc(o.address),'text').replace('<td ','<td class="addr-cell" ').replace('<td>','<td class="addr-cell">'):`<td class="addr-cell"><div class="tdi addr-cell-inner">${addrInner}</div></td>`;
+    const cityCell=edCell(o,'city',esc(o.city)||`<span style="color:var(--text2)">&#x2014;</span>`,'text');
     const bidCell=edCell(o,'bidAmount',esc(o.bidAmount)||`<span style="color:var(--text2)">&#x2014;</span>`,'text');
     const phoneEditing=S.editingCell&&S.editingCell.id===o.id&&S.editingCell.field==='phone';
     const phoneCell=phoneEditing?edCell(o,'phone',esc(o.phone)||`<span style="color:var(--text2)">&#x2014;</span>`,'text'):(o.phone?`<td><div class="tdi phone-cell-inner"><span class="phone-link" onclick="event.stopPropagation();copyPhone('${ea(o.phone)}',event)" title="Click to copy digits">${esc(o.phone)}</span><span class="phone-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','phone')" title="Edit">&#x270E;</span></div></td>`:`<td class="editable" onclick="startEdit('${o.id}','phone')"><div class="tdi"><span style="color:var(--text2)">&#x2014;</span></div></td>`);
@@ -1169,6 +1202,10 @@ function render(){
       ?`<td><div class="tdi">${badge(dispStatus,sc)}</div></td>`
       :(statusEditing?edCell(o,'status',badge(o.status,sc),'sel-status'):`<td><div class="tdi status-cell-inner"><span class="status-cycle" onclick="event.stopPropagation();cycleStatus('${o.id}',event)" title="Click: next status · Shift+click: previous">${badge(o.status,sc)}</span><span class="status-edit-icon" onclick="event.stopPropagation();startEdit('${o.id}','status')" title="Pick from list">&#x25BE;</span></div></td>`);
     const dateCell=edCell(o,'dateCreated',`<span class="${dc}">${fmtDate(o.dateCreated)}</span>`,'date');
+    const svcDateCell=edCell(o,'dateOfService',o.dateOfService?fmtDate(o.dateOfService):`<span style="color:var(--text2)">&#x2014;</span>`,'date');
+    const emergCell=`<td><div class="tdi">${o.emergency?`<span class="wo-flag wo-flag-emerg" title="Emergency" onclick="event.stopPropagation();toggleFlag('${o.id}','emergency')">&#x2691;</span>`:''}</div></td>`;
+    const warrantyCell=`<td><div class="tdi">${o.warranty&&S.settings.warrantyDisplay!=='highlight'?`<span class="wo-flag wo-flag-warranty" title="Warranty" onclick="event.stopPropagation();toggleFlag('${o.id}','warranty')">&#x2691;</span>`:o.warranty?'<span style="color:#1a73e8;font-size:10px">HL</span>':''}</div></td>`;
+    const portalCell=o.portalLink?`<td><div class="tdi"><span class="peek-link" style="font-size:10px" onclick="event.stopPropagation();if(window.shell)window.shell.openExternal('${ea(o.portalLink)}');else window.open('${ea(o.portalLink)}','_blank')" title="${ea(o.portalLink)}">&#x1F517;</span></div></td>`:`<td><div class="tdi"><span style="color:var(--text2)">&#x2014;</span></div></td>`;
 
     let acts='';
     const histBtn=`<button class="icon-btn" onclick="openHistory('${o.id}')" title="View history">&#x231A;</button>`;
@@ -1181,9 +1218,9 @@ function render(){
       if(/^<td\s+class="/.test(html)){return html.replace(/^<td\s+class="/,'<td class="col-hidden ');}
       return html.replace(/^<td(\s|>)/, '<td class="col-hidden"$1');
     };
-    const woC=wrap(woCell,'id'),propC=wrap(propCell,'propertyId'),pmC=wrap(pmCell,'pm'),typeC=wrap(typeCell,'type'),addrC=wrap(addrTd,'address'),bidC=wrap(bidCell,'bidAmount'),phoneC=wrap(phoneCell,'phone'),techC=wrap(techCell,'tech'),statusC=wrap(statusCell,'status'),dateC=wrap(dateCell,'dateCreated');
+    const woC=wrap(woCell,'id'),propC=wrap(propCell,'propertyId'),pmC=wrap(pmCell,'pm'),typeC=wrap(typeCell,'type'),addrC=wrap(addrTd,'address'),cityC=wrap(cityCell,'city'),bidC=wrap(bidCell,'bidAmount'),phoneC=wrap(phoneCell,'phone'),techC=wrap(techCell,'tech'),statusC=wrap(statusCell,'status'),dateC=wrap(dateCell,'dateCreated'),svcC=wrap(svcDateCell,'dateOfService'),emergC=wrap(emergCell,'emergency'),warrC=wrap(warrantyCell,'warranty'),portC=wrap(portalCell,'portalLink');
     const peekedCls=S.peekId===o.id?' row-peeked':'';
-    return`<tr data-priority="${esc(o.priority)}" data-id="${esc(o.id)}" class="${peekedCls.trim()}" style="${rowStyle}" onmouseenter="setHoveredRow('${o.id}')" onmouseleave="clearHoveredRow('${o.id}')">${bulkCell}${woC}${propC}${pmC}${typeC}${addrC}${bidC}${phoneC}${techC}${statusC}${dateC}<td><div class="act-cell">${acts}</div></td></tr>`;
+    return`<tr data-priority="${esc(o.priority)}" data-id="${esc(o.id)}" class="${peekedCls.trim()}" style="${rowStyle}" onmouseenter="setHoveredRow('${o.id}')" onmouseleave="clearHoveredRow('${o.id}')">${bulkCell}${woC}${propC}${pmC}${typeC}${addrC}${cityC}${bidC}${phoneC}${techC}${statusC}${dateC}${svcC}${emergC}${warrC}${portC}<td><div class="act-cell">${acts}</div></td></tr>`;
   }).join('');
 
   const emptyMsg=isTrash?'Trash is empty':`No work orders in ${v}`;
@@ -1228,7 +1265,7 @@ function render(){
       <button class="tab${v==='trash'?' active':''}" onclick="S.view='trash';render()">&#x1F5D1; Trash (${trashCount})</button>
     </div>
     <div class="filters"><div class="filter-row">
-      <input type="text" id="search-input" placeholder="Search WO#, address, tech, phone, PM, notes&hellip; (press / to focus)" value="${esc(S.search)}" oninput="S.search=this.value;S.activePresetId='';render()">
+      <input type="text" id="search-input" placeholder="Search WO#, address, tech, phone, PM, notes&hellip; (press / to focus)" value="${esc(S.search)}" oninput="S.search=this.value;S.activePresetId='';scheduleSearchRender()">
       <select onchange="S.filterPM=this.value;S.activePresetId='';render()"><option value="">All PMs</option>${S.pms.map(p=>`<option${S.filterPM===p.name?' selected':''}>${esc(p.name)}</option>`).join('')}</select>
       <select onchange="S.filterType=this.value;S.activePresetId='';render()"><option value="">All Types</option>${S.types.map(t=>`<option${S.filterType===t?' selected':''}>${esc(t)}</option>`).join('')}</select>
       <select onchange="S.filterStatus=this.value;S.activePresetId='';render()"><option value="">All Statuses</option>${S.statuses.map(s=>`<option${S.filterStatus===s?' selected':''}>${esc(s)}</option>`).join('')}</select>
@@ -1264,14 +1301,19 @@ function render(){
           <th onclick="sort('pm',event)" class="${S.sortKeys.find(k=>k.col==='pm')?'sort-active':''} ${isColHidden(v,'pm')?'col-hidden':''}" style="min-width:55px">PM${arrow('pm')}</th>
           <th onclick="sort('type',event)" class="${S.sortKeys.find(k=>k.col==='type')?'sort-active':''} ${isColHidden(v,'type')?'col-hidden':''}" style="min-width:80px">Type${arrow('type')}</th>
           <th onclick="sort('address',event)" class="${S.sortKeys.find(k=>k.col==='address')?'sort-active':''} ${isColHidden(v,'address')?'col-hidden':''}" style="min-width:155px">Address${arrow('address')}</th>
+          <th onclick="sort('city',event)" class="${S.sortKeys.find(k=>k.col==='city')?'sort-active':''} ${isColHidden(v,'city')?'col-hidden':''}" style="min-width:80px">City${arrow('city')}</th>
           <th onclick="sort('bidAmount',event)" class="${S.sortKeys.find(k=>k.col==='bidAmount')?'sort-active':''} ${isColHidden(v,'bidAmount')?'col-hidden':''}" style="min-width:70px">Bid${arrow('bidAmount')}</th>
           <th onclick="sort('phone',event)" class="${S.sortKeys.find(k=>k.col==='phone')?'sort-active':''} ${isColHidden(v,'phone')?'col-hidden':''}" style="min-width:110px">Phone${arrow('phone')}</th>
           <th onclick="sort('tech',event)" class="${S.sortKeys.find(k=>k.col==='tech')?'sort-active':''} ${isColHidden(v,'tech')?'col-hidden':''}" style="min-width:78px">Tech${arrow('tech')}</th>
           <th onclick="sort('status',event)" class="${S.sortKeys.find(k=>k.col==='status')?'sort-active':''} ${isColHidden(v,'status')?'col-hidden':''}" style="min-width:130px">Status${arrow('status')}</th>
           <th onclick="sort('dateCreated',event)" class="${S.sortKeys.find(k=>k.col==='dateCreated')?'sort-active':''} ${isColHidden(v,'dateCreated')?'col-hidden':''}" style="min-width:70px">Date${arrow('dateCreated')}</th>
+          <th onclick="sort('dateOfService',event)" class="${S.sortKeys.find(k=>k.col==='dateOfService')?'sort-active':''} ${isColHidden(v,'dateOfService')?'col-hidden':''}" style="min-width:70px">Svc Date${arrow('dateOfService')}</th>
+          <th class="${isColHidden(v,'emergency')?'col-hidden':''}" style="min-width:50px">Emerg</th>
+          <th class="${isColHidden(v,'warranty')?'col-hidden':''}" style="min-width:60px">Warr</th>
+          <th onclick="sort('portalLink',event)" class="${S.sortKeys.find(k=>k.col==='portalLink')?'sort-active':''} ${isColHidden(v,'portalLink')?'col-hidden':''}" style="min-width:90px">Portal${arrow('portalLink')}</th>
           <th style="min-width:${isActive?'185px':isInv?'190px':isPaid?'135px':'95px'}"></th>
         </tr></thead>
-        <tbody>${tableRows||`<tr><td colspan="${S.bulkMode&&!isTrash?12:11}" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
+        <tbody>${tableRows||`<tr><td colspan="${(S.bulkMode&&!isTrash?1:0)+16}" style="text-align:center;padding:28px;color:var(--text2)">${emptyMsg}</td></tr>`}</tbody>
       </table></div>
       <div class="footer-bar">
         <span>

@@ -48,8 +48,8 @@ CUSTOMER_MAP = {
     "MSR": "Main Street Renewal",
 }
 
-# Range of rows the script will clear and rewrite each sync. Anything below
-# this range is left alone (defensive in case user has notes far down).
+# Maximum row the managed range will ever reach. Both this script and
+# rebuild_invoice_import_sheet.py use the same value; keep them in sync.
 WRITE_ROW_MAX = 2000
 
 CELL_FONT   = Font(name="Arial", size=10)
@@ -128,10 +128,15 @@ def write_invoice_import(orders, workbook_path):
         sys.exit("Sheet '" + SHEET_NAME + "' not found in " + workbook_path.name)
     ws = wb[SHEET_NAME]
 
-    # Clear values (cols A-G) for the managed range. The F-column VLOOKUP
-    # formula is restored below so user-inserted rows always pick up Unit Price.
-    last_row = max(ws.max_row, 2)
-    for r in range(2, max(last_row, WRITE_ROW_MAX) + 1):
+    # Only touch rows up to the greater of: what we'll write, or what's already
+    # used (so we don't leave stale data below our new content).
+    rows_needed = max(len(orders) * 2 + 1, 2)  # anchor + separator per WO
+    clear_up_to = max(ws.max_row, rows_needed, 2)
+    # Never exceed the managed cap.
+    clear_up_to = min(clear_up_to, WRITE_ROW_MAX)
+
+    # Clear values (cols A-G) for only the rows we need to touch.
+    for r in range(2, clear_up_to + 1):
         for c in range(1, 8):
             ws.cell(r, c).value = None
 
@@ -142,6 +147,7 @@ def write_invoice_import(orders, workbook_path):
             "=IFERROR(IF(E" + str(r) + "=\"\",\"\","
             "VLOOKUP(E" + str(r) + ",'Service Items'!A:C,3,FALSE)),\"\")"
         )
+
     for o in orders:
         # Anchor row: header fields + memo. E and F left blank for first item pick.
         ws.cell(row, 1).value = ""                                  # A Invoice #
@@ -150,7 +156,7 @@ def write_invoice_import(orders, workbook_path):
         ws.cell(row, 4).value = ""                                  # D Date
         ws.cell(row, 5).value = ""                                  # E Item/Service
         fill_unit_price_formula(row)                                # F Unit Price (VLOOKUP)
-        ws.cell(row, 7).value = memo_for(o)                          # G Memo
+        ws.cell(row, 7).value = memo_for(o)                         # G Memo
         style_row(ws, row)
         row += 1
 
@@ -159,13 +165,24 @@ def write_invoice_import(orders, workbook_path):
         style_row(ws, row)
         row += 1
 
-    # Restore VLOOKUP across the rest of the managed range so any row the user
-    # inserts auto-fills Unit Price from the Service Items library.
-    for r in range(row, WRITE_ROW_MAX + 1):
+    # Restore VLOOKUP across remaining rows up to clear_up_to so any row the
+    # user inserts auto-fills Unit Price from the Service Items library.
+    for r in range(row, clear_up_to + 1):
         fill_unit_price_formula(r)
         style_row(ws, r)
 
-    wb.save(workbook_path)
+    # Atomic save: write to a temp file beside the workbook, then replace.
+    tmp_path = workbook_path.with_suffix(".tmp.xlsx")
+    try:
+        wb.save(str(tmp_path))
+        os.replace(str(tmp_path), str(workbook_path))
+    except Exception as e:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        sys.exit("Failed to save workbook: " + str(e))
+
     print("Done - " + str(len(orders)) + " WO group(s) written to '" + SHEET_NAME + "' in " + workbook_path.name)
     print("Reminder: pick Item/Service per row, then fill column A (Invoice #) after RazorSync assigns numbers.")
     print("Insert additional rows above the blank separator to add more service items per WO.")

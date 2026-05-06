@@ -22,16 +22,29 @@ Usage:
 
 import os, sys
 from pathlib import Path
+from os import replace as _os_replace
 from openpyxl import load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.workbook.defined_name import DefinedName
 
-ROW_MAX = 2000  # how many rows the dropdown / formula will cover
+# Must match WRITE_ROW_MAX in sync_to_lookup.py — both define the managed range.
+ROW_MAX = 2000
 
 SHEET_NAME = "Invoice Import"
 LIB_SHEET  = "Service Items"
 README_SHEET = "README"
+
+# Canonical customer names written into a named range so the dropdown does not
+# need a hardcoded formula string. To add customers, update this list and rerun.
+CUSTOMER_NAMES = [
+    "American Homes 4 Rent",
+    "Main Street Renewal",
+]
+CUSTOMER_NAMES_RANGE_NAME = "CustomerNames"
+# Column in README sheet used to hold the customer name list (far right, out of way).
+CUSTOMER_NAMES_COL = "D"
 
 HEADERS = [
     "Invoice #",
@@ -118,10 +131,11 @@ def rebuild_invoice_import(wb):
     dv_item.add("E2:E" + str(ROW_MAX))
     ws.add_data_validation(dv_item)
 
-    # Customer Name dropdown — fixed list (extras allowed via free text).
+    # Customer Name dropdown sourced from the CustomerNames defined name
+    # (written into README col D by rebuild_readme). Free text still allowed.
     dv_cust = DataValidation(
         type="list",
-        formula1='"American Homes 4 Rent,Main Street Renewal"',
+        formula1="=" + CUSTOMER_NAMES_RANGE_NAME,
         allow_blank=True,
         showDropDown=False,
     )
@@ -173,6 +187,12 @@ def rebuild_readme(wb):
         c.font = font
         c.alignment = wrap
 
+    # Write customer name list into column D (hidden helper range).
+    # The CustomerNames defined name points here so the B-column dropdown
+    # sources from a range rather than a hardcoded formula string.
+    for i, name in enumerate(CUSTOMER_NAMES, start=1):
+        ws.cell(i, 4, name).font = Font(name="Arial", size=10)
+
 
 def main():
     argv_path = sys.argv[1] if len(sys.argv) > 1 else None
@@ -186,7 +206,24 @@ def main():
     rebuild_invoice_import(wb)
     rebuild_readme(wb)
 
-    wb.save(wb_path)
+    # Register (or overwrite) the CustomerNames defined name pointing to the
+    # helper list written into README col D by rebuild_readme.
+    n_rows = len(CUSTOMER_NAMES)
+    ref = "'" + README_SHEET + "'!$" + CUSTOMER_NAMES_COL + "$1:$" + CUSTOMER_NAMES_COL + "$" + str(n_rows)
+    if CUSTOMER_NAMES_RANGE_NAME in wb.defined_names:
+        del wb.defined_names[CUSTOMER_NAMES_RANGE_NAME]
+    wb.defined_names[CUSTOMER_NAMES_RANGE_NAME] = DefinedName(CUSTOMER_NAMES_RANGE_NAME, attr_text=ref)
+
+    tmp_path = wb_path.with_suffix(".tmp.xlsx")
+    try:
+        wb.save(str(tmp_path))
+        _os_replace(str(tmp_path), str(wb_path))
+    except Exception as e:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        sys.exit("Failed to save workbook: " + str(e))
     print("Done. 'Invoice Import' and '" + README_SHEET + "' rebuilt at: " + str(wb_path))
 
 

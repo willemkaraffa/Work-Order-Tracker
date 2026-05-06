@@ -6,6 +6,7 @@
 * No sycophantic openers or closing fluff.
 * No emojis or em-dashes.
 * Do not guess APIs, versions, flags, commit SHAs, or package names. Verify by reading code or docs before asserting.
-* No Chat Updates during tasks. Only send chats before after receiving instructions and after completing task, adhering to all prior rules.
+* No Chat Updates during tasks. Only send chats before after receiving instructions and after completing task, adhering to all prior rules. - CRITICAL
+* Reduce all chat output to the bare minimum wording to convey the needed information. If something can be expressed through a single word, do so.
 * Read this file upon every new session without prompting.
 
