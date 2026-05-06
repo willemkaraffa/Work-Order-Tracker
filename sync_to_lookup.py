@@ -46,7 +46,7 @@ ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
 THIN        = Side(border_style="thin", color="BFBFBF")
 CELL_BORDER = Border(left=THIN, right=THIN, bottom=THIN)
 
-# Street type normalisation (expand or abbreviate → canonical abbreviation)
+# Street type normalisation (expand or abbreviate -> canonical abbreviation)
 _STREET_TYPES = {
     'lane':'ln','drive':'dr','court':'ct','street':'st','avenue':'ave',
     'boulevard':'blvd','circle':'cir','place':'pl','road':'rd','way':'way',
@@ -267,7 +267,7 @@ def _tokenise(text):
 def map_to_service_item(name, price, service_items):
     """
     Return the best-matching service item name from the library, or 'Labor!' / 'Materials!'.
-    Matching: exact → token Jaccard (boosted when price is close) → keyword fallback.
+    Matching: exact -> token Jaccard (boosted when price is close) -> keyword fallback.
     """
     name_lower = name.lower()
     name_tok   = _tokenise(name)
@@ -382,7 +382,7 @@ def write_invoice_import(orders, workbook_path, msr_base=None):
         if pm == "MSR" and msr_base:
             folder = find_msr_folder(address, msr_base)
             if folder:
-                print("  [MSR] Matched '" + address + "' → " + folder.name)
+                print("  [MSR] Matched '" + address + "' -> " + folder.name)
                 raw_items = extract_msr_items(folder)
             else:
                 print("  [MSR] No folder match for: " + address)
