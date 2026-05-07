@@ -291,13 +291,16 @@ def choose_options_for_bid(bid: Optional[dict]) -> List[dict]:
     return preferred if preferred else options
 
 def service_display_name(service: dict, order: Optional[dict] = None) -> str:
+    desc = normalize_text(service.get("description"))
+    if desc:
+        return desc
     remedy = service.get("remedyInstance", {}) or {}
     remedy_id = normalize_text(service.get("remedyInstanceId"))
     if order and remedy_id:
         mapped = (order.get("remedyInstances", {}) or {}).get(remedy_id, {}) or {}
-        if normalize_text(mapped.get("name")):
-            return normalize_text(mapped.get("name"))
-    return normalize_text(remedy.get("name")) or normalize_text(service.get("serviceId"))
+        if normalize_text(mapped.get("description")):
+            return normalize_text(mapped.get("description"))
+    return normalize_text(remedy.get("description")) or normalize_text(service.get("serviceId"))
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
