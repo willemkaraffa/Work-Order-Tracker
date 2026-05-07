@@ -774,6 +774,10 @@ function sendToInvoiced(id){
   if((o.pm||'').toUpperCase()==='AMH'&&window.scraper){
     toast('Scraping AMH bid items…','',3000);
     window.scraper.scrapeWO({id:o.id,pm:o.pm,address:o.address}).then(result=>{
+      if(result.ok&&result.items&&result.items.length){
+        const idx=S.orders.findIndex(x=>x.id===id);
+        if(idx>=0){S.orders[idx].bidItems=result.items;save();}
+      }
       S.scrapeResult={id,result};render();
     }).catch(err=>{
       toast('Scrape error: '+err.message,'err',5000);
