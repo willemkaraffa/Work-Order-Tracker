@@ -1,5 +1,5 @@
 'use strict';
-const { BrowserWindow, session, net } = require('electron');
+const { BrowserWindow, net } = require('electron');
 
 const AMH_LOGIN_URL   = 'https://www.amh.com/login';
 const AMH_WO_LIST_URL = 'https://www.amh.com/vendor-admin-orders?tabId=AllOpen';
@@ -32,26 +32,41 @@ function todayApiValue() {
 }
 
 // ── Token capture ─────────────────────────────────────────────────────────────
-// Intercepts ALL outgoing requests and extracts the first Bearer token found.
-// Uses a 60 s window to cover the full login + page-load flow.
-// A single timeout avoids the race condition that occurs when a shorter external
-// race (Promise.race + sleep) abandons this promise while its timer is still live.
+// Attaches CDP to the window and listens for Network.requestWillBeSent events,
+// which is the same mechanism Python Selenium uses (goog:loggingPrefs performance).
+// This fires for all requests including Service Workers, unlike onSendHeaders.
 
-function captureToken(sess) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      try { sess.webRequest.onSendHeaders(null); } catch(_) {}
-      resolve(null);
-    }, 60000);
+function captureTokenViaCDP(win) {
+  return new Promise(async (resolve) => {
+    let resolved = false;
+    const dbg = win.webContents.debugger;
 
-    sess.webRequest.onSendHeaders({ urls: ['*://*/*'] }, (details) => {
-      const auth = details.requestHeaders['Authorization'] || details.requestHeaders['authorization'] || '';
-      if (auth.startsWith('Bearer ')) {
-        clearTimeout(timer);
-        try { sess.webRequest.onSendHeaders(null); } catch(_) {}
-        resolve(auth);
+    const cleanup = () => {
+      resolved = true;
+      try { dbg.removeAllListeners('message'); } catch(_) {}
+    };
+
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, 60000);
+
+    dbg.on('message', (event, method, params) => {
+      if (resolved) return;
+      if (method === 'Network.requestWillBeSent') {
+        const headers = (params.request || {}).headers || {};
+        const auth = headers['Authorization'] || headers['authorization'] || '';
+        if (auth.startsWith('Bearer ')) {
+          clearTimeout(timer);
+          cleanup();
+          resolve(auth);
+        }
       }
     });
+
+    try { dbg.attach('1.3'); } catch(_) {}
+    try { await dbg.sendCommand('Network.enable'); } catch(e) {
+      clearTimeout(timer);
+      cleanup();
+      resolve(null);
+    }
   });
 }
 
@@ -60,10 +75,8 @@ function captureToken(sess) {
 // Fields: id="signInName" (email), id="password", id="next" (submit button).
 
 async function ensureLoggedIn(win, creds) {
-  const sess = win.webContents.session;
-
-  // Begin intercepting API traffic to capture Bearer token
-  const tokenPromise = captureToken(sess);
+  // Attach CDP and start listening for Bearer tokens before any navigation
+  const tokenPromise = captureTokenViaCDP(win);
 
   // Navigate to WO list — already logged in if session cookie is active
   await win.loadURL(AMH_WO_LIST_URL);
