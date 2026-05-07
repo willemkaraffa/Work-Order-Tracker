@@ -225,7 +225,7 @@ def _skip_row(b_val):
 def _parse_other_block(text):
     """Parse 'Other' free-text block: lines/segments of the form '$NNN description'."""
     items = []
-    for segment in re.split(r"\n", text):
+    for segment in text.splitlines():
         segment = segment.strip()
         if not segment:
             continue
@@ -280,14 +280,19 @@ def _extract_hvac_sheet(ws):
         unit_price = round(float(i_val) / qty, 2) if qty else float(i_val)
         items.append({"name": str(b_val).strip(), "price": unit_price, "qty": qty})
     # Other free-text block (rows 77-81): $NNN description in col C
+    # Do not require i_val > 0: data_only=True returns None for uncached formula cells.
+    _DOLLAR_RE = re.compile(r'\$\d')
     for row in ws.iter_rows(min_row=77, max_row=81, values_only=True):
-        if len(row) < 9:
+        if len(row) < 3:
             continue
-        b_val, c_val, i_val = row[1], row[2], row[8]
-        if (c_val and isinstance(b_val, str)
-                and "please provide" in str(b_val).lower()
-                and isinstance(i_val, (int, float)) and i_val > 0):
-            items.extend(_parse_other_block(str(c_val)))
+        b_val, c_val = row[1], row[2]
+        if not c_val:
+            continue
+        c_str = str(c_val)
+        if not _DOLLAR_RE.search(c_str):
+            continue
+        if isinstance(b_val, str) and "please provide" in b_val.lower():
+            items.extend(_parse_other_block(c_str))
     return items
 
 

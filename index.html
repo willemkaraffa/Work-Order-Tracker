@@ -770,8 +770,8 @@ function sendToInvoiced(id){
   snapshot('send to invoiced');
   o.tab='invoiced';
   logHistory(id,'sent to Invoiced');
-  save();render();scheduleAutoSync();
-  // Trigger AMH scrape async (non-blocking)
+  save();render();
+  // For AMH: scrape first, persist bidItems, then sync so the workbook gets the items
   if((o.pm||'').toUpperCase()==='AMH'&&window.scraper){
     toast('Scraping AMH bid items…','',3000);
     window.scraper.scrapeWO({id:o.id,pm:o.pm,address:o.address}).then(result=>{
@@ -780,9 +780,13 @@ function sendToInvoiced(id){
         if(idx>=0){S.orders[idx].bidItems=result.items;save();}
       }
       S.scrapeResult={id,result};render();
+      scheduleAutoSync();
     }).catch(err=>{
       toast('Scrape error: '+err.message,'err',5000);
+      scheduleAutoSync();
     });
+  } else {
+    scheduleAutoSync();
   }
 }
 function sendToPaid(id){snapshot('mark paid');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='paid';logHistory(id,'marked Paid');save();render();}
