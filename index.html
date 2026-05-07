@@ -272,6 +272,7 @@ let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIE
   bulkMode:false,bulkSelected:new Set(),
   peekId:null,hoveredId:null,
   settingsTab:'general',
+  credStatus:{},
   bidAmountPromptId:null,
   scrapeResult:null};
 
@@ -1097,7 +1098,7 @@ function renderSettingsModal(){
 
   const tabCredentials=SCRAPER_PMS.map(pm=>`
     <div class="cred-row">
-      <div class="cred-pm-header">${esc(pm)}</div>
+      <div class="cred-pm-header">${esc(pm)}${S.credStatus[pm]===true?'<span style="margin-left:8px;font-size:9px;color:#10b981;font-weight:400;text-transform:none;letter-spacing:0">Saved</span>':S.credStatus[pm]===false?'<span style="margin-left:8px;font-size:9px;color:var(--text2);font-weight:400;text-transform:none;letter-spacing:0">Not set</span>':''}</div>
       <div class="fg" style="margin-bottom:8px">
         <label>Username / Email</label>
         <input type="text" id="cred-user-${pm}" autocomplete="username" placeholder="${esc(pm)} login email" style="width:100%">
@@ -1119,7 +1120,7 @@ function renderSettingsModal(){
     <div class="stab-bar">
       <button class="stab${tab==='general'?' active':''}" onclick="S.settingsTab='general';render()">General</button>
       <button class="stab${tab==='workbook'?' active':''}" onclick="S.settingsTab='workbook';render()">Workbook</button>
-      <button class="stab${tab==='credentials'?' active':''}" onclick="S.settingsTab='credentials';render()">Credentials</button>
+      <button class="stab${tab==='credentials'?' active':''}" onclick="S.settingsTab='credentials';render();loadCredentialStatuses()">Credentials</button>
     </div>
     ${tabContent}
     <div class="mact">
@@ -1201,14 +1202,25 @@ async function saveCredential(pm){
   if(!u||!p){toast('Enter both username and password','err',2200);return;}
   if(!window.creds){toast('Credential storage unavailable','err',2200);return;}
   const r=await window.creds.set(pm,u,p);
-  if(r&&r.ok){toast(pm+' credentials saved','ok',2000);}
+  if(r&&r.ok){S.credStatus[pm]=true;toast(pm+' credentials saved','ok',2000);render();}
   else{toast('Failed to save: '+(r&&r.error?r.error:'unknown error'),'err',3000);}
 }
 
 async function clearCredential(pm){
   if(!window.creds)return;
   await window.creds.clear(pm);
+  S.credStatus[pm]=false;
   toast(pm+' credentials cleared','ok',2000);
+  render();
+}
+
+async function loadCredentialStatuses(){
+  if(!window.creds)return;
+  for(const pm of SCRAPER_PMS){
+    const r=await window.creds.get(pm);
+    S.credStatus[pm]=!!(r&&r.username);
+  }
+  render();
 }
 
 function renderOrderModal(){
@@ -1497,6 +1509,7 @@ document.addEventListener('keydown',function(e){
   const inField=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
   if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&e.key.toLowerCase()==='z'&&!inField){e.preventDefault();undo();return;}
   if(e.key===' '&&!inField&&!S.modal){e.preventDefault();peekHovered();return;}
+  if(e.key==='Escape'&&S.scrapeResult){S.scrapeResult=null;render();return;}
   if(e.key==='Escape'&&!inField&&S.peekId&&!S.modal){e.preventDefault();clearPeek();return;}
   if(S.settings.keyFocusSearchCtrl&&(e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();focusSearch();return;}
   const fk=S.settings.keyFocusSearch||'/';
