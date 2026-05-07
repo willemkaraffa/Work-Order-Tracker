@@ -291,7 +291,11 @@ ipcMain.handle('export-csv', async (_e, csv) => {
 // ── IPC: Credentials (safeStorage encrypted) ─────────────────────────────────
 const CRED_PREFIX = 'cred_';
 
+const PM_RE = /^[A-Z0-9]{1,20}$/;
+function validPm(pm) { return typeof pm === 'string' && PM_RE.test(pm.toUpperCase()); }
+
 ipcMain.handle('creds-set', (_e, pm, username, password) => {
+  if (!validPm(pm)) return { ok: false, error: 'Invalid PM name' };
   try {
     if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'Encryption unavailable on this system' };
     const payload = JSON.stringify({ username, password });
@@ -304,6 +308,7 @@ ipcMain.handle('creds-set', (_e, pm, username, password) => {
 });
 
 ipcMain.handle('creds-get', (_e, pm) => {
+  if (!validPm(pm)) return null;
   try {
     if (!safeStorage.isEncryptionAvailable()) return null;
     const store = readStore();
@@ -311,10 +316,11 @@ ipcMain.handle('creds-get', (_e, pm) => {
     if (!enc) return null;
     const payload = safeStorage.decryptString(Buffer.from(enc, 'base64'));
     return JSON.parse(payload);
-  } catch (e) { return null; }
+  } catch (e) { console.warn('Credential decryption failed:', e.message); return null; }
 });
 
 ipcMain.handle('creds-clear', (_e, pm) => {
+  if (!validPm(pm)) return { ok: false, error: 'Invalid PM name' };
   try {
     const store = readStore();
     delete store[CRED_PREFIX + pm.toUpperCase()];

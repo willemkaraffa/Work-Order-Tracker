@@ -1509,7 +1509,7 @@ document.addEventListener('keydown',function(e){
   const inField=tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
   if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&e.key.toLowerCase()==='z'&&!inField){e.preventDefault();undo();return;}
   if(e.key===' '&&!inField&&!S.modal){e.preventDefault();peekHovered();return;}
-  if(e.key==='Escape'&&S.scrapeResult){S.scrapeResult=null;render();return;}
+  if(e.key==='Escape'&&!inField&&S.scrapeResult){S.scrapeResult=null;render();return;}
   if(e.key==='Escape'&&!inField&&S.peekId&&!S.modal){e.preventDefault();clearPeek();return;}
   if(S.settings.keyFocusSearchCtrl&&(e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();focusSearch();return;}
   const fk=S.settings.keyFocusSearch||'/';

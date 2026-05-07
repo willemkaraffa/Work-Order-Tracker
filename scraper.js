@@ -204,8 +204,9 @@ async function scrapeAMH(wo, getCredential) {
   const woNum = String(wo.id || '').replace(/^WO-/i, '').trim();
   if (!woNum) return { ok: false, error: 'WO ID is missing' };
 
-  const win = makeWindow();
+  let win = null;
   try {
+    win = makeWindow();
     const creds = await getCredential('AMH');
     await ensureLoggedIn(win, creds);
 
@@ -233,7 +234,7 @@ async function scrapeAMH(wo, getCredential) {
   } catch (err) {
     return { ok: false, error: err.message };
   } finally {
-    try { win.destroy(); } catch (_) {}
+    if (win) try { win.destroy(); } catch (_) {}
   }
 }
 
