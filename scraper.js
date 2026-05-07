@@ -32,20 +32,23 @@ function todayApiValue() {
 }
 
 // ── Token capture ─────────────────────────────────────────────────────────────
-// Intercepts outgoing requests to the AMH API and extracts the Bearer token.
+// Intercepts ALL outgoing requests and extracts the first Bearer token found.
+// Uses a 60 s window to cover the full login + page-load flow.
+// A single timeout avoids the race condition that occurs when a shorter external
+// race (Promise.race + sleep) abandons this promise while its timer is still live.
 
 function captureToken(sess) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
-      sess.webRequest.onSendHeaders(null);
+      try { sess.webRequest.onSendHeaders(null); } catch(_) {}
       resolve(null);
-    }, 30000);
+    }, 60000);
 
-    sess.webRequest.onSendHeaders({ urls: ['https://app.amh.com/*'] }, (details) => {
+    sess.webRequest.onSendHeaders({ urls: ['*://*/*'] }, (details) => {
       const auth = details.requestHeaders['Authorization'] || details.requestHeaders['authorization'] || '';
       if (auth.startsWith('Bearer ')) {
         clearTimeout(timer);
-        sess.webRequest.onSendHeaders(null);
+        try { sess.webRequest.onSendHeaders(null); } catch(_) {}
         resolve(auth);
       }
     });
@@ -118,7 +121,7 @@ async function ensureLoggedIn(win, creds) {
     await sleep(10000);
   }
 
-  const token = await Promise.race([tokenPromise, sleep(15000).then(() => null)]);
+  const token = await tokenPromise;
   if (!token) throw new Error('Could not capture AMH API Bearer token. Try re-saving credentials.');
   return token;
 }
