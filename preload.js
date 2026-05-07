@@ -48,3 +48,15 @@ contextBridge.exposeInMainWorld('settingsBridge', {
 contextBridge.exposeInMainWorld('shell', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url)
 });
+
+// Credentials bridge — safeStorage-encrypted PM credentials
+contextBridge.exposeInMainWorld('creds', {
+  set:   (pm, username, password) => ipcRenderer.invoke('creds-set', pm, username, password),
+  get:   (pm)                     => ipcRenderer.invoke('creds-get', pm),
+  clear: (pm)                     => ipcRenderer.invoke('creds-clear', pm),
+});
+
+// Scraper bridge — trigger in-app portal scraping
+contextBridge.exposeInMainWorld('scraper', {
+  scrapeWO: (woData) => ipcRenderer.invoke('scrape-wo-bids', woData),
+});

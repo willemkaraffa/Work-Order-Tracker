@@ -1,9 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, safeStorage } = require('electron');
 const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
 const { spawn }      = require('child_process');
 const { autoUpdater } = require('electron-updater');
+const { scrapeWO }   = require('./scraper');
 
 // ── Data storage ──────────────────────────────────────────────────────────────
 const dataPath   = path.join(app.getPath('userData'), 'wo-data.json');
@@ -285,4 +286,54 @@ ipcMain.handle('export-csv', async (_e, csv) => {
   if (canceled || !filePath) return false;
   fs.writeFileSync(filePath, csv, 'utf8');
   return true;
+});
+
+// ── IPC: Credentials (safeStorage encrypted) ─────────────────────────────────
+const CRED_PREFIX = 'cred_';
+
+ipcMain.handle('creds-set', (_e, pm, username, password) => {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: 'Encryption unavailable on this system' };
+    const payload = JSON.stringify({ username, password });
+    const encrypted = safeStorage.encryptString(payload).toString('base64');
+    const store = readStore();
+    store[CRED_PREFIX + pm.toUpperCase()] = encrypted;
+    writeStore(store);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('creds-get', (_e, pm) => {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const store = readStore();
+    const enc = store[CRED_PREFIX + pm.toUpperCase()];
+    if (!enc) return null;
+    const payload = safeStorage.decryptString(Buffer.from(enc, 'base64'));
+    return JSON.parse(payload);
+  } catch (e) { return null; }
+});
+
+ipcMain.handle('creds-clear', (_e, pm) => {
+  try {
+    const store = readStore();
+    delete store[CRED_PREFIX + pm.toUpperCase()];
+    writeStore(store);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// ── IPC: Scrape WO bids ───────────────────────────────────────────────────────
+ipcMain.handle('scrape-wo-bids', async (_e, woData) => {
+  async function getCredential(pm) {
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return null;
+      const store = readStore();
+      const enc = store[CRED_PREFIX + pm.toUpperCase()];
+      if (!enc) return null;
+      const payload = safeStorage.decryptString(Buffer.from(enc, 'base64'));
+      return JSON.parse(payload);
+    } catch (e) { return null; }
+  }
+  return scrapeWO(woData, getCredential);
 });

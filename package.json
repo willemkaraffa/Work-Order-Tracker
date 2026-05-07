@@ -1,6 +1,6 @@
 {
   "name": "work-order-tracker",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Work Order Tracker – Gamble Plumbing Heating and Air",
   "main": "main.js",
   "scripts": {
@@ -43,6 +43,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "scraper.js",
       "index.html",
       "assets/**"
     ],

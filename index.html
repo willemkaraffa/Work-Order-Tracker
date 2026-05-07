@@ -172,6 +172,17 @@ input[type=color]{width:26px;height:24px;border:none;background:none;cursor:poin
 .update-banner.show{display:flex}
 .update-banner button{background:rgba(139,92,246,0.25);border:.5px solid rgba(139,92,246,0.5);color:#a78bfa;font-size:10px;padding:3px 10px}
 .update-banner button:hover{background:rgba(139,92,246,0.4)}
+.stab-bar{display:flex;gap:2px;margin-bottom:14px;border-bottom:.5px solid var(--border);padding-bottom:0}
+.stab{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;padding:5px 12px;font-size:11px;color:var(--text1);cursor:pointer;margin-bottom:-1px}
+.stab:hover{color:var(--text0);background:none}
+.stab.active{color:var(--text0);border-bottom-color:var(--text0);font-weight:600}
+.scrape-item{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:var(--bg2);border-radius:4px;font-size:11px;margin-bottom:3px}
+.scrape-item-name{color:var(--text0);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scrape-item-price{color:#10b981;font-weight:600;margin-left:10px;white-space:nowrap}
+.scrape-warn{background:rgba(245,158,11,.12);border:.5px solid rgba(245,158,11,.4);border-radius:5px;padding:7px 10px;font-size:11px;color:#f59e0b;margin-bottom:10px}
+.scrape-ok{background:rgba(16,185,129,.1);border:.5px solid rgba(16,185,129,.35);border-radius:5px;padding:7px 10px;font-size:11px;color:#10b981;margin-bottom:10px}
+.cred-row{display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
+.cred-pm-header{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text1);margin-bottom:6px;padding-bottom:4px;border-bottom:.5px solid var(--border)}
 </style>
 </head>
 <body>
@@ -259,7 +270,10 @@ let S={orders:[],pms:[...DPMS],statuses:[...DSTATUSES],priorities:[...DPRIORITIE
   importItems:[],importSelected:new Set(),dragSrcType:null,dragSrcIdx:null,
   capturingHotkey:null,
   bulkMode:false,bulkSelected:new Set(),
-  peekId:null,hoveredId:null};
+  peekId:null,hoveredId:null,
+  settingsTab:'general',
+  bidAmountPromptId:null,
+  scrapeResult:null};
 
 const KEY='wo_data';
 const OLD_KEYS=['wo_v4','wo_v3','wo_v2'];
@@ -745,7 +759,27 @@ function toggleFlag(id,field){
   logHistory(id,field+': '+(cur?'cleared':'set'));
   save();render();
 }
-function sendToInvoiced(id){snapshot('send to invoiced');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';logHistory(id,'sent to Invoiced');save();render();scheduleAutoSync();}
+function sendToInvoiced(id){
+  const i=S.orders.findIndex(o=>o.id===id);if(i<0)return;
+  const o=S.orders[i];
+  // Bid amount is mandatory before invoicing
+  if(!o.bidAmount||!String(o.bidAmount).trim()){
+    S.modal='bid-amount-prompt';S.bidAmountPromptId=id;render();return;
+  }
+  snapshot('send to invoiced');
+  o.tab='invoiced';
+  logHistory(id,'sent to Invoiced');
+  save();render();scheduleAutoSync();
+  // Trigger AMH scrape async (non-blocking)
+  if((o.pm||'').toUpperCase()==='AMH'&&window.scraper){
+    toast('Scraping AMH bid items…','',3000);
+    window.scraper.scrapeWO({id:o.id,pm:o.pm,address:o.address}).then(result=>{
+      S.scrapeResult={id,result};render();
+    }).catch(err=>{
+      toast('Scrape error: '+err.message,'err',5000);
+    });
+  }
+}
 function sendToPaid(id){snapshot('mark paid');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='paid';logHistory(id,'marked Paid');save();render();}
 function sendToActive(id){snapshot('back to active');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='active';logHistory(id,'back to Active');save();render();}
 function sendToInvoicedFromPaid(id){snapshot('back to invoiced');const i=S.orders.findIndex(o=>o.id===id);S.orders[i].tab='invoiced';logHistory(id,'back to Invoiced');save();render();}
@@ -962,8 +996,10 @@ function renderHistoryModal(){
 
 function renderSettingsModal(){
   const s=S.settings;
+  const tab=S.settingsTab||'general';
   const hotkeyDisplay=S.capturingHotkey?'<em style="color:#a78bfa">Press keys&hellip; (Esc to cancel)</em>':esc(s.globalHotkey||'(none)');
-  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>&#x2699; Settings</h2>
+
+  const tabGeneral=`
     <div class="fg" style="margin-bottom:10px">
       <label>Focus-Search Key (single key, no modifier)</label>
       <input type="text" maxlength="1" value="${esc(s.keyFocusSearch||'/')}" oninput="setSetting('keyFocusSearch',this.value||'/')" style="width:60px">
@@ -980,24 +1016,6 @@ function renderSettingsModal(){
     <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
       <input type="checkbox" id="optAutoFocus" ${s.autoFocusOnLaunch?'checked':''} onchange="setSetting('autoFocusOnLaunch',this.checked)" style="width:auto">
       <label for="optAutoFocus" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Auto-focus search on launch</label>
-    </div>
-    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
-      <input type="checkbox" id="optAutoSync" ${s.autoSyncOnInvoice?'checked':''} onchange="setSetting('autoSyncOnInvoice',this.checked)" style="width:auto">
-      <label for="optAutoSync" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Auto-sync workbook when sending to Invoiced</label>
-    </div>
-    <div class="fg" style="margin-bottom:10px">
-      <label>Auto-sync debounce (ms)</label>
-      <input type="number" min="500" max="60000" step="500" value="${esc(String(s.autoSyncDebounceMs||4000))}" oninput="setSetting('autoSyncDebounceMs',Math.max(500,Math.min(60000,parseInt(this.value)||4000)))" style="width:120px">
-      <p style="font-size:9px;color:var(--text2);margin-top:3px">Batches multiple Invoice moves into one sync.</p>
-    </div>
-    <div class="fg" style="margin-bottom:10px">
-      <label>RazorSync Invoice Tracker Workbook</label>
-      <div style="display:flex;gap:6px;align-items:center">
-        <input type="text" value="${esc(s.workbookPath||'')}" placeholder="(auto-detect: Desktop\\WORK ORDERS\\RazorSync_Invoice_Tracker.xlsx)" onchange="setSetting('workbookPath',this.value.trim())" style="flex:1">
-        <button onclick="chooseWorkbook()">Browse&hellip;</button>
-        ${s.workbookPath?`<button onclick="setSetting('workbookPath','')">Clear</button>`:''}
-      </div>
-      <p style="font-size:9px;color:var(--text2);margin-top:3px">Leave blank to use the default location. Click Browse to point at the workbook anywhere on disk.</p>
     </div>
     <div class="fg" style="margin-bottom:10px">
       <label>Global Hotkey (works when tracker is minimized)</label>
@@ -1051,12 +1069,142 @@ function renderSettingsModal(){
         }).join('')}
       </div>
       <p style="font-size:9px;color:var(--text2);margin-top:5px">Click to toggle. Settings apply to the currently-selected tab above.</p>
+    </div>`;
+
+  const tabWorkbook=`
+    <div class="fg" style="margin-bottom:10px">
+      <label>RazorSync Invoice Tracker Workbook</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" value="${esc(s.workbookPath||'')}" placeholder="(auto-detect: Desktop\\WORK ORDERS\\RazorSync_Invoice_Tracker.xlsx)" onchange="setSetting('workbookPath',this.value.trim())" style="flex:1">
+        <button onclick="chooseWorkbook()">Browse&hellip;</button>
+        ${s.workbookPath?`<button onclick="setSetting('workbookPath','')">Clear</button>`:''}
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Leave blank to use the default location. Click Browse to point at the workbook anywhere on disk.</p>
     </div>
+    <div class="fg" style="margin-bottom:10px;flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="optAutoSync" ${s.autoSyncOnInvoice?'checked':''} onchange="setSetting('autoSyncOnInvoice',this.checked)" style="width:auto">
+      <label for="optAutoSync" style="text-transform:none;letter-spacing:0;font-size:11px;color:var(--text0)">Auto-sync workbook when sending to Invoiced</label>
+    </div>
+    <div class="fg" style="margin-bottom:10px">
+      <label>Auto-sync debounce (ms)</label>
+      <input type="number" min="500" max="60000" step="500" value="${esc(String(s.autoSyncDebounceMs||4000))}" oninput="setSetting('autoSyncDebounceMs',Math.max(500,Math.min(60000,parseInt(this.value)||4000)))" style="width:120px">
+      <p style="font-size:9px;color:var(--text2);margin-top:3px">Batches multiple Invoice moves into one sync.</p>
+    </div>`;
+
+  const tabCredentials=SCRAPER_PMS.map(pm=>`
+    <div class="cred-row">
+      <div class="cred-pm-header">${esc(pm)}</div>
+      <div class="fg" style="margin-bottom:8px">
+        <label>Username / Email</label>
+        <input type="text" id="cred-user-${pm}" autocomplete="username" placeholder="${esc(pm)} login email" style="width:100%">
+      </div>
+      <div class="fg" style="margin-bottom:8px">
+        <label>Password</label>
+        <input type="password" id="cred-pass-${pm}" autocomplete="current-password" placeholder="Password" style="width:100%">
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn-primary" onclick="saveCredential('${pm}')">Save</button>
+        <button onclick="clearCredential('${pm}')">Clear</button>
+      </div>
+      <p style="font-size:9px;color:var(--text2);margin-top:5px">Stored encrypted on this machine. Used only for automatic bid scraping.</p>
+    </div>`).join('');
+
+  const tabContent = tab==='workbook' ? tabWorkbook : tab==='credentials' ? tabCredentials : tabGeneral;
+
+  return`<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal mm"><h2>&#x2699; Settings</h2>
+    <div class="stab-bar">
+      <button class="stab${tab==='general'?' active':''}" onclick="S.settingsTab='general';render()">General</button>
+      <button class="stab${tab==='workbook'?' active':''}" onclick="S.settingsTab='workbook';render()">Workbook</button>
+      <button class="stab${tab==='credentials'?' active':''}" onclick="S.settingsTab='credentials';render()">Credentials</button>
+    </div>
+    ${tabContent}
     <div class="mact">
       <button onclick="resetSettings()">Reset to Defaults</button>
       <button onclick="closeModal()" class="btn-primary">Done</button>
     </div>
   </div></div>`;
+}
+
+function renderBidAmountPromptModal(){
+  const id=S.bidAmountPromptId;
+  const o=S.orders.find(x=>x.id===id)||{};
+  return`<div class="modal-bg"><div class="modal mm"><h2>Bid Amount Required</h2>
+    <p style="font-size:11px;color:var(--text1);margin-bottom:12px">Enter the approved bid total before invoicing <strong>${esc(id)}</strong>.</p>
+    <div class="fg" style="margin-bottom:14px">
+      <label>Bid Amount ($)</label>
+      <input type="text" id="bid-amount-inp" value="${esc(o.bidAmount||'')}" placeholder="e.g. 214.50" style="width:160px"
+        onkeydown="if(event.key==='Enter')confirmBidAmountAndInvoice()">
+    </div>
+    <div class="mact">
+      <button onclick="S.modal=null;S.bidAmountPromptId=null;render()">Cancel</button>
+      <button class="btn-primary" onclick="confirmBidAmountAndInvoice()">Save &amp; Invoice</button>
+    </div>
+  </div></div>`;
+}
+
+function confirmBidAmountAndInvoice(){
+  const id=S.bidAmountPromptId;
+  const raw=(document.getElementById('bid-amount-inp')||{}).value||'';
+  if(!raw.trim()){toast('Enter a bid amount','err',2000);return;}
+  const i=S.orders.findIndex(o=>o.id===id);
+  if(i<0)return;
+  S.orders[i].bidAmount=raw.trim();
+  S.modal=null;S.bidAmountPromptId=null;
+  save();
+  sendToInvoiced(id);
+}
+
+function renderScrapeResultModal(){
+  if(!S.scrapeResult)return'';
+  const {id,result}=S.scrapeResult;
+  const o=S.orders.find(x=>x.id===id)||{};
+  const bidAmt=parseFloat(String(o.bidAmount||'0').replace(/[^0-9.]/g,''))||0;
+
+  let statusHtml='';
+  if(!result.ok){
+    statusHtml=`<div class="scrape-warn">Scrape failed: ${esc(result.error||'Unknown error')}</div>`;
+  } else if(result.warning){
+    statusHtml=`<div class="scrape-warn">${esc(result.warning)}</div>`;
+  } else {
+    const diff=Math.abs((result.scrapedTotal||0)-bidAmt);
+    if(bidAmt>0&&diff>0.05){
+      statusHtml=`<div class="scrape-warn">Sum mismatch: scraped total $${(result.scrapedTotal||0).toFixed(2)} vs bid amount $${bidAmt.toFixed(2)} (diff $${diff.toFixed(2)}). Review before syncing.</div>`;
+    } else {
+      statusHtml=`<div class="scrape-ok">Bid total $${(result.scrapedTotal||0).toFixed(2)} matches. Ready to sync.</div>`;
+    }
+  }
+
+  const itemsHtml=(result.items&&result.items.length)
+    ?result.items.map(it=>`<div class="scrape-item"><span class="scrape-item-name">${esc(it.name)}</span><span class="scrape-item-price">$${(it.price||0).toFixed(2)}</span></div>`).join('')
+    :'<div style="color:var(--text2);font-size:11px;padding:6px 0">No line items scraped.</div>';
+
+  return`<div class="modal-bg" style="z-index:101"><div class="modal"><h2>AMH Scrape Result &mdash; ${esc(id)}</h2>
+    ${statusHtml}
+    ${result.ok&&result.items&&result.items.length?`<div style="font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">${result.items.length} item${result.items.length!==1?'s':''} scraped</div>${itemsHtml}`:''}
+    <div class="mact">
+      <button onclick="S.scrapeResult=null;render()">Dismiss</button>
+      ${result.ok&&result.items&&result.items.length?`<button class="btn-primary sync-btn" onclick="S.scrapeResult=null;syncWorkbook();render()">Sync Workbook</button>`:''}
+    </div>
+  </div></div>`;
+}
+
+// ── Credentials (settings Credentials tab) ────────────────────────────────────
+const SCRAPER_PMS=['AMH']; // PMs with portal scrapers
+
+async function saveCredential(pm){
+  const u=(document.getElementById('cred-user-'+pm)||{}).value||'';
+  const p=(document.getElementById('cred-pass-'+pm)||{}).value||'';
+  if(!u||!p){toast('Enter both username and password','err',2200);return;}
+  if(!window.creds){toast('Credential storage unavailable','err',2200);return;}
+  const r=await window.creds.set(pm,u,p);
+  if(r&&r.ok){toast(pm+' credentials saved','ok',2000);}
+  else{toast('Failed to save: '+(r&&r.error?r.error:'unknown error'),'err',3000);}
+}
+
+async function clearCredential(pm){
+  if(!window.creds)return;
+  await window.creds.clear(pm);
+  toast(pm+' credentials cleared','ok',2000);
 }
 
 function renderOrderModal(){
@@ -1188,7 +1336,9 @@ function render(){
   else if(S.modal==='import')modalHtml=renderImportModal();
   else if(S.modal==='settings')modalHtml=renderSettingsModal();
   else if(S.modal==='history')modalHtml=renderHistoryModal();
+  else if(S.modal==='bid-amount-prompt')modalHtml=renderBidAmountPromptModal();
   else if(S.modal)modalHtml=renderOrderModal();
+  if(S.scrapeResult)modalHtml+=renderScrapeResultModal();
 
   const _prevSearch=document.getElementById('search-input');
   const _searchHadFocus=_prevSearch&&document.activeElement===_prevSearch;
