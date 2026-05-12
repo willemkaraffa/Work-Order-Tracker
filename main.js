@@ -138,8 +138,19 @@ function setupAutoUpdater(win) {
   autoUpdater.on('update-downloaded',  (info) => win.webContents.send('update-status', { status: 'ready',       version: info.version }));
   autoUpdater.on('error',               (err) => { console.log('Updater error:', err.message); win.webContents.send('update-status', { status: 'none' }); });
 
-  setTimeout(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 3000);
-  setInterval(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 4 * 60 * 60 * 1000);
+  // WO_DEV_UPDATER=fake injects a synthetic 'available' status so the banner
+  // can be exercised in `npm start` without a real release. WO_DEV_UPDATER=real
+  // bypasses the isPackaged gate and hits GitHub like a packaged build would.
+  const devMode = (process.env.WO_DEV_UPDATER || '').toLowerCase();
+  if (devMode === 'fake') {
+    setTimeout(() => win.webContents.send('update-status', { status: 'available', version: 'dev-fake' }), 3000);
+  } else if (devMode === 'real') {
+    setTimeout(() => autoUpdater.checkForUpdates(), 3000);
+    setInterval(() => autoUpdater.checkForUpdates(), 4 * 60 * 60 * 1000);
+  } else {
+    setTimeout(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 3000);
+    setInterval(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 4 * 60 * 60 * 1000);
+  }
 }
 
 // ── Window ────────────────────────────────────────────────────────────────────
@@ -261,6 +272,43 @@ ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
           : e.message;
         resolve({ ok: false, out, err: hint });
       }
+    });
+  }
+  trySpawn('python');
+}));
+
+ipcMain.handle('preflight-check', (_e, overridePath) => new Promise((resolve) => {
+  // Mirrors sync-workbook resolution but runs preflight_qa.py --json instead.
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'preflight_qa.py')
+    : path.join(__dirname, 'preflight_qa.py');
+
+  const wbPath = resolveWorkbookPath(overridePath);
+
+  if (!fs.existsSync(scriptPath)) {
+    return resolve({ ok: false, error: `preflight_qa.py not found at ${scriptPath}` });
+  }
+  if (!fs.existsSync(wbPath)) {
+    return resolve({ ok: false, error: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings.` });
+  }
+
+  let out = '', err = '';
+  function trySpawn(cmd) {
+    const py = spawn(cmd, [scriptPath, '--json', wbPath], { windowsHide: true });
+    py.stdout.on('data', d => { out += d.toString(); });
+    py.stderr.on('data', d => { err += d.toString(); });
+    py.on('close', code => {
+      if (code !== 0) return resolve({ ok: false, error: err.slice(-500) || `Python exited ${code}` });
+      try {
+        const parsed = JSON.parse(out.trim().split('\n').pop());
+        resolve(parsed);
+      } catch (e) {
+        resolve({ ok: false, error: 'Could not parse preflight output: ' + out.slice(0, 200) });
+      }
+    });
+    py.on('error', e => {
+      if (cmd === 'python' && e.code === 'ENOENT') { out = ''; err = ''; trySpawn('python3'); }
+      else resolve({ ok: false, error: e.code === 'ENOENT' ? 'Python not found on PATH.' : e.message });
     });
   }
   trySpawn('python');

@@ -39,6 +39,13 @@ from openpyxl.styles import Font, Alignment, Border, Side
 HERE         = Path(__file__).parent
 WO_JSON      = Path(os.environ.get("APPDATA", "")) / "work-order-tracker" / "wo-data.json"
 SCRAPED_JSON = Path(os.environ.get("APPDATA", "")) / "work-order-tracker" / "scraped_bid_items.json"
+# User-editable manual overrides for service item mapping.
+# Format: {"overrides": {"<lower-cased raw bid item name>": "<Service Items name>"}}
+# Searched first under %APPDATA%/work-order-tracker/, then alongside this script.
+OVERRIDES_JSON_CANDIDATES = [
+    Path(os.environ.get("APPDATA", "")) / "work-order-tracker" / "service_item_overrides.json",
+    HERE / "service_item_overrides.json",
+]
 
 SHEET_NAME = "Invoice Import"
 
@@ -148,6 +155,27 @@ def load_scraped_items():
     except Exception as e:
         print("[WARN] Could not read scraped_bid_items.json: " + str(e))
         return {}
+
+
+# ── User overrides (manual mapping corrections) ───────────────────────────────
+
+def load_overrides():
+    """Load raw-name -> service-item-name overrides. Keys are matched
+    case-insensitively after stripping. Missing/malformed file -> empty dict."""
+    for path in OVERRIDES_JSON_CANDIDATES:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entries = data.get("overrides", {}) if isinstance(data, dict) else {}
+            normed = {str(k).strip().lower(): str(v).strip() for k, v in entries.items() if v}
+            if normed:
+                print("Loaded " + str(len(normed)) + " mapping override(s) from " + path.name)
+            return normed
+        except Exception as e:
+            print("[WARN] Could not read " + path.name + ": " + str(e))
+            return {}
+    return {}
 
 
 # ── Service Items library ─────────────────────────────────────────────────────
@@ -390,12 +418,14 @@ def extract_msr_items(folder_path, wo_date=None):
 
 # ── Service item mapping ──────────────────────────────────────────────────────
 
-def map_to_service_item(name, price, service_items):
+def map_to_service_item(name, price, service_items, overrides=None):
     """
     Return the best-matching service item name from the library, or 'Labor!' / 'Materials!'.
-    Matching: exact -> token Jaccard (boosted when price is close) -> keyword fallback.
+    Matching: user override -> exact -> token Jaccard (boosted when price is close) -> keyword fallback.
     """
-    name_lower = name.lower()
+    name_lower = name.strip().lower()
+    if overrides and name_lower in overrides:
+        return overrides[name_lower]
     name_tok   = _tokenise(name)
 
     best_score = 0.0
@@ -474,7 +504,8 @@ def fill_unit_price_formula(ws, row):
 # ── Main write ────────────────────────────────────────────────────────────────
 
 def write_invoice_import(orders, workbook_path, msr_base=None):
-    scraped = load_scraped_items()
+    scraped   = load_scraped_items()
+    overrides = load_overrides()
 
     wb = load_workbook(workbook_path)
     if SHEET_NAME not in wb.sheetnames:
@@ -543,7 +574,7 @@ def write_invoice_import(orders, workbook_path, msr_base=None):
         if raw_items:
             for i, item in enumerate(raw_items):
                 first    = (i == 0)
-                svc_name = map_to_service_item(item["name"], item["price"], service_items) if service_items else ""
+                svc_name = map_to_service_item(item["name"], item["price"], service_items, overrides) if service_items else (overrides.get(item["name"].strip().lower(), "") if overrides else "")
                 ws.cell(row, 1).value = ""
                 ws.cell(row, 2).value = cname   if first else ""
                 ws.cell(row, 3).value = address if first else ""

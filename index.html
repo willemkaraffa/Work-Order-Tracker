@@ -751,6 +751,59 @@ async function syncWorkbook(silent){
   else{toast('Sync failed: '+((r.err||r.error||'Unknown error').toString().split('\n')[0]),'err',5000);}
 }
 
+async function runPreflight(){
+  if(!window.workbook||!window.workbook.preflight){toast('Preflight unavailable in this build','err',3500);return;}
+  S.preflightResult={loading:true};S.modal='preflight';render();
+  const r=await window.workbook.preflight(S.settings.workbookPath||'');
+  if(!r||!r.ok){
+    S.preflightResult={error:(r&&r.error)||'Unknown error'};render();return;
+  }
+  S.preflightResult={data:r.data};render();
+}
+
+function renderPreflightModal(){
+  const r=S.preflightResult||{};
+  let body='';
+  if(r.loading){
+    body=`<p style="color:var(--text2);font-size:12px">Running preflight against the Invoiced tab&hellip;</p>`;
+  } else if(r.error){
+    body=`<p style="color:#f87171;font-size:12px;white-space:pre-wrap">${esc(r.error)}</p>`;
+  } else {
+    const d=r.data||{};
+    const total=(d.suspiciousId||[]).length+(d.missingMeta||[]).length+(d.noItems||[]).length+(d.msrNoFolder||[]).length+(d.fallback||[]).length+(d.zeroPrice||[]).length;
+    const section=(title,rows,fmt)=>{
+      const n=rows.length;
+      const swatch=n?'color:#fbbf24':'color:#10b981';
+      const list=n?`<ul style="margin:6px 0 12px 18px;padding:0;font-size:11px;color:var(--text1)">${rows.map(fmt).join('')}</ul>`:'';
+      return `<div style="margin-top:10px"><strong style="${swatch}">${esc(title)} (${n})</strong>${list}</div>`;
+    };
+    body=`
+      <p style="color:var(--text2);font-size:11px;margin:0 0 6px 0">${total} issue(s) across ${d.totalOrders||0} Invoiced WO(s).</p>
+      ${section('Suspicious WO IDs (>8 digits)',d.suspiciousId||[],
+        r=>`<li><code>${esc(r.wo)}</code> &mdash; ${esc(r.address||'')}</li>`)}
+      ${section('Missing customer / address',d.missingMeta||[],
+        r=>`<li><code>${esc(r.wo||'(no id)')}</code> pm=${esc(r.pm||'?')} addr='${esc(r.address||'')}'</li>`)}
+      ${section('No line items resolved',d.noItems||[],
+        r=>`<li><code>${esc(r.wo)}</code> ${esc(r.pm||'?')} &mdash; ${esc(r.address||'')} <em style="color:var(--text2)">(${esc(r.source)})</em></li>`)}
+      ${section('MSR address with no folder match',d.msrNoFolder||[],
+        r=>`<li><code>${esc(r.wo)}</code> &mdash; ${esc(r.address||'')}</li>`)}
+      ${section('Mapping fell back to Labor!/Materials!',d.fallback||[],
+        r=>`<li><code>${esc(r.wo)}</code> &mdash; ${esc(r.address||'')}<div style="color:var(--text2);font-size:10px;margin-left:4px">${r.items.map(it=>`${esc(it.name)} &rarr; ${esc(it.mapped)}`).join('<br>')}</div></li>`)}
+      ${section('$0 unit price (will be blank/0 in workbook)',d.zeroPrice||[],
+        r=>`<li><code>${esc(r.wo)}</code> &mdash; ${esc(r.address||'')}<div style="color:var(--text2);font-size:10px;margin-left:4px">${r.items.map(it=>`${esc(it.name)} &rarr; ${esc(it.mapped||'(unmapped)')}`).join('<br>')}</div></li>`)}
+    `;
+  }
+  return `<div class="modal-bg" onclick="if(event.target===this)closePreflight()"><div class="modal mm" style="max-width:720px"><h2>&#x1F50E; Preflight Check</h2>
+    <div style="max-height:480px;overflow-y:auto">${body}</div>
+    <div class="mact">
+      <button onclick="runPreflight()">Re-run</button>
+      <button onclick="closePreflight()" class="btn-primary">Close</button>
+    </div>
+  </div></div>`;
+}
+
+function closePreflight(){S.modal=null;S.preflightResult=null;render();}
+
 function toggleFlag(id,field){
   const i=S.orders.findIndex(o=>o.id===id);if(i<0)return;
   if(field!=='emergency'&&field!=='warranty')return;
@@ -1357,6 +1410,7 @@ function render(){
   else if(S.modal==='settings')modalHtml=renderSettingsModal();
   else if(S.modal==='history')modalHtml=renderHistoryModal();
   else if(S.modal==='bid-amount-prompt')modalHtml=renderBidAmountPromptModal();
+  else if(S.modal==='preflight')modalHtml=renderPreflightModal();
   else if(S.modal)modalHtml=renderOrderModal();
   if(S.scrapeResult)modalHtml+=renderScrapeResultModal();
 
@@ -1375,6 +1429,7 @@ function render(){
       <div class="header-left"><h1>Work Order Tracker</h1><p>Gamble Plumbing Heating and Air &mdash; Raleigh/Durham</p></div>
       <div class="header-right">
         <button class="import-btn" onclick="checkForImports()">&#x1F4E5; Import from Extension</button>
+        <button onclick="runPreflight()" title="Dry-run check of the Invoiced tab before sync">&#x1F50E; Preflight</button>
         <button class="sync-btn" onclick="syncWorkbook()">&#x21BB; Sync Workbook</button>
         <button onclick="openSettings()">&#x2699; Settings</button>
         <button onclick="toggleBulkMode()" style="${S.bulkMode?'background:rgba(167,139,250,.25);border-color:rgba(167,139,250,.5);color:#a78bfa':''}">&#x2611; Bulk</button>

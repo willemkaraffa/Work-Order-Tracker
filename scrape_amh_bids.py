@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 import importlib, json, os, re, subprocess, sys, time, urllib.request, zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -44,6 +45,41 @@ PASSWORD    = "Smart123#"
 LOGIN_URL   = "https://www.amh.com/login"
 WO_LIST_URL = "https://www.amh.com/vendor-admin-orders?tabId=AllOpen"
 API_BASE    = "https://app.amh.com/services-api/api"
+
+# Bid items rarely change once a bid is approved -- cache so batch backfills
+# (scrape-existing-amh.js) skip the Selenium roundtrip on repeat runs.
+CACHE_PATH    = Path(os.environ.get("APPDATA", str(SCRIPT_DIR))) / "work-order-tracker" / "amh_bid_cache.json"
+CACHE_TTL_DAYS = int(os.environ.get("WO_AMH_CACHE_TTL_DAYS", "7"))
+
+
+def load_cache() -> Dict[str, dict]:
+    try:
+        if CACHE_PATH.exists():
+            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[CACHE] Could not read {CACHE_PATH.name}: {exc}", file=sys.stderr)
+    return {}
+
+
+def save_cache(cache: Dict[str, dict]) -> None:
+    try:
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+    except Exception as exc:
+        print(f"[CACHE] Could not write {CACHE_PATH.name}: {exc}", file=sys.stderr)
+
+
+def cache_is_fresh(entry: dict) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    ts = entry.get("scrapedAt")
+    if not ts:
+        return False
+    try:
+        scraped = datetime.fromisoformat(ts)
+    except Exception:
+        return False
+    return datetime.utcnow() - scraped <= timedelta(days=CACHE_TTL_DAYS)
 
 # ── ChromeDriver setup (copied verbatim from remittance scraper) ──────────────
 
@@ -311,7 +347,26 @@ def main():
         print("{}", flush=True)
         return
 
-    print(f"[API] Scraping {len(wo_numbers)} WO(s)...", file=sys.stderr)
+    cache = load_cache()
+    results: Dict[str, dict] = {}
+    to_fetch: List[str] = []
+
+    for wo in wo_numbers:
+        entry = cache.get(wo)
+        if entry and cache_is_fresh(entry) and entry.get("items"):
+            results[wo] = {"ok": True, "items": entry["items"], "scrapedTotal": entry.get("scrapedTotal", 0.0), "fromCache": True}
+            print(f"  {wo}: {len(entry['items'])} item(s) (cached)", file=sys.stderr)
+        else:
+            to_fetch.append(wo)
+
+    if not to_fetch:
+        print(f"[API] All {len(wo_numbers)} WO(s) served from cache. Skipping browser.", file=sys.stderr)
+        print(json.dumps(results), flush=True)
+        return
+
+    print(f"[API] Scraping {len(to_fetch)} WO(s) ({len(wo_numbers) - len(to_fetch)} cached)...", file=sys.stderr)
+    wo_numbers = to_fetch
+
     driver = make_driver()
     try:
         token = login_and_get_token(driver)
@@ -322,7 +377,19 @@ def main():
             pass
 
     print("[API] Fetching Order/Query...", file=sys.stderr)
-    orders = api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"})
+    orders = None
+    last_exc = None
+    for attempt in (1, 2):
+        try:
+            orders = api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"})
+            break
+        except Exception as exc:
+            last_exc = exc
+            print(f"[API] Order/Query attempt {attempt} failed: {exc}", file=sys.stderr)
+            if attempt == 1:
+                time.sleep(4)
+    if orders is None:
+        raise RuntimeError(f"Order/Query failed after retry: {last_exc}")
     if not isinstance(orders, list):
         orders = orders.get("orders") or orders.get("items") or []
     print(f"[API] Got {len(orders)} order(s).", file=sys.stderr)
@@ -335,7 +402,6 @@ def main():
         if name:
             order_map[name] = item
 
-    results = {}
     for wo_num in wo_numbers:
         stripped = re.sub(r"^WO-", "", wo_num, flags=re.I).strip()
         item = order_map.get(stripped)
@@ -376,8 +442,11 @@ def main():
                                "warning": f"No items extracted (bid statuses: {bid_statuses})"}
         else:
             results[wo_num] = {"ok": True, "items": all_items, "scrapedTotal": total}
+            cache[wo_num] = {"items": all_items, "scrapedTotal": total,
+                             "scrapedAt": datetime.utcnow().isoformat(timespec="seconds")}
             print(f"  {wo_num}: {len(all_items)} item(s), ${total}", file=sys.stderr)
 
+    save_cache(cache)
     print(json.dumps(results), flush=True)
 
 if __name__ == "__main__":

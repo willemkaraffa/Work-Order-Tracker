@@ -1,0 +1,11 @@
+{
+  "_comment_format": "Keys are the raw bid item description (lowercased, trimmed). Values are the Service Items name from the workbook (or 'Labor!' / 'Materials!').",
+  "_comment_location": "Active file lives at %APPDATA%/work-order-tracker/service_item_overrides.json. Copy this template there and edit.",
+  "_comment_precedence": "Overrides win over everything: exact match, jaccard, keyword fallback.",
+  "overrides": {
+    "labor to install condensate pump": "Labor!",
+    "condensate pump replacement": "Condensate Pump",
+    "drain line clearing": "Drain Clear",
+    "5-2 ductless mini-split system installed": "Mini-Split Install - 12k BTU"
+  }
+}

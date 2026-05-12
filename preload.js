@@ -28,8 +28,9 @@ contextBridge.exposeInMainWorld('extensionBridge', {
 
 // Workbook sync bridge
 contextBridge.exposeInMainWorld('workbook', {
-  sync: (overridePath) => ipcRenderer.invoke('sync-workbook', overridePath || ''),
-  choose: (currentPath) => ipcRenderer.invoke('choose-workbook', currentPath || '')
+  sync:      (overridePath) => ipcRenderer.invoke('sync-workbook',    overridePath || ''),
+  preflight: (overridePath) => ipcRenderer.invoke('preflight-check',  overridePath || ''),
+  choose:    (currentPath)  => ipcRenderer.invoke('choose-workbook',  currentPath  || '')
 });
 
 // Focus-search bridge — main process pushes when global hotkey fires

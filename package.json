@@ -8,7 +8,8 @@
     "build-win": "electron-builder --win --x64",
     "build-mac": "electron-builder --mac",
     "build-linux": "electron-builder --linux",
-    "publish-win": "electron-builder --win --x64 --publish always"
+    "publish-win": "electron-builder --win --x64 --publish always",
+    "sync-python": "node scripts/copy-python.js"
   },
   "build": {
     "appId": "com.gambleplumbing.workorders",
@@ -51,6 +52,14 @@
       {
         "from": "sync_to_lookup.py",
         "to": "resources/sync_to_lookup.py"
+      },
+      {
+        "from": "scrape_amh_bids.py",
+        "to": "resources/scrape_amh_bids.py"
+      },
+      {
+        "from": "preflight_qa.py",
+        "to": "resources/preflight_qa.py"
       }
     ]
   },
