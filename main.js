@@ -1,10 +1,27 @@
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, globalShortcut, shell, safeStorage } = require('electron');
 const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
 const { spawn }      = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const { scrapeWO }   = require('./scraper');
+
+// Single-instance guard. A second launch focuses the existing window
+// instead of trying to spin up another renderer + bridge server.
+// Phase 16 surfaced EADDRINUSE on the extension bridge port and
+// Chromium cache-lock errors -- both rooted in the second-instance
+// not being collapsed into the first.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  return;
+}
+app.on('second-instance', () => {
+  if (mainWin && !mainWin.isDestroyed()) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  }
+});
 
 // ── Data storage ──────────────────────────────────────────────────────────────
 const dataPath   = path.join(app.getPath('userData'), 'wo-data.json');
@@ -169,7 +186,132 @@ function createWindow() {
 }
 
 let mainWin = null;
+let cachedBrandIcon = null;
 let currentHotkey = 'CommandOrControl+Shift+W';
+
+// ── Tray ──────────────────────────────────────────────────────────────────────
+let tray = null;
+let trayState = {
+  enabled: true,
+  badgeSource: 'attention',
+  attentionCount: 0,
+  activeCount: 0,
+  recents: [],
+};
+
+function showAndFocusMain() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return;
+  const items = [
+    { label: 'Add work order...', click: () => { showAndFocusMain(); if (mainWin) mainWin.webContents.send('tray-action', { kind: 'add' }); } },
+    { type: 'separator' },
+  ];
+  if (trayState.recents && trayState.recents.length) {
+    items.push({ label: 'Recent', enabled: false });
+    trayState.recents.slice(0, 5).forEach(r => {
+      const label = `${r.id} -- ${r.address || ''}`.trim();
+      items.push({
+        label,
+        click: () => {
+          showAndFocusMain();
+          if (mainWin) mainWin.webContents.send('tray-action', { kind: 'select', wo: r.id });
+        },
+      });
+    });
+    items.push({ type: 'separator' });
+  }
+  items.push({ label: 'Open Trade Tracker', click: () => { showAndFocusMain(); if (mainWin) mainWin.webContents.send('tray-action', { kind: 'open' }); } });
+  items.push({ label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
+function applyTrayBadge() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  const src = trayState.badgeSource;
+  let count = 0;
+  if (src === 'attention') count = trayState.attentionCount | 0;
+  else if (src === 'active') count = trayState.activeCount | 0;
+  else count = 0;
+
+  // Windows: overlay icon on taskbar button. macOS: dock badge. Linux: noop.
+  // NOTE: On Windows we reuse the brand icon (or assets/icon.png fallback) as
+  // the overlay. A dedicated tray-badge.png can replace it later if needed.
+  if (process.platform === 'win32') {
+    if (count > 0) {
+      const overlay = cachedBrandIcon || nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
+      mainWin.setOverlayIcon(overlay, String(count));
+    } else {
+      mainWin.setOverlayIcon(null, '');
+    }
+  } else if (process.platform === 'darwin') {
+    app.dock && app.dock.setBadge(count > 0 ? String(count) : '');
+  }
+  if (tray) tray.setToolTip(count > 0 ? `Trade Tracker -- ${count}` : 'Trade Tracker');
+}
+
+function ensureTray() {
+  if (tray || !trayState.enabled) return;
+  // NOTE: assets/icon.png may be 256x256; resize to 16x16 for tray.
+  // On HiDPI macOS this may look soft -- add tray-icon@2x.png later if needed.
+  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
+  tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img.resize({ width: 16, height: 16 }));
+  tray.setToolTip('Trade Tracker');
+  tray.on('click', () => {
+    showAndFocusMain();
+    if (mainWin) mainWin.webContents.send('tray-action', { kind: 'open' });
+  });
+  rebuildTrayMenu();
+}
+
+ipcMain.handle('tray-set-icon', (_event, payload) => {
+  if (!tray || tray.isDestroyed()) return false;
+  try {
+    const x1   = payload && payload.x1;
+    const x2   = payload && payload.x2;
+    const xWin = payload && payload.xWin;
+    if (!x1) return false;
+    // x1 is the 1x bitmap (32x32). nativeImage.createFromBuffer
+    // reads PNG/JPEG; ArrayBuffer is accepted via Buffer.from.
+    const img = nativeImage.createFromBuffer(Buffer.from(x1));
+    if (img.isEmpty()) return false;
+    // Add HiDPI representation if present.
+    if (x2) {
+      try {
+        img.addRepresentation({ scaleFactor: 2, buffer: Buffer.from(x2) });
+      } catch (e) { /* HiDPI add failed -- 1x still works */ }
+    }
+    tray.setImage(img);
+    // xWin is the 256px buffer used for the BrowserWindow icon and overlay.
+    if (xWin) {
+      try {
+        const winImg = nativeImage.createFromBuffer(Buffer.from(xWin));
+        if (!winImg.isEmpty()) {
+          cachedBrandIcon = winImg;
+          if (mainWin && !mainWin.isDestroyed()) {
+            try { mainWin.setIcon(winImg); } catch (e) {}
+          }
+          applyTrayBadge();
+        }
+      } catch (e) {}
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+});
+
+function destroyTray() {
+  if (tray) { try { tray.destroy(); } catch(e) {} tray = null; }
+  if (process.platform === 'win32' && mainWin && !mainWin.isDestroyed()) {
+    try { mainWin.setOverlayIcon(null, ''); } catch(e) {}
+  }
+}
 
 function registerGlobalHotkey(combo) {
   try { globalShortcut.unregisterAll(); } catch(e) {}
@@ -190,10 +332,11 @@ function registerGlobalHotkey(combo) {
 app.whenReady().then(() => {
   mainWin = createWindow();
   registerGlobalHotkey(currentHotkey);
+  ensureTray();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) mainWin = createWindow(); });
 });
 
-app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch(e) {} });
+app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch(e) {} destroyTray(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
 // ── IPC: Storage ──────────────────────────────────────────────────────────────
@@ -211,6 +354,12 @@ ipcMain.handle('set-global-hotkey', (_e, combo) => registerGlobalHotkey(combo));
 ipcMain.handle('pause-global-hotkey', () => { try { globalShortcut.unregisterAll(); } catch(e) {} return true; });
 ipcMain.handle('resume-global-hotkey', () => registerGlobalHotkey(currentHotkey));
 ipcMain.handle('open-external', (_e, url) => { try { shell.openExternal(url); return true; } catch(e) { return false; } });
+ipcMain.handle('tray-set-state', (_e, state) => {
+  trayState = { ...trayState, ...(state || {}) };
+  if (trayState.enabled) { ensureTray(); rebuildTrayMenu(); applyTrayBadge(); }
+  else destroyTray();
+  return true;
+});
 
 // ── IPC: Workbook Sync ────────────────────────────────────────────────────────
 function resolveWorkbookPath(overridePath) {
@@ -261,6 +410,43 @@ ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
           : e.message;
         resolve({ ok: false, out, err: hint });
       }
+    });
+  }
+  trySpawn('python');
+}));
+
+ipcMain.handle('preflight-check', (_e, overridePath) => new Promise((resolve) => {
+  // Mirrors sync-workbook resolution but runs preflight_qa.py --json instead.
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'preflight_qa.py')
+    : path.join(__dirname, 'preflight_qa.py');
+
+  const wbPath = resolveWorkbookPath(overridePath);
+
+  if (!fs.existsSync(scriptPath)) {
+    return resolve({ ok: false, error: `preflight_qa.py not found at ${scriptPath}` });
+  }
+  if (!fs.existsSync(wbPath)) {
+    return resolve({ ok: false, error: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings.` });
+  }
+
+  let out = '', err = '';
+  function trySpawn(cmd) {
+    const py = spawn(cmd, [scriptPath, '--json', wbPath], { windowsHide: true });
+    py.stdout.on('data', d => { out += d.toString(); });
+    py.stderr.on('data', d => { err += d.toString(); });
+    py.on('close', code => {
+      if (code !== 0) return resolve({ ok: false, error: err.slice(-500) || `Python exited ${code}` });
+      try {
+        const parsed = JSON.parse(out.trim().split('\n').pop());
+        resolve(parsed);
+      } catch (e) {
+        resolve({ ok: false, error: 'Could not parse preflight output: ' + out.slice(0, 200) });
+      }
+    });
+    py.on('error', e => {
+      if (cmd === 'python' && e.code === 'ENOENT') { out = ''; err = ''; trySpawn('python3'); }
+      else resolve({ ok: false, error: e.code === 'ENOENT' ? 'Python not found on PATH.' : e.message });
     });
   }
   trySpawn('python');
