@@ -20,6 +20,8 @@
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 6px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
   ::-webkit-scrollbar-track { background: transparent; }
+  .addr-link { cursor: pointer; }
+  .addr-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
@@ -877,7 +879,7 @@ function useWorkOrders() {
       const fresh = () => ({
         orders: [], presets: [],
         statuses: DEFAULT_STATUSES.slice(),
-        phases: DEFAULT_PHASES,
+        phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
         pms:   DEFAULT_PMS.slice(),
         types: DEFAULT_TYPES.slice(),
@@ -902,7 +904,7 @@ function useWorkOrders() {
         if (!Array.isArray(parsed.orders))   parsed.orders   = [];
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
-        if (!Array.isArray(parsed.phases)   || !parsed.phases.length)   parsed.phases   = DEFAULT_PHASES;
+        if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         if (!parsed.statusColors || typeof parsed.statusColors !== 'object') parsed.statusColors = {};
         parsed.statusColors = { ...DEFAULT_STATUS_COLORS, ...parsed.statusColors };
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
@@ -925,7 +927,14 @@ function useWorkOrders() {
     const cur = dataRef.current;
     if (!cur) return;
     const orders = cur.orders.map(o => o.id === id ? mutator(o) : o);
-    const next = { ...cur, orders };
+    // v2.6.0 parity: editing a WO and typing a new tech name into the field
+    // should add it to the techs list so future dropdowns include it.
+    const edited = orders.find(o => o.id === id);
+    let techs = cur.techs;
+    if (edited && edited.tech && !techs.includes(edited.tech)) {
+      techs = [...techs, edited.tech];
+    }
+    const next = { ...cur, orders, techs };
     dataRef.current = next;
     setData(next);
     if (window.storage && window.storage.set) {
@@ -950,7 +959,14 @@ function useWorkOrders() {
     const cur = dataRef.current;
     if (!cur) return;
     const orders = cur.orders.map(o => predicate(o) ? mutator(o) : o);
+    // v2.6.0 parity: bulk-edit can assign a new tech name; ensure it lands in techs.
+    const techsSet = new Set(cur.techs || []);
+    let techsChanged = false;
+    for (const o of orders) {
+      if (o.tech && !techsSet.has(o.tech)) { techsSet.add(o.tech); techsChanged = true; }
+    }
     const next = { ...cur, orders };
+    if (techsChanged) next.techs = Array.from(techsSet);
     dataRef.current = next;
     setData(next);
     if (window.storage && window.storage.set) {
@@ -1031,27 +1047,114 @@ function useWorkOrders() {
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
 
+  // Mechanism ported from v2.6.0 import handler: extension payload uses
+  // sequential WO-### as `inc.id` and the real portal WO# as `inc.woId`.
+  // v3.0.0's previous spread-only upsert ignored woId, so MSR/AMH captures
+  // landed under WO-### instead of the portal number, and propertyId from a
+  // prior AMH spread leaked onto unrelated rows. Behavior here:
+  //   id := inc.woId when present and not colliding; else honor matching
+  //   inc.id; else mint sequential WO-###. Address/propertyId/phone dedup
+  //   silently skips re-captures. Explicit field map prevents stale fields
+  //   from one payload contaminating another row.
   const upsertOrders = React.useCallback((incoming) => {
     const cur = dataRef.current;
-    if (!cur || !Array.isArray(incoming) || !incoming.length) return 0;
-    const byId = new Map((cur.orders || []).map(o => [o.id, o]));
-    let count = 0;
-    for (const inc of incoming) {
-      if (!inc || !inc.id) continue;
-      if (byId.has(inc.id)) {
-        const old = byId.get(inc.id);
-        byId.set(inc.id, { ...old, ...inc,
-          history: [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }] });
-      } else {
-        byId.set(inc.id, { deleted: false, tab: inc.tab || 'active', ...inc,
-          history: [{ ts: Date.now(), action: 'imported', detail: '' }] });
-      }
-      count++;
+    if (!cur || !Array.isArray(incoming) || !incoming.length) {
+      return { imported: 0, dupSkipped: 0 };
     }
+    const byId = new Map((cur.orders || []).map(o => [o.id, o]));
+
+    const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const digits = (s) => String(s || '').replace(/\D/g, '');
+    const findDuplicate = (item) => {
+      const addr = norm(item.address);
+      const pid  = norm(item.propertyId);
+      const ph   = digits(item.phone);
+      for (const o of byId.values()) {
+        if (o.deleted) continue;
+        if (pid && norm(o.propertyId) === pid) return o;
+        if (addr && norm(o.address) === addr) return o;
+        if (ph && ph.length >= 10 && digits(o.phone) === ph) return o;
+      }
+      return null;
+    };
+
+    const idNum = (o) => parseInt(String(o.id || '').replace(/[^0-9]/g, ''), 10) || 0;
+    let nextNum = Math.max(0, ...Array.from(byId.values()).map(idNum)) + 1;
+    let imported = 0, dupSkipped = 0;
+    const techsSet = new Set(cur.techs || []);
+    let techsChanged = false;
+
+    for (const inc of incoming) {
+      if (!inc) continue;
+
+      const portalWo = String(inc.woId || '').trim();
+      let id;
+      if (portalWo && byId.has(portalWo))               id = portalWo;
+      else if (portalWo)                                id = portalWo;
+      else if (inc.id && byId.has(inc.id))              id = inc.id;
+      else {
+        const dup = findDuplicate(inc);
+        if (dup) { dupSkipped++; continue; }
+        id = 'WO-' + String(nextNum++).padStart(3, '0');
+      }
+
+      if (byId.has(id)) {
+        const old = byId.get(id);
+        byId.set(id, {
+          ...old,
+          pm:          inc.pm          || old.pm,
+          type:        inc.type        || old.type,
+          address:     inc.address     || old.address,
+          phone:       inc.phone       ? formatPhone(inc.phone) : old.phone,
+          tech:        inc.tech        || old.tech,
+          status:      inc.status      || old.status,
+          priority:    inc.priority    || old.priority,
+          notes:       inc.notes       || old.notes,
+          dateCreated: inc.dateCreated || old.dateCreated,
+          propertyId:  inc.propertyId  || old.propertyId,
+          city:        inc.city        || old.city,
+          portalLink:  inc.portalLink  || old.portalLink,
+          bidItems:    (Array.isArray(inc.bidItems) && inc.bidItems.length) ? inc.bidItems : old.bidItems,
+          history: [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }],
+        });
+      } else {
+        // New row by portal woId or explicit id — still dedup by address/phone/propertyId.
+        const dup = findDuplicate(inc);
+        if (dup) { dupSkipped++; continue; }
+        const wo = {
+          id,
+          pm:            inc.pm || '',
+          type:          inc.type || 'Other',
+          address:       inc.address || '',
+          phone:         formatPhone(inc.phone || ''),
+          tech:          inc.tech || '',
+          status:        inc.status || 'Open',
+          priority:      inc.priority || 'Medium',
+          notes:         inc.notes || '',
+          dateCreated:   inc.dateCreated || new Date().toISOString().slice(0, 10),
+          tab:           'active',
+          deleted:       false,
+          propertyId:    inc.propertyId || '',
+          bidAmount:     inc.bidAmount || '',
+          dateOfService: '',
+          portalLink:    inc.portalLink || '',
+          city:          inc.city || '',
+          emergency:     !!inc.emergency,
+          warranty:      !!inc.warranty,
+          bidItems:      Array.isArray(inc.bidItems) ? inc.bidItems : [],
+          history:       [{ ts: Date.now(), action: 'imported', detail: '' }],
+        };
+        byId.set(id, wo);
+        if (wo.tech && !techsSet.has(wo.tech)) { techsSet.add(wo.tech); techsChanged = true; }
+      }
+      imported++;
+    }
+
     const next = { ...cur, orders: Array.from(byId.values()) };
+    if (techsChanged) next.techs = Array.from(techsSet);
     dataRef.current = next; setData(next);
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
-    return count;
+    return { imported, dupSkipped };
   }, []);
 
   const updateData = React.useCallback((patch) => {
@@ -1950,6 +2053,13 @@ function DetailOverflow({ data, onAction, statuses }) {
   );
 }
 
+function openMaps(addr) {
+  if (!addr || !addr.trim()) return;
+  const url = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(addr.trim());
+  if (window.shell && window.shell.openExternal) window.shell.openExternal(url);
+  else window.open(url, '_blank');
+}
+
 function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEdit, onAction, statuses }) {
   if (!data) {
     return (
@@ -1996,7 +2106,10 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
           </div>
         </div>
         <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.005em', marginTop: 2 }}>
-          {data.addr}{data.city && <>{' '}<span style={{ color: 'var(--text-2)', fontWeight: 400 }}>· {data.city}</span></>}
+          {data.addr
+            ? <span className="addr-link" onClick={() => openMaps(data.addr + (data.city ? ', ' + data.city : ''))} title="Open in Google Maps">{data.addr}</span>
+            : null}
+          {data.city && <>{' '}<span style={{ color: 'var(--text-2)', fontWeight: 400 }}>· {data.city}</span></>}
         </div>
         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
           {data.tab === 'invoiced'
@@ -3553,7 +3666,7 @@ function App() {
   const loading = data === null;
   const orders  = data?.orders  || [];
   const presets = data?.presets || [];
-  const phases  = (data?.phases && data.phases.length) ? data.phases : DEFAULT_PHASES;
+  const phases  = Array.isArray(data?.phases) ? data.phases : DEFAULT_PHASES;
   const statusColors = data?.statusColors || DEFAULT_STATUS_COLORS;
   const statuses = data?.statuses || DEFAULT_STATUSES;
   const settings = data?.settings || {};
@@ -3748,8 +3861,13 @@ function App() {
   React.useEffect(() => {
     if (window.extensionBridge && window.extensionBridge.onImport) {
       window.extensionBridge.onImport((incoming) => {
-        const count = upsertOrders(incoming);
-        if (count) toast(count + ' WO(s) imported');
+        const { imported, dupSkipped } = upsertOrders(incoming);
+        if (imported && dupSkipped)
+          toast(`Imported ${imported} · skipped ${dupSkipped} duplicate(s)`);
+        else if (imported)
+          toast(`Imported ${imported} WO${imported === 1 ? '' : 's'}`);
+        else if (dupSkipped)
+          toast(`Skipped ${dupSkipped} duplicate(s) (already in tracker)`);
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
       });
     }
@@ -4049,21 +4167,51 @@ function App() {
     }
   }, [batchUpdate, toast, workbookPath]);
 
+  // v2.6.0 parity: export the full visible row set with all tracker columns,
+  // not just the 9 display fields. viewData.groups carries the filtered/sorted
+  // row order; we look the original order up by id so phone/bid/dateCreated/notes
+  // round-trip into the CSV. Phase is taken from the group label.
   const exportViewCsv = React.useCallback(() => {
     if (!window.electronExport || !window.electronExport.saveCsv) {
       toast('CSV export unavailable', 'err');
       return;
     }
-    const rows = (viewData.groups || []).flatMap(g => g.rows || []);
+    const groups = viewData.groups || [];
+    const orderById = new Map((orders || []).map(o => [o.id, o]));
+    const rows = [];
+    for (const g of groups) {
+      for (const r of (g.rows || [])) {
+        const o = orderById.get(r.wo);
+        if (!o) continue;
+        rows.push({ o, phase: g.phase || '' });
+      }
+    }
     if (!rows.length) { toast('Nothing to export', 'err'); return; }
-    const header = ['WO#', 'Address', 'City', 'PM', 'Type', 'Status', 'Tech', 'Bid', 'Phase'].join(',');
-    const lines = rows.map(r =>
-      [r.wo, r.addr, r.city, r.pm, r.type, r.status, r.tech, r.bid, r.phase]
-        .map(v => '"' + String(v || '').replace(/"/g, '""') + '"')
-        .join(',')
+    const cols = [
+      ['WO#',          o => o.id],
+      ['Property ID',  o => o.propertyId || ''],
+      ['PM',           o => o.pm || ''],
+      ['Type',         o => o.type || ''],
+      ['Address',      o => o.address || ''],
+      ['City',         o => o.city || ''],
+      ['Phone',        o => o.phone || ''],
+      ['Tech',         o => o.tech || ''],
+      ['Status',       o => o.status || ''],
+      ['Priority',     o => o.priority || ''],
+      ['Bid Amount',   o => o.bidAmount || ''],
+      ['Date Created', o => o.dateCreated || ''],
+      ['Tab',          o => o.tab || 'active'],
+      ['Phase',        (_o, phase) => phase],
+      ['Notes',        o => o.notes || ''],
+      ['Portal Link',  o => o.portalLink || ''],
+    ];
+    const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const header = cols.map(c => c[0]).join(',');
+    const body = rows.map(({ o, phase }) =>
+      cols.map(c => esc(c[1](o, phase))).join(',')
     );
-    window.electronExport.saveCsv([header, ...lines].join('\n'));
-  }, [viewData, toast]);
+    window.electronExport.saveCsv([header, ...body].join('\n'));
+  }, [viewData, orders, toast]);
 
   const bulkMarkInvoiced = React.useCallback(async () => {
     const ts = Date.now();
