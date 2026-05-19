@@ -47,6 +47,32 @@ API_BASE    = "https://app.amh.com/services-api/api"
 
 # ── ChromeDriver setup (copied verbatim from remittance scraper) ──────────────
 
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # subprocess.CREATE_NO_WINDOW
+
+def _read_chrome_version_from_registry() -> Optional[str]:
+    """Read Chrome's installed version from Windows registry. Avoids launching
+    chrome.exe --version, which flashes a brief Chrome window."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    candidates = [
+        (winreg.HKEY_CURRENT_USER,  r"Software\Google\Chrome\BLBeacon"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Wow6432Node\Google\Chrome\BLBeacon"),
+    ]
+    for hive, path in candidates:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                value, _ = winreg.QueryValueEx(key, "version")
+                if value and re.match(r"\d+\.\d+\.\d+\.\d+", value):
+                    return value
+        except OSError:
+            continue
+    return None
+
 def get_windows_chrome_path() -> Optional[str]:
     win_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -58,7 +84,8 @@ def get_windows_chrome_path() -> Optional[str]:
             return p
     try:
         out = subprocess.check_output("where chrome", shell=True,
-                                      stderr=subprocess.DEVNULL).decode(errors="ignore")
+                                      stderr=subprocess.DEVNULL,
+                                      creationflags=_NO_WINDOW).decode(errors="ignore")
         for line in out.splitlines():
             cand = line.strip()
             if cand and os.path.exists(cand):
@@ -68,11 +95,17 @@ def get_windows_chrome_path() -> Optional[str]:
     return None
 
 def get_chrome_full_version() -> Optional[str]:
+    # Prefer registry on Windows -- avoids launching chrome.exe at all.
+    if sys.platform == "win32":
+        v = _read_chrome_version_from_registry()
+        if v:
+            return v
     chrome_path = get_windows_chrome_path() if sys.platform == "win32" else None
     if chrome_path:
         try:
             out = subprocess.check_output([chrome_path, "--version"],
-                                          stderr=subprocess.DEVNULL).decode(errors="ignore")
+                                          stderr=subprocess.DEVNULL,
+                                          creationflags=_NO_WINDOW).decode(errors="ignore")
             m = re.search(r"[\d]+\.[\d]+\.[\d]+\.[\d]+", out)
             if m:
                 return m.group(0)

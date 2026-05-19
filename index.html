@@ -429,8 +429,9 @@ function SortDropdown({ sort, onChange }) {
     document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [open]);
-  const label = (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
-  const arrow = sort.dir === 'asc' ? '↑' : '↓';
+  const cleared = !sort.key;
+  const label = cleared ? 'Phase order' : (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
+  const arrow = cleared ? '' : (sort.dir === 'asc' ? '↑' : '↓');
   return (
     <div ref={wrapRef} style={{ position: 'relative' }}>
       <div onClick={() => setOpen(o => !o)} style={{
@@ -448,6 +449,10 @@ function SortDropdown({ sort, onChange }) {
           boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
           padding: '4px 0', zIndex: 60,
         }}>
+          <MenuItem onClick={() => { onChange({ key: '', dir: sort.dir }); setOpen(false); }}>
+            {cleared ? '* ' : '  '}Phase order (default)
+          </MenuItem>
+          <MenuDivider />
           {SORT_DEFS.map(s => (
             <MenuItem key={s.key} onClick={() => { onChange({ key: s.key, dir: sort.dir }); setOpen(false); }}>
               {s.key === sort.key ? '* ' : '  '}{s.label}
