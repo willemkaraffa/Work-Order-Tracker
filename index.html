@@ -2605,6 +2605,25 @@ const miniBtnStyle = {
   cursor: 'pointer', flexShrink: 0, lineHeight: 1,
 };
 
+// Reusable up/down reorder buttons. Used by Workflow editors (phases,
+// statuses, PMs, types, techs) and any future ordered list.
+function ReorderBtns({ onUp, onDown, disableUp, disableDown }) {
+  return (
+    <span style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
+      <button onClick={onUp}   style={miniBtnStyle} disabled={disableUp}>{'▲'}</button>
+      <button onClick={onDown} style={miniBtnStyle} disabled={disableDown}>{'▼'}</button>
+    </span>
+  );
+}
+
+// Generic swap helper for ordered arrays. Returns a new array.
+function swapAt(arr, i, j) {
+  if (i < 0 || j < 0 || i >= arr.length || j >= arr.length) return arr;
+  const next = [...arr];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
 function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs }) {
   const [statusesOpen, setStatusesOpen] = React.useState(false);
   const [pmsOpen, setPmsOpen] = React.useState(false);
@@ -2620,18 +2639,8 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
     }
     setEditingId(null);
   };
-  const moveUp = (idx) => {
-    if (idx === 0) return;
-    const next = [...phases];
-    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-    setPhases(next);
-  };
-  const moveDown = (idx) => {
-    if (idx === phases.length - 1) return;
-    const next = [...phases];
-    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-    setPhases(next);
-  };
+  const moveUp = (idx) => setPhases(swapAt(phases, idx, idx - 1));
+  const moveDown = (idx) => setPhases(swapAt(phases, idx, idx + 1));
   const addPhase = () => {
     const id = 'ph_' + Date.now().toString(36);
     setPhases([...phases, { id, name: 'New phase', fg: '#6b7280', bg: 'var(--bg-surface-2)', statuses: [] }]);
@@ -2657,10 +2666,10 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
             border: '1px solid var(--border-1)', borderRadius: 6,
             background: 'var(--bg-surface)', minWidth: 0,
           }}>
-            <span style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
-              <button onClick={() => moveUp(idx)} style={miniBtnStyle} disabled={idx === 0}>{'▲'}</button>
-              <button onClick={() => moveDown(idx)} style={miniBtnStyle} disabled={idx === phases.length - 1}>{'▼'}</button>
-            </span>
+            <ReorderBtns
+              onUp={() => moveUp(idx)} onDown={() => moveDown(idx)}
+              disableUp={idx === 0} disableDown={idx === phases.length - 1}
+            />
             <input
               type="color"
               value={normalizeHex(p.fg)}
@@ -2827,6 +2836,23 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
     setNewName('');
   };
 
+  // Per-phase status order auto-derives from the global order: filter each
+  // phase's status list against the new global ordering. Keeps phases in
+  // sync without a separate UI.
+  const syncPhasesToGlobal = (newGlobal) => {
+    if (!phases || !setPhases) return;
+    setPhases(phases.map(p => ({
+      ...p,
+      statuses: newGlobal.filter(s => (p.statuses || []).includes(s)),
+    })));
+  };
+  const moveStatus = (idx, delta) => {
+    const next = swapAt(statuses, idx, idx + delta);
+    if (next === statuses) return;
+    setStatuses(next);
+    syncPhasesToGlobal(next);
+  };
+
   const setColor = (name, hex) => setStatusColors({ ...statusColors, [name]: hex });
 
   const selectStyle = {
@@ -2870,6 +2896,10 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => moveStatus(idx, -1)} onDown={() => moveStatus(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === statuses.length - 1}
+              />
               <input
                 type="color"
                 value={statusColors[s] || '#6b7280'}
@@ -2974,6 +3004,8 @@ function PMsEditor({ pms, setPms, onClose }) {
     setNewColor('#1a73e8');
   };
 
+  const movePm = (idx, delta) => setPms(swapAt(pms, idx, idx + delta));
+
   return (
     <div
       style={{
@@ -3008,6 +3040,10 @@ function PMsEditor({ pms, setPms, onClose }) {
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => movePm(idx, -1)} onDown={() => movePm(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === pms.length - 1}
+              />
               <input
                 type="color"
                 value={normalizeHex(pm.color)}
@@ -3098,6 +3134,8 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
     setNewName('');
   };
 
+  const moveItem = (idx, delta) => setItems(swapAt(items, idx, idx + delta));
+
   return (
     <div
       style={{
@@ -3132,6 +3170,10 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => moveItem(idx, -1)} onDown={() => moveItem(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === items.length - 1}
+              />
               {editingIdx === idx
                 ? <input
                     ref={editInputRef}
