@@ -668,7 +668,18 @@ function groupByPhase(orders, phases) {
   const groups = [];
   for (const p of list) {
     if (buckets[p.name] && buckets[p.name].length) {
-      groups.push({ phase: p.name, count: buckets[p.name].length, rows: buckets[p.name], dot: p.fg });
+      // Sort rows within the phase by status position in the phase's status
+      // list (the per-phase order set in Settings -> Workflow -> Manage statuses).
+      // Tie-break: newest first by createdTs. User-applied sortRows overrides
+      // this downstream when a sort is active.
+      const orderMap = new Map((p.statuses || []).map((s, i) => [s, i]));
+      const rows = [...buckets[p.name]].sort((a, b) => {
+        const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
+        const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
+        if (ai !== bi) return ai - bi;
+        return (b.createdTs || 0) - (a.createdTs || 0);
+      });
+      groups.push({ phase: p.name, count: rows.length, rows, dot: p.fg });
     }
   }
   // Catch any unrecognized bucket names
