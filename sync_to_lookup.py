@@ -30,7 +30,7 @@ item rows leave those columns blank for readability.
 Requirements: pip install openpyxl
 """
 
-import json, os, re, sys
+import json, os, re, subprocess, sys
 from datetime import datetime
 from pathlib import Path
 from openpyxl import load_workbook
@@ -54,6 +54,46 @@ ALIGN_LEFT  = Alignment(horizontal="left", vertical="center")
 ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
 THIN        = Side(border_style="thin", color="BFBFBF")
 CELL_BORDER = Border(left=THIN, right=THIN, bottom=THIN)
+
+# ── AMH live bid-item fetch ────────────────────────────────────────────────────
+
+def _prefetch_amh_bid_items(orders):
+    """Call scrape_amh_bids.py once for all AMH WOs missing bidItems.
+    Returns {wo_id: [{name, price, qty}]} keyed by o['id']."""
+    missing = [
+        (o.get("id") or "").strip()
+        for o in orders
+        if (o.get("pm") or "") == "AMH"
+        and not (o.get("bidItems") or [])
+        and (o.get("id") or "").strip()
+    ]
+    if not missing:
+        return {}
+    scraper = HERE / "scrape_amh_bids.py"
+    if not scraper.exists():
+        print("[AMH] scrape_amh_bids.py not found next to sync_to_lookup.py -- cannot fetch bid items")
+        return {}
+    print("[AMH] Fetching bid items for " + str(len(missing)) + " WO(s) via scrape_amh_bids.py...")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(scraper)],
+            input=json.dumps(missing),
+            capture_output=True, text=True, encoding="utf-8", timeout=300
+        )
+        if result.returncode != 0:
+            print("[AMH] scrape_amh_bids.py failed: " + result.stderr[-300:])
+            return {}
+        data = json.loads(result.stdout)
+        fetched = {}
+        for wo_num, res in data.items():
+            if res.get("ok") and res.get("items"):
+                fetched[wo_num] = res["items"]
+                print("  [AMH API] " + wo_num + ": " + str(len(res["items"])) + " item(s)")
+        return fetched
+    except Exception as e:
+        print("[AMH] Prefetch failed: " + str(e))
+        return {}
+
 
 # Street type normalisation (expand or abbreviate -> canonical abbreviation)
 _STREET_TYPES = {
@@ -474,7 +514,8 @@ def fill_unit_price_formula(ws, row):
 # ── Main write ────────────────────────────────────────────────────────────────
 
 def write_invoice_import(orders, workbook_path, msr_base=None):
-    scraped = load_scraped_items()
+    scraped      = load_scraped_items()
+    amh_fetched  = _prefetch_amh_bid_items(orders)
 
     wb = load_workbook(workbook_path)
     if SHEET_NAME not in wb.sheetnames:
@@ -537,7 +578,20 @@ def write_invoice_import(orders, workbook_path, msr_base=None):
                 ]
                 print("  [AMH] " + str(len(raw_items)) + " bid item(s) from extension capture")
             else:
-                print("  [AMH] No bidItems for " + wo_id + " -- run /sync-wo-tracker skill first")
+                amh_wo_num = (o.get("id") or "").strip()
+                fetched    = amh_fetched.get(amh_wo_num, [])
+                if fetched:
+                    raw_items = [
+                        {
+                            "name":  item.get("name", ""),
+                            "price": float(item.get("price", 0) or 0),
+                            "qty":   int(item.get("qty", 1) or 1),
+                        }
+                        for item in fetched if item.get("name")
+                    ]
+                    print("  [AMH] " + str(len(raw_items)) + " bid item(s) fetched from API for " + wo_id)
+                else:
+                    print("  [AMH] No bid items found for " + wo_id + " (WO# " + amh_wo_num + ")")
 
         # --- Write rows ---
         if raw_items:

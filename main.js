@@ -242,11 +242,24 @@ ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
     return resolve({ ok: false, out: '', err: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings -> RazorSync Invoice Tracker Workbook.` });
   }
 
+  // Decrypt stored AMH credentials and pass to Python via environment variables
+  let spawnEnv = process.env;
+  try {
+    const store = readStore();
+    const enc = store[CRED_PREFIX + 'AMH'];
+    if (enc && safeStorage.isEncryptionAvailable()) {
+      const creds = JSON.parse(safeStorage.decryptString(Buffer.from(enc, 'base64')));
+      if (creds && creds.username) {
+        spawnEnv = { ...process.env, AMH_EMAIL: creds.username, AMH_PASSWORD: creds.password || '' };
+      }
+    }
+  } catch (e) { /* no creds stored or decrypt failed — Python falls back to defaults */ }
+
   // Try 'python' first; fall back to 'python3' (common on Windows where the
   // Store stub redirects or the user installed via python.org with 'python3').
   let out = '', err = '';
   function trySpawn(cmd) {
-    const py = spawn(cmd, [scriptPath, wbPath], { windowsHide: true });
+    const py = spawn(cmd, [scriptPath, wbPath], { windowsHide: true, env: spawnEnv });
     py.stdout.on('data', d => { out += d.toString(); });
     py.stderr.on('data', d => { err += d.toString(); });
     py.on('close', code => resolve({ ok: code === 0, out, err }));

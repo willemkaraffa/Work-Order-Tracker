@@ -39,8 +39,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ── constants (same as remittance scraper) ────────────────────────────────────
 
 SCRIPT_DIR  = Path(os.path.dirname(os.path.abspath(__file__)))
-EMAIL       = "dgamble4084@gmail.com"
-PASSWORD    = "Smart123#"
+EMAIL       = os.environ.get("AMH_EMAIL")    or "dgamble4084@gmail.com"
+PASSWORD    = os.environ.get("AMH_PASSWORD") or "Smart123#"
 LOGIN_URL   = "https://www.amh.com/login"
 WO_LIST_URL = "https://www.amh.com/vendor-admin-orders?tabId=AllOpen"
 API_BASE    = "https://app.amh.com/services-api/api"
