@@ -2060,7 +2060,7 @@ function openMaps(addr) {
   else window.open(url, '_blank');
 }
 
-function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEdit, onAction, statuses }) {
+function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onEdit, onAction, statuses }) {
   if (!data) {
     return (
       <section style={{
@@ -2148,7 +2148,14 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
         flex: 1, minHeight: 0, overflowY: 'auto',
       }}>
         <NoteComposer onSave={(note) => onAddNote && onAddNote(data.wo, note)} />
-        {data.notes.map((n, i) => <NoteCard key={n.id ?? i} {...n} />)}
+        {data.notes.map((n, i) => (
+          <NoteCard
+            key={n.id ?? i} {...n}
+            onEdit={onEditNote && !n.legacy ? (newBody) => onEditNote(data.wo, n.id, newBody) : null}
+            onDelete={onDeleteNote && !n.legacy ? () => onDeleteNote(data.wo, n.id) : null}
+            onPin={onPinNote && !n.legacy ? () => onPinNote(data.wo, n.id) : null}
+          />
+        ))}
       </div>
 
       <div style={{
@@ -2239,13 +2246,40 @@ function NoteComposer({ onSave }) {
   );
 }
 
-function NoteCard({ type, time, body, pinned, edited }) {
+function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit, onDelete, onPin }) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [editing, setEditing]   = React.useState(false);
+  const [draft, setDraft]       = React.useState(body);
+  const wrapRef = React.useRef(null);
+
+  React.useEffect(() => { setDraft(body); }, [body]);
+
+  React.useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [menuOpen]);
+
+  const saveEdit = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== body && onEdit) onEdit(trimmed);
+    setEditing(false);
+  };
+
+  const showMenu = !legacy && (onEdit || onDelete || onPin);
+
+  const menuItemStyle = { padding: '6px 12px', fontSize: 13, cursor: 'pointer', color: 'var(--text-1)' };
+
   return (
-    <div style={{
+    <div ref={wrapRef} style={{
       border: '1px solid var(--border-1)',
       background: pinned ? 'var(--accent-soft)' : 'var(--bg-surface)',
       borderRadius: 8,
       padding: '12px 14px',
+      position: 'relative',
     }}>
       <div style={{
         display: 'flex', alignItems: 'baseline', gap: 8,
@@ -2256,9 +2290,69 @@ function NoteCard({ type, time, body, pinned, edited }) {
         <Dot />
         <span style={{ fontVariantNumeric: 'tabular-nums' }}>{time}</span>
         {edited && <span style={{ color: 'var(--text-3)' }}>· edited</span>}
-        <span style={{ marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer' }}>{'⋯'}</span>
+        {showMenu && (
+          <span
+            onClick={(e) => { e.stopPropagation(); setMenuOpen(m => !m); }}
+            style={{
+              marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer',
+              padding: '0 6px', userSelect: 'none',
+            }}
+            title="Note actions"
+          >{'⋯'}</span>
+        )}
       </div>
-      <div style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)' }}>{body}</div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            autoFocus
+            style={{
+              width: '100%', fontFamily: 'inherit', fontSize: 15,
+              background: 'transparent', color: 'var(--text-1)',
+              border: '1px solid var(--border-2)', borderRadius: 4,
+              padding: 6, resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
+            <button onClick={() => { setDraft(body); setEditing(false); }} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+              border: '1px solid var(--border-2)', borderRadius: 4, cursor: 'pointer',
+            }}>Cancel</button>
+            <button onClick={saveEdit} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--accent)', color: 'white',
+              border: 'none', borderRadius: 4, cursor: 'pointer',
+            }}>Save</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)', whiteSpace: 'pre-wrap' }}>{body}</div>
+      )}
+      {menuOpen && (
+        <div style={{
+          position: 'absolute', top: 30, right: 8, zIndex: 20,
+          background: 'var(--bg-surface-2)',
+          border: '1px solid var(--border-2)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+          minWidth: 140, padding: '4px 0',
+        }}>
+          {onEdit && (
+            <div onClick={() => { setEditing(true); setMenuOpen(false); }} style={menuItemStyle}>Edit</div>
+          )}
+          {onPin && (
+            <div onClick={() => { onPin(); setMenuOpen(false); }} style={menuItemStyle}>{pinned ? 'Unpin' : 'Pin'}</div>
+          )}
+          {onDelete && (
+            <div onClick={() => {
+              if (window.confirm('Delete this note?')) onDelete();
+              setMenuOpen(false);
+            }} style={{ ...menuItemStyle, color: 'var(--flag-emergency)' }}>Delete</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4289,6 +4383,44 @@ function App() {
     });
   }, [updateOrder]);
 
+  const editNote = React.useCallback((id, noteId, newBody) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      return {
+        ...cur,
+        noteCards: cards.map(c => c.id === noteId ? { ...c, body: newBody, edited: true } : c),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: 'note edited', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
+  const deleteNote = React.useCallback((id, noteId) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      return {
+        ...cur,
+        noteCards: cards.filter(c => c.id !== noteId),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: 'note deleted', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
+  const togglePinNote = React.useCallback((id, noteId) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      const target = cards.find(c => c.id === noteId);
+      const willPin = target && !target.pinned;
+      return {
+        ...cur,
+        noteCards: cards.map(c => c.id === noteId ? { ...c, pinned: !c.pinned } : c),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: willPin ? 'note pinned' : 'note unpinned', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
     const id = selectedWO;
@@ -4448,6 +4580,9 @@ function App() {
       onMarkPaid={markPaid}
       onSyncWO={retrySyncWO}
       onAddNote={addNote}
+      onEditNote={editNote}
+      onDeleteNote={deleteNote}
+      onPinNote={togglePinNote}
       onEdit={(id) => setModal({ kind: 'edit', id })}
       onAction={detailAction}
       statuses={statuses}
