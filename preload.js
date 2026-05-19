@@ -28,8 +28,9 @@ contextBridge.exposeInMainWorld('extensionBridge', {
 
 // Workbook sync bridge
 contextBridge.exposeInMainWorld('workbook', {
-  sync: (overridePath) => ipcRenderer.invoke('sync-workbook', overridePath || ''),
-  choose: (currentPath) => ipcRenderer.invoke('choose-workbook', currentPath || '')
+  sync:      (overridePath) => ipcRenderer.invoke('sync-workbook',    overridePath || ''),
+  choose:    (currentPath)  => ipcRenderer.invoke('choose-workbook',  currentPath  || ''),
+  preflight: (overridePath) => ipcRenderer.invoke('preflight-check',  overridePath || ''),
 });
 
 // Focus-search bridge — main process pushes when global hotkey fires
@@ -59,4 +60,11 @@ contextBridge.exposeInMainWorld('creds', {
 // Scraper bridge — trigger in-app portal scraping
 contextBridge.exposeInMainWorld('scraper', {
   scrapeWO: (woData) => ipcRenderer.invoke('scrape-wo-bids', woData),
+});
+
+// Tray bridge -- main process pushes click events; renderer pushes state.
+contextBridge.exposeInMainWorld('tray', {
+  setState:  (state)   => ipcRenderer.invoke('tray-set-state', state),
+  onAction:  (cb)      => ipcRenderer.on('tray-action', (_e, payload) => cb(payload)),
+  setIcon:   (payload) => ipcRenderer.invoke('tray-set-icon', payload),
 });

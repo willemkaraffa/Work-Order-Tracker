@@ -1,6 +1,6 @@
 {
   "name": "work-order-tracker",
-  "version": "2.7.0",
+  "version": "3.0.1",
   "description": "Work Order Tracker – Gamble Plumbing Heating and Air",
   "main": "main.js",
   "scripts": {
@@ -51,6 +51,10 @@
       {
         "from": "sync_to_lookup.py",
         "to": "resources/sync_to_lookup.py"
+      },
+      {
+        "from": "preflight_qa.py",
+        "to": "resources/preflight_qa.py"
       }
     ]
   },
