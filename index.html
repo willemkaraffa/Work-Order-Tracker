@@ -2941,6 +2941,14 @@ function PMsEditor({ pms, setPms, onClose }) {
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
   const [newColor, setNewColor] = React.useState('#1a73e8');
+  const editInputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   const commitRename = (idx) => {
     const trimmed = editingName.trim();
@@ -2996,7 +3004,7 @@ function PMsEditor({ pms, setPms, onClose }) {
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {pms.map((pm, idx) => (
-            <div key={idx} style={{
+            <div key={pm.name} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
@@ -3009,7 +3017,7 @@ function PMsEditor({ pms, setPms, onClose }) {
               />
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
@@ -3063,6 +3071,14 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
+  const editInputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   const commitRename = (idx) => {
     const trimmed = editingName.trim();
@@ -3112,13 +3128,13 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {items.map((v, idx) => (
-            <div key={idx} style={{
+            <div key={v} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
