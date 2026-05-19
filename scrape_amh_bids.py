@@ -168,7 +168,13 @@ def make_driver():
             opts.binary_location = chrome_path
         driver_path = ensure_chromedriver()
         if driver_path:
-            return webdriver.Chrome(service=Service(driver_path), options=opts)
+            service = Service(driver_path)
+            # Suppress the chromedriver.exe console window on Windows.
+            # Without this flag a black stdio window flashes even when Chrome
+            # itself is headless.
+            from subprocess import CREATE_NO_WINDOW
+            service.creation_flags = CREATE_NO_WINDOW
+            return webdriver.Chrome(service=service, options=opts)
         raise RuntimeError(
             "ChromeDriver could not be prepared automatically on this Windows system.")
     for cb in ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]:
