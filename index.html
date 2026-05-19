@@ -2751,6 +2751,17 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
+  const editInputRef = React.useRef(null);
+
+  // Explicit focus on edit-mode entry. autoFocus has React-18 timing quirks
+  // where focus can be lost during the same commit, triggering immediate
+  // onBlur and dismissing the input before the user can type.
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   // Returns the phase id/name that owns this status, or '' if none.
   const phaseOf = (statusName) => {
@@ -2855,7 +2866,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {statuses.map((s, idx) => (
-            <div key={idx} style={{
+            <div key={s} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
@@ -2868,7 +2879,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
               />
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
