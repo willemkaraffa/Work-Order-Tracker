@@ -200,6 +200,22 @@ function syncIntervalMs(value) {
   return SYNC_INTERVAL_MS[value] || 0;
 }
 
+// Turn raw Python stderr/err text from a failed workbook sync into a short,
+// user-readable message. Skips openpyxl warnings (which appear on the first
+// stderr line) and recognizes the common "file open in Excel" lock case.
+function workbookSyncErrorMessage(raw) {
+  const text = String(raw || '');
+  // Windows file lock during the atomic save: workbook is open in Excel.
+  if (/Access is denied/i.test(text) || /Failed to save workbook/i.test(text)) {
+    return 'Workbook is open in Excel. Close it and sync again.';
+  }
+  // Otherwise surface the last meaningful line, ignoring warnings/blank lines.
+  const lines = text.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/UserWarning|warn\(msg\)|warnings\.warn/i.test(l));
+  return lines.length ? lines[lines.length - 1] : 'Unknown error';
+}
+
 const MIGRATION_VERSION = '2.0';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
@@ -4268,6 +4284,7 @@ function App() {
       toast('Workbook sync unavailable', 'err');
       return false;
     }
+    let errMsg = 'Unknown error';
     try {
       const r = await window.workbook.sync(workbookPath || '');
       if (r && r.ok) {
@@ -4275,9 +4292,12 @@ function App() {
         toast('Workbook synced');
         return true;
       }
-    } catch {}
+      errMsg = workbookSyncErrorMessage(r && (r.err || r.error));
+    } catch (e) {
+      errMsg = workbookSyncErrorMessage(e && e.message);
+    }
     updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-    toast('Workbook sync failed', 'err');
+    toast('Workbook sync failed: ' + errMsg, 'err');
     return false;
   }, [updateOrder, toast, workbookPath]);
 
@@ -4340,9 +4360,9 @@ function App() {
         batchUpdate(o => !o.deleted && (o.tab === 'invoiced' || o.tab === 'sent'), cur => ({ ...cur, syncStatus: 'synced' }));
         if (!silent) toast('Workbook synced');
       } else {
-        const msg = (r && (r.err || r.error)) || 'Unknown error';
+        const msg = workbookSyncErrorMessage(r && (r.err || r.error));
         // Failures toast even in silent mode -- user needs to know.
-        toast('Workbook sync failed: ' + String(msg).split('\n')[0], 'err');
+        toast('Workbook sync failed: ' + msg, 'err');
       }
     } catch (e) {
       toast('Workbook sync failed', 'err');
