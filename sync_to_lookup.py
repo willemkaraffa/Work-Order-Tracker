@@ -175,12 +175,12 @@ def load_orders():
     raw    = json.loads(WO_JSON.read_text(encoding="utf-8"))
     data   = json.loads(raw["wo_data"])
     all_orders = data.get("orders", [])
-    invoiced = [
+    syncing = [
         o for o in all_orders
-        if not o.get("deleted", False) and o.get("tab") == "invoiced"
+        if not o.get("deleted", False) and o.get("tab") in ("sent", "invoiced")
     ]
-    print("Loaded " + str(len(all_orders)) + " orders total; " + str(len(invoiced)) + " in Invoiced tab")
-    return invoiced
+    print("Loaded " + str(len(all_orders)) + " orders total; " + str(len(syncing)) + " in Sent/Invoiced tabs")
+    return syncing
 
 
 # ── Pre-scraped items (written by Cowork skill) ───────────────────────────────
