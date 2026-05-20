@@ -712,7 +712,7 @@ function groupByPhase(orders, phases) {
   return groups;
 }
 
-function sortRows(rows, sort) {
+function sortRows(rows, sort, phaseStatuses) {
   const dir = sort.dir === 'asc' ? 1 : -1;
   const k = sort.key;
   return [...rows].sort((a, b) => {
@@ -723,6 +723,14 @@ function sortRows(rows, sort) {
       const bi = parseInt(String(b.wo).replace(/[^0-9]/g, ''), 10) || 0;
       return (ai - bi) * dir;
     }
+    if (k === 'status') {
+      const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
+      const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
+      const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
+      if (ai !== bi) return (ai - bi) * dir;
+      return ((a.createdTs || 0) - (b.createdTs || 0)) * dir;
+    }
+    if (k === 'lastNote') return ((a.lastNoteTs || 0) - (b.lastNoteTs || 0)) * dir;
     return ((a.createdTs || 0) - (b.createdTs || 0)) * dir;
   });
 }
@@ -844,6 +852,10 @@ function toDetailData(o) {
         });
       }
       return list;
+    })(),
+    lastNoteTs: (() => {
+      const cards = Array.isArray(o.noteCards) ? o.noteCards : [];
+      return cards.reduce((m, c) => Math.max(m, c.ts || 0), 0);
     })(),
     activity: (Array.isArray(o.history) ? o.history : [])
       .slice().reverse()
@@ -1677,7 +1689,7 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection }) {
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
@@ -1731,7 +1743,11 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
     : groups;
 
   const sortedGroups = (sort && sort.key)
-    ? filteredGroups.map(g => ({ ...g, rows: sortRows(g.rows, sort) }))
+    ? filteredGroups.map(g => {
+        const phaseConfig = (phases || []).find(p => p.name === g.phase);
+        const phaseStatuses = (phaseConfig && phaseConfig.statuses) || [];
+        return { ...g, rows: sortRows(g.rows, sort, phaseStatuses) };
+      })
     : filteredGroups;
 
   const flatRows = React.useMemo(() => {
@@ -3263,10 +3279,12 @@ const ALERT_DEFS = [
 ];
 
 const SORT_DEFS = [
-  { key: 'created', label: 'Created' },
-  { key: 'age',     label: 'Age' },
-  { key: 'addr',    label: 'Address' },
-  { key: 'wo',      label: 'WO #' },
+  { key: 'created',  label: 'Created' },
+  { key: 'age',      label: 'Age' },
+  { key: 'addr',     label: 'Address' },
+  { key: 'wo',       label: 'WO #' },
+  { key: 'status',   label: 'Status' },
+  { key: 'lastNote', label: 'Last Note' },
 ];
 
 function AlertsSection({ thresholds, setThresholds }) {
@@ -4731,6 +4749,7 @@ function App() {
           <ListPane
             view={currentView}
             data={viewData}
+            phases={phases}
             density={density}
             sort={effectiveSort}
             setSort={activePreset ? (() => {}) : setSort}
