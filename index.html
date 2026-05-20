@@ -3290,14 +3290,14 @@ function WorkbookSection({ onGlobalSync, workbookPath, onPickWorkbook, syncInter
     <div>
       <SettingTitle sub="Where work orders are persisted. Sync settings.">Workbook</SettingTitle>
       <SettingRow label="Workbook path" hint="Used by sync_to_lookup.py and the in-app sync button.">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 480 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <code style={{
+            flex: 1, minWidth: 0, display: 'block',
             fontSize: 12, color: 'var(--text-2)',
             background: 'var(--bg-surface-2)', padding: '4px 8px', borderRadius: 4,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            maxWidth: 360,
           }} title={workbookPath || ''}>{workbookPath || '(not set)'}</code>
-          <ActionBtn onClick={onPickWorkbook}>Change...</ActionBtn>
+          <ActionBtn onClick={onPickWorkbook} style={{ flexShrink: 0 }}>Browse...</ActionBtn>
         </div>
       </SettingRow>
       <SettingRow label="Sync interval" hint="How often the local cache reconciles with the workbook.">
@@ -3308,7 +3308,7 @@ function WorkbookSection({ onGlobalSync, workbookPath, onPickWorkbook, syncInter
           { value: 'manual', label: 'Manual' },
         ]} />
       </SettingRow>
-      <SettingRow label="Sync now" hint="Re-sync every Sent-to-Invoice WO; overwrites duplicates in the workbook.">
+      <SettingRow label="Sync now" hint="Re-sync every Sent-to-Invoice and Invoiced WO; overwrites duplicates in the workbook.">
         <ActionBtn primary onClick={onGlobalSync}>Sync workbook</ActionBtn>
       </SettingRow>
     </div>
@@ -4272,6 +4272,7 @@ function App() {
       const r = await window.workbook.sync(workbookPath || '');
       if (r && r.ok) {
         updateOrder(id, cur => ({ ...cur, syncStatus: 'synced' }));
+        toast('Workbook synced');
         return true;
       }
     } catch {}
@@ -4280,7 +4281,7 @@ function App() {
     return false;
   }, [updateOrder, toast, workbookPath]);
 
-  const sendToInvoice = React.useCallback((id) => {
+  const sendToInvoice = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
     if (!o) return;
     if (!o.bidAmount || !String(o.bidAmount).trim()) {
@@ -4290,10 +4291,12 @@ function App() {
     updateOrder(id, cur => ({
       ...cur,
       tab: 'sent',
+      syncStatus: 'pending',
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'sent to billing queue', detail: '' }],
     }));
-  }, [orders, updateOrder, toast]);
+    await syncWOToWorkbook(o);
+  }, [orders, updateOrder, toast, syncWOToWorkbook]);
 
   const markInvoiced = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
@@ -4334,7 +4337,7 @@ function App() {
     try {
       const r = await window.workbook.sync(workbookPath || '');
       if (r && r.ok) {
-        batchUpdate(o => !o.deleted && o.tab === 'invoiced', cur => ({ ...cur, syncStatus: 'synced' }));
+        batchUpdate(o => !o.deleted && (o.tab === 'invoiced' || o.tab === 'sent'), cur => ({ ...cur, syncStatus: 'synced' }));
         if (!silent) toast('Workbook synced');
       } else {
         const msg = (r && (r.err || r.error)) || 'Unknown error';
