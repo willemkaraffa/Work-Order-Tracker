@@ -234,6 +234,12 @@ function statusColor(status, statusColors) {
   return (statusColors && statusColors[status]) || DEFAULT_STATUS_COLORS[status] || '#6b7280';
 }
 
+const TYPE_COLORS = {
+  P: '#3b82f6', // Plumbing - blue
+  H: '#f97316', // HVAC - orange
+  E: '#eab308', // Electrical - amber
+};
+
 const PhasesContext = React.createContext(DEFAULT_PHASES);
 function usePhases() { return React.useContext(PhasesContext); }
 
@@ -286,13 +292,15 @@ function PMChip({ pm }) {
 }
 
 function TypeIcon({ kind }) {
-  const label = kind === 'P' ? 'Plumbing' : kind === 'H' ? 'HVAC' : 'Electric';
+  const label = kind === 'P' ? 'Plumbing' : kind === 'H' ? 'HVAC' : kind === 'E' ? 'Electrical' : 'Other';
+  const c = TYPE_COLORS[kind] || '#6b7280';
   return (
     <span title={label} style={{
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: 18, height: 18, borderRadius: 4,
-      border: '1px solid var(--border-2)',
-      color: 'var(--text-2)', fontSize: 10, fontWeight: 700,
+      width: 20, height: 20, borderRadius: 4,
+      border: `1px solid ${hexToRgba(c, 0.5)}`,
+      background: hexToRgba(c, 0.18),
+      color: c, fontSize: 11, fontWeight: 800,
       fontFamily: 'ui-monospace, monospace',
       flexShrink: 0,
     }}>{kind}</span>
