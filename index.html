@@ -1684,6 +1684,8 @@ const TT_VIEW_DATA = {
 function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection }) {
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
+  const scrollRef = React.useRef(null);
+  const savedScrollTop = React.useRef(0);
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
   const setF = (k) => (v) => setFilters(f => ({ ...f, [k]: v }));
   const resolved = data || TT_VIEW_DATA[view] || TT_VIEW_DATA.active;
@@ -1713,6 +1715,10 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
   const techOptions   = optsFor('tech');
 
   const dirDisabled = !sort || !sort.key || sort.key === 'status';
+
+  React.useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = savedScrollTop.current;
+  }, [sort && sort.key, sort && sort.dir]);
 
   const matchesFilters = (r) =>
     (!filters.pm     || r.pm     === filters.pm)     &&
@@ -1852,7 +1858,11 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      <div
+        ref={scrollRef}
+        onScroll={(e) => { savedScrollTop.current = e.currentTarget.scrollTop; }}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
+      >
         <BulkBar count={selectedIds ? selectedIds.size : 0} actions={bulkActions || []} onClear={onClearSelection} />
         {resolved.loading ? (
           <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
