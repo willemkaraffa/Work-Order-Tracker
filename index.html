@@ -447,7 +447,6 @@ function SortDropdown({ sort, onChange }) {
   }, [open]);
   const cleared = !sort.key;
   const label = cleared ? 'Phase order' : (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
-  const arrow = cleared ? '' : (sort.dir === 'asc' ? '↑' : '↓');
   return (
     <div ref={wrapRef} style={{ position: 'relative' }}>
       <div onClick={() => setOpen(o => !o)} style={{
@@ -456,7 +455,7 @@ function SortDropdown({ sort, onChange }) {
         background: 'var(--bg-surface)',
         display: 'inline-flex', alignItems: 'center', gap: 4,
         fontSize: 13, color: 'var(--text-1)', cursor: 'pointer',
-      }}>{label} {arrow}</div>
+      }}>{label}</div>
       {open && (
         <div style={{
           position: 'absolute', top: 28, right: 0,
@@ -474,10 +473,6 @@ function SortDropdown({ sort, onChange }) {
               {s.key === sort.key ? '* ' : '  '}{s.label}
             </MenuItem>
           ))}
-          <MenuDivider />
-          <MenuItem onClick={() => { onChange({ key: sort.key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }); setOpen(false); }}>
-            Direction: {sort.dir === 'asc' ? 'Ascending' : 'Descending'}
-          </MenuItem>
         </div>
       )}
     </div>
@@ -1717,6 +1712,8 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
   const statusOptions = optsFor('status');
   const techOptions   = optsFor('tech');
 
+  const dirDisabled = !sort || !sort.key || sort.key === 'status';
+
   const matchesFilters = (r) =>
     (!filters.pm     || r.pm     === filters.pm)     &&
     (!filters.type   || r.type   === filters.type)   &&
@@ -1838,6 +1835,18 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
             <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
               <span style={{ color: 'var(--text-3)' }}>Sort:</span>
               <SortDropdown sort={sort} onChange={setSort} />
+              <div
+                onClick={dirDisabled ? undefined : () => setSort({ key: sort.key, dir: sort.dir === 'asc' ? 'desc' : 'asc' })}
+                style={{
+                  height: 24, padding: '0 7px',
+                  border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-surface)',
+                  display: 'inline-flex', alignItems: 'center',
+                  fontSize: 13, userSelect: 'none',
+                  cursor: dirDisabled ? 'default' : 'pointer',
+                  color: dirDisabled ? 'var(--text-3)' : 'var(--text-1)',
+                }}
+              >{sort.dir === 'asc' ? '↑' : '↓'}</div>
             </span>
           )}
         </div>
