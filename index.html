@@ -2125,6 +2125,18 @@ function openMaps(addr) {
 }
 
 function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onEdit, onAction, statuses }) {
+  const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
+  const statusRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!statusMenuOpen) return;
+    const close = () => setStatusMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [statusMenuOpen]);
+
   if (!data) {
     return (
       <section style={{
@@ -2180,7 +2192,35 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
             ? (data.syncStatus
                 ? <SyncPill status={data.syncStatus} />
                 : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>not yet synced</span>)
-            : <StatusPill status={data.status} />}
+            : data.tab === 'active' ? (
+              <div
+                ref={statusRef}
+                style={{ position: 'relative', display: 'inline-block', cursor: 'pointer' }}
+                onClick={(e) => { e.stopPropagation(); setStatusMenuOpen(o => !o); }}
+              >
+                <StatusPill status={data.status} />
+                {statusMenuOpen && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, marginTop: 4,
+                    minWidth: 200, background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-2)', borderRadius: 8,
+                    boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
+                    padding: '4px 0', zIndex: 60,
+                  }}>
+                    <MenuCaption>Set status</MenuCaption>
+                    {(statuses || DEFAULT_STATUSES).map(s => (
+                      <MenuItem key={s} onClick={(e) => {
+                        e.stopPropagation();
+                        setStatusMenuOpen(false);
+                        onAction && onAction('setStatus', s);
+                      }}>{s}</MenuItem>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <StatusPill status={data.status} />
+            )}
           {data.tab !== 'paid' && data.ageDays != null && (
             <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>
               {data.ageDays} {data.ageDays === 1 ? 'day' : 'days'} {data.tab === 'invoiced' ? 'invoiced' : data.tab === 'sent' ? 'in billing queue' : 'in phase'}
