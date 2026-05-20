@@ -470,7 +470,7 @@ function SortDropdown({ sort, onChange }) {
           </MenuItem>
           <MenuDivider />
           {SORT_DEFS.map(s => (
-            <MenuItem key={s.key} onClick={() => { onChange({ key: s.key, dir: sort.dir }); setOpen(false); }}>
+            <MenuItem key={s.key} onClick={() => { onChange({ key: s.key, dir: s.key === 'status' ? 'desc' : sort.dir }); setOpen(false); }}>
               {s.key === sort.key ? '* ' : '  '}{s.label}
             </MenuItem>
           ))}
@@ -728,8 +728,8 @@ function sortRows(rows, sort, phaseStatuses) {
       const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
       const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
       const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
-      if (ai !== bi) return (ai - bi) * dir;
-      return ((a.createdTs || 0) - (b.createdTs || 0)) * dir;
+      if (ai !== bi) return bi - ai;
+      return (b.createdTs || 0) - (a.createdTs || 0);
     }
     if (k === 'lastNote') return ((a.lastNoteTs || 0) - (b.lastNoteTs || 0)) * dir;
     return ((a.createdTs || 0) - (b.createdTs || 0)) * dir;
@@ -3280,7 +3280,7 @@ const SORT_DEFS = [
   { key: 'age',      label: 'Age' },
   { key: 'addr',     label: 'Address' },
   { key: 'wo',       label: 'WO #' },
-  { key: 'status',   label: 'Status' },
+  { key: 'status',   label: 'Status (reverse)' },
   { key: 'lastNote', label: 'Last Note' },
 ];
 
