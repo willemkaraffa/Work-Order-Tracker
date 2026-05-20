@@ -676,6 +676,7 @@ function toDisplayRow(o) {
     syncStatus: o.syncStatus || null,
     tab: o.tab || 'active',
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
+    lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
   };
 }
 
@@ -852,10 +853,6 @@ function toDetailData(o) {
         });
       }
       return list;
-    })(),
-    lastNoteTs: (() => {
-      const cards = Array.isArray(o.noteCards) ? o.noteCards : [];
-      return cards.reduce((m, c) => Math.max(m, c.ts || 0), 0);
     })(),
     activity: (Array.isArray(o.history) ? o.history : [])
       .slice().reverse()
