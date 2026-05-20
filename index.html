@@ -1681,11 +1681,13 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction }) {
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
   const scrollRef = React.useRef(null);
   const savedScrollTop = React.useRef(0);
+  const [ctxMenu, setCtxMenu] = React.useState(null); // { woId, x, y, tab } | null
+  const closeCtx = () => setCtxMenu(null);
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
   const setF = (k) => (v) => setFilters(f => ({ ...f, [k]: v }));
   const resolved = data || TT_VIEW_DATA[view] || TT_VIEW_DATA.active;
@@ -1719,6 +1721,21 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
   React.useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = savedScrollTop.current;
   }, [sort && sort.key, sort && sort.dir]);
+
+  React.useEffect(() => {
+    if (!ctxMenu) return;
+    const onKey = (e) => { if (e.key === 'Escape') closeCtx(); };
+    setTimeout(() => {
+      document.addEventListener('click', closeCtx);
+      document.addEventListener('contextmenu', closeCtx);
+    }, 0);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', closeCtx);
+      document.removeEventListener('contextmenu', closeCtx);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
 
   const matchesFilters = (r) =>
     (!filters.pm     || r.pm     === filters.pm)     &&
@@ -1898,12 +1915,52 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                   checked={selectedIds ? selectedIds.has(r.wo) : false}
                   onClick={() => onSelectWO(r.wo)}
                   onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
+                  onContextMenu={(e, woId, tab) => {
+                    const estH = tab === 'active' ? 60 + (statuses || DEFAULT_STATUSES).length * 30 : 120;
+                    const x = window.innerWidth  - e.clientX < 220 ? e.clientX - 220 : e.clientX;
+                    const y = window.innerHeight - e.clientY < estH  ? e.clientY - estH  : e.clientY;
+                    setCtxMenu({ woId, x, y, tab });
+                  }}
                 />
               ))}
             </React.Fragment>
           );
         })}
       </div>
+      {ctxMenu && (
+        <div
+          style={{
+            position: 'fixed', top: ctxMenu.y, left: ctxMenu.x,
+            minWidth: 200, background: 'var(--bg-surface)',
+            border: '1px solid var(--border-2)', borderRadius: 8,
+            boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
+            padding: '4px 0', zIndex: 200,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {ctxMenu.tab === 'active' && (<>
+            <MenuCaption>Set status</MenuCaption>
+            {(statuses || DEFAULT_STATUSES).map(s => (
+              <MenuItem key={s} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); closeCtx(); }}>{s}</MenuItem>
+            ))}
+            <MenuDivider />
+          </>)}
+          {ctxMenu.tab === 'sent' && (<>
+            <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToActive'); closeCtx(); }}>Move back to Active</MenuItem>
+            <MenuDivider />
+          </>)}
+          {ctxMenu.tab === 'invoiced' && (<>
+            <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToSent'); closeCtx(); }}>Move back to Sent to invoice</MenuItem>
+            <MenuDivider />
+          </>)}
+          <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>Open</MenuItem>
+          {ctxMenu.tab !== 'trash' && (<>
+            <MenuDivider />
+            {/* TODO(line 15): Add to custom filter submenu */}
+            <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
+          </>)}
+        </div>
+      )}
     </section>
   );
 }
@@ -1941,7 +1998,7 @@ function PhaseHeader({ phase, count, dot, open, first, onToggle }) {
   );
 }
 
-function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck }) {
+function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck, onContextMenu }) {
   const ageHidden = hideAge || row.age == null;
   const ageBg = ageHidden ? 'transparent' :
     row.ageLevel === 1 ? 'var(--age-1)' :
@@ -1951,16 +2008,20 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
   const showSyncPill = useSyncPill && row.syncStatus;
   const d = densityFor(density);
   return (
-    <div onClick={(e) => {
-      if (e.target && (e.target.tagName === 'INPUT' || e.target.dataset?.role === 'check')) return;
-      onClick(e);
-    }} style={{
-      padding: `${d.rowPadY}px 14px`,
-      background: (checked || selected) ? 'var(--bg-row-sel)' : ageBg,
-      borderBottom: '1px solid var(--border-2)',
-      cursor: 'pointer',
-      display: 'flex', gap: 10, alignItems: 'flex-start',
-    }}>
+    <div
+      onClick={(e) => {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.dataset?.role === 'check')) return;
+        onClick(e);
+      }}
+      onContextMenu={onContextMenu ? (e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, row.wo, row.tab); } : undefined}
+      style={{
+        padding: `${d.rowPadY}px 14px`,
+        background: (checked || selected) ? 'var(--bg-row-sel)' : ageBg,
+        borderBottom: '1px solid var(--border-2)',
+        cursor: 'pointer',
+        display: 'flex', gap: 10, alignItems: 'flex-start',
+      }}
+    >
       <input
         type="checkbox"
         checked={!!checked}
@@ -4603,21 +4664,54 @@ function App() {
     });
   }, [updateOrder]);
 
-  // ⋯ menu actions on the detail pane.
-  const detailAction = React.useCallback((kind, payload) => {
-    const id = selectedWO;
+  // Explicit-id action handler shared by context menu and detail pane.
+  const woAction = React.useCallback((id, kind, payload) => {
     if (!id) return;
     const histEntry = (action, detail) => ({ ts: Date.now(), action, detail: detail || '' });
     switch (kind) {
-      case 'setStatus': {
+      case 'setStatus':
         updateOrder(id, cur => ({
-          ...cur,
-          status: payload,
+          ...cur, status: payload,
           history: [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)],
         }));
         toast('Status: ' + payload);
         break;
-      }
+      case 'backToActive':
+        updateOrder(id, cur => ({
+          ...cur, tab: 'active',
+          history: [...(cur.history || []), histEntry('back to Active')],
+        }));
+        toast('Moved to Active');
+        break;
+      case 'backToSent':
+        updateOrder(id, cur => ({
+          ...cur, tab: 'sent',
+          history: [...(cur.history || []), histEntry('back to Sent to invoice')],
+        }));
+        toast('Moved to Sent to invoice');
+        break;
+      case 'softDelete':
+        updateOrder(id, cur => ({
+          ...cur, deleted: true,
+          history: [...(cur.history || []), histEntry('sent to Trash')],
+        }));
+        toast('Sent to Trash');
+        break;
+      default: break;
+    }
+  }, [updateOrder, toast]);
+
+  // ⋯ menu actions on the detail pane.
+  const detailAction = React.useCallback((kind, payload) => {
+    const id = selectedWO;
+    if (!id) return;
+    // Delegate shared cases to woAction.
+    if (kind === 'setStatus' || kind === 'backToActive' || kind === 'backToSent' || kind === 'softDelete') {
+      woAction(id, kind, payload);
+      return;
+    }
+    const histEntry = (action, detail) => ({ ts: Date.now(), action, detail: detail || '' });
+    switch (kind) {
       case 'markPaid': {
         updateOrder(id, cur => ({
           ...cur, tab: 'paid',
@@ -4626,36 +4720,12 @@ function App() {
         toast('Marked Paid');
         break;
       }
-      case 'backToActive': {
-        updateOrder(id, cur => ({
-          ...cur, tab: 'active',
-          history: [...(cur.history || []), histEntry('back to Active')],
-        }));
-        toast('Moved to Active');
-        break;
-      }
-      case 'backToSent': {
-        updateOrder(id, cur => ({
-          ...cur, tab: 'sent',
-          history: [...(cur.history || []), histEntry('back to Sent to invoice')],
-        }));
-        toast('Moved to Sent to invoice');
-        break;
-      }
       case 'backToInvoiced': {
         updateOrder(id, cur => ({
           ...cur, tab: 'invoiced',
           history: [...(cur.history || []), histEntry('back to Invoiced')],
         }));
         toast('Moved to Invoiced');
-        break;
-      }
-      case 'softDelete': {
-        updateOrder(id, cur => ({
-          ...cur, deleted: true,
-          history: [...(cur.history || []), histEntry('sent to Trash')],
-        }));
-        toast('Sent to Trash');
         break;
       }
       case 'restore': {
@@ -4697,7 +4767,7 @@ function App() {
       }
       default: break;
     }
-  }, [orders, selectedWO, updateOrder, deleteOrderHard, addOrder, toast]);
+  }, [selectedWO, woAction, orders, updateOrder, deleteOrderHard, addOrder, toast]);
 
   const themeVars = theme === 'light' ? TT_LIGHT : TT_DARK;
   // Apply theme tokens at :root so Modal/Toast (rendered outside the themed container)
@@ -4825,6 +4895,8 @@ function App() {
             selectedIds={selectedIds}
             onCheck={handleCheck}
             onClearSelection={clearSelection}
+            statuses={statuses}
+            onWoAction={woAction}
           />
           {rightPane}
         </div>
