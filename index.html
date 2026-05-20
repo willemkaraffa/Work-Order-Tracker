@@ -1953,7 +1953,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
             <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToSent'); closeCtx(); }}>Move back to Sent to invoice</MenuItem>
             <MenuDivider />
           </>)}
-          <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>Open</MenuItem>
+          <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
           {ctxMenu.tab !== 'trash' && (<>
             <MenuDivider />
             {/* TODO(line 15): Add to custom filter submenu */}
