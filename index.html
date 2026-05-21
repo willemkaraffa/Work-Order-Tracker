@@ -2066,7 +2066,7 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             </div>
           )}
         </div>
-        {/* Meta row: PM · type · WO# · status/sync · tech */}
+        {/* Meta row: status · PM · type · tech · [sync] | WO# right-aligned */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {!useSyncPill && <>
             <StatusPill status={row.status} size="sm" />
@@ -2074,12 +2074,9 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
           </>}
           <PMChip pm={row.pm} />
           <TypeIcon kind={row.type} />
-          <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
-          {row.tech && <>
-            <Dot />
-            <span>{row.tech}</span>
-          </>}
+          {row.tech && <span>{row.tech}</span>}
           {showSyncPill && <SyncPill status={row.syncStatus} />}
+          <span style={{ marginLeft: 'auto', flexShrink: 0, fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
         </div>
       </div>
     </div>
