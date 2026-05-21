@@ -3597,6 +3597,10 @@ function FullScreenLanding({ onProceed, onSelectWO, alerts, loading }) {
       zIndex: 250,
     }}>
       <div style={{
+        flex: 1, minHeight: 0, width: '100%', overflowY: 'auto',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+      }}>
+      <div style={{
         marginTop: '8vh',
         display: 'flex', flexDirection: 'column', alignItems: 'center',
         gap: 16,
@@ -3657,10 +3661,10 @@ function FullScreenLanding({ onProceed, onSelectWO, alerts, loading }) {
           </div>
         )}
       </div>
-
-      <div style={{ flex: 1 }} />
+      </div>
 
       <div style={{
+        flexShrink: 0,
         padding: '24px 0 32px',
         opacity: (mounted && !leaving) ? 1 : 0,
         transition: leaving ? 'none' : 'opacity 800ms ease 900ms',
