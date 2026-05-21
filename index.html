@@ -695,8 +695,8 @@ function groupByPhase(orders, phases) {
     if (buckets[p.name] && buckets[p.name].length) {
       // Default within-phase ordering (priority, highest first):
       //   1) status position in the phase's status list (Settings -> Workflow)
-      //   2) days open (days-in-stage), oldest first
-      //   3) city, alphabetical (A-Z)
+      //   2) city, alphabetical (A-Z) -- groups same-city WOs together
+      //   3) days open (days-in-stage), oldest first (within a city)
       //   4) tie-break: newest first by createdTs
       // A user-applied sort (sortRows) or filter overrides this downstream.
       const orderMap = new Map((p.statuses || []).map((s, i) => [s, i]));
@@ -704,10 +704,10 @@ function groupByPhase(orders, phases) {
         const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
         const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
         if (ai !== bi) return ai - bi;
-        const ad = (b.ageDays ?? -1) - (a.ageDays ?? -1);
-        if (ad !== 0) return ad;
         const c = String(a.city || '').localeCompare(String(b.city || ''));
         if (c !== 0) return c;
+        const ad = (b.ageDays ?? -1) - (a.ageDays ?? -1);
+        if (ad !== 0) return ad;
         return (b.createdTs || 0) - (a.createdTs || 0);
       });
       groups.push({ phase: p.name, count: rows.length, rows, dot: p.fg });
