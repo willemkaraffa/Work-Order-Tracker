@@ -175,17 +175,6 @@ function createWindow() {
   });
 
   win.loadFile('index.html');
-
-  const FIT_BASE_W = 1100, FIT_BASE_H = 740, FIT_MIN_ZOOM = 0.6;
-  function applyFitZoom() {
-    if (!win || win.isDestroyed()) return;
-    const [w, h] = win.getContentSize();
-    const factor = Math.max(FIT_MIN_ZOOM, Math.min(1, w / FIT_BASE_W, h / FIT_BASE_H));
-    win.webContents.setZoomFactor(factor);
-  }
-  win.webContents.on('did-finish-load', applyFitZoom);
-  win.on('resize', applyFitZoom);
-
   win.once('ready-to-show', () => win.show());
   win.setMenuBarVisibility(false);
   if (!app.isPackaged) win.webContents.openDevTools({ mode: 'detach' });
