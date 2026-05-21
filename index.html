@@ -1697,13 +1697,15 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs }) {
+  const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
   const scrollRef = React.useRef(null);
   const savedScrollTop = React.useRef(0);
   const [ctxMenu, setCtxMenu] = React.useState(null); // { woId, x, y, tab } | null
-  const closeCtx = () => setCtxMenu(null);
+  const [ctxSub, setCtxSub] = React.useState(null);   // 'status' | 'pm' | 'type' | 'tech' | null
+  const closeCtx = () => { setCtxMenu(null); setCtxSub(null); };
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
   const setF = (k) => (v) => setFilters(f => ({ ...f, [k]: v }));
   const resolved = data || TT_VIEW_DATA[view] || TT_VIEW_DATA.active;
@@ -1932,9 +1934,10 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                   onClick={() => onSelectWO(r.wo)}
                   onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
                   onContextMenu={(e, woId, tab) => {
-                    const estH = tab === 'active' ? 60 + (statuses || DEFAULT_STATUSES).length * 30 : 120;
+                    const estH = tab === 'active' ? 330 : 140;
                     const x = window.innerWidth  - e.clientX < 220 ? e.clientX - 220 : e.clientX;
                     const y = window.innerHeight - e.clientY < estH  ? e.clientY - estH  : e.clientY;
+                    setCtxSub(null);
                     setCtxMenu({ woId, x, y, tab });
                   }}
                 />
@@ -1947,7 +1950,8 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
         <div
           style={{
             position: 'fixed', top: ctxMenu.y, left: ctxMenu.x,
-            minWidth: 200, background: 'var(--bg-surface)',
+            minWidth: 200, maxHeight: 360, overflowY: 'auto',
+            background: 'var(--bg-surface)',
             border: '1px solid var(--border-2)', borderRadius: 8,
             boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
             padding: '4px 0', zIndex: 200,
@@ -1956,16 +1960,55 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
         >
           {(() => {
             const ctxBulk = selectedIds && selectedIds.size > 1 && selectedIds.has(ctxMenu.woId);
+            const ctxRow = groups.flatMap(g => g.rows || []).find(r => r.wo === ctxMenu.woId);
+            const isEmergency = ctxRow?.flags?.includes('emergency');
+            const isWarranty = ctxRow?.flags?.includes('warranty');
+            if (ctxSub === 'status') return (<>
+              <MenuCaption>{ctxBulk ? ('Set status (' + selectedIds.size + ' selected)') : 'Set status'}</MenuCaption>
+              {(statuses || DEFAULT_STATUSES).map(s => (
+                <MenuItem key={s} onClick={() => {
+                  if (ctxBulk) { onBulkSetStatus && onBulkSetStatus(s); }
+                  else { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); }
+                  closeCtx();
+                }}>{s}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'pm') return (<>
+              <MenuCaption>Set PM</MenuCaption>
+              {(pms || []).map(p => (
+                <MenuItem key={p.name} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setPm', p.name); closeCtx(); }}>{p.name}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'type') return (<>
+              <MenuCaption>Set type</MenuCaption>
+              {(types || []).map(t => (
+                <MenuItem key={t} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setType', t); closeCtx(); }}>{t}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'tech') return (<>
+              <MenuCaption>Set tech</MenuCaption>
+              <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setTech', ''); closeCtx(); }}>Unassigned</MenuItem>
+              {(techs || []).map(t => (
+                <MenuItem key={t} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setTech', t); closeCtx(); }}>{t}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
             return (<>
               {ctxMenu.tab === 'active' && (<>
-                <MenuCaption>{ctxBulk ? ('Set status (' + selectedIds.size + ' selected)') : 'Set status'}</MenuCaption>
-                {(statuses || DEFAULT_STATUSES).map(s => (
-                  <MenuItem key={s} onClick={() => {
-                    if (ctxBulk) { onBulkSetStatus && onBulkSetStatus(s); }
-                    else { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); }
-                    closeCtx();
-                  }}>{s}</MenuItem>
-                ))}
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('status'); }}>{ctxBulk ? ('Set status (' + selectedIds.size + ') ›') : 'Set status ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('pm'); }}>{'Set PM ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('type'); }}>{'Set type ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('tech'); }}>{'Set tech ›'}</MenuItem>
+                <MenuDivider />
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleEmergency'); closeCtx(); }}>{isEmergency ? 'Clear emergency flag' : 'Mark emergency'}</MenuItem>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleWarranty'); closeCtx(); }}>{isWarranty ? 'Clear warranty flag' : 'Mark warranty'}</MenuItem>
                 <MenuDivider />
               </>)}
               {ctxMenu.tab === 'sent' && (<>
@@ -1979,7 +2022,6 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
               <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
               {ctxMenu.tab !== 'trash' && (<>
                 <MenuDivider />
-                {/* TODO(line 14): bulk variants for Send to Trash / move-back */}
                 {/* TODO(line 15): Add to custom filter submenu */}
                 <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
               </>)}
@@ -4750,6 +4792,39 @@ function App() {
         }));
         toast('Sent to Trash');
         break;
+      case 'setPm':
+        updateOrder(id, cur => ({
+          ...cur, pm: payload,
+          history: [...(cur.history || []), histEntry('pm', (cur.pm || '') + ' → ' + payload)],
+        }));
+        toast('PM: ' + payload);
+        break;
+      case 'setType':
+        updateOrder(id, cur => ({
+          ...cur, type: payload,
+          history: [...(cur.history || []), histEntry('type', (cur.type || '') + ' → ' + payload)],
+        }));
+        toast('Type: ' + payload);
+        break;
+      case 'setTech':
+        updateOrder(id, cur => ({
+          ...cur, tech: payload,
+          history: [...(cur.history || []), histEntry('tech', (cur.tech || '') + ' → ' + (payload || 'Unassigned'))],
+        }));
+        toast('Tech: ' + (payload || 'Unassigned'));
+        break;
+      case 'toggleEmergency':
+        updateOrder(id, cur => ({
+          ...cur, emergency: !cur.emergency,
+          history: [...(cur.history || []), histEntry(cur.emergency ? 'emergency: cleared' : 'emergency: set')],
+        }));
+        break;
+      case 'toggleWarranty':
+        updateOrder(id, cur => ({
+          ...cur, warranty: !cur.warranty,
+          history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
+        }));
+        break;
       default: break;
     }
   }, [updateOrder, toast]);
@@ -4759,7 +4834,8 @@ function App() {
     const id = selectedWO;
     if (!id) return;
     // Delegate shared cases to woAction.
-    if (kind === 'setStatus' || kind === 'backToActive' || kind === 'backToSent' || kind === 'softDelete') {
+    if (kind === 'setStatus' || kind === 'backToActive' || kind === 'backToSent' || kind === 'softDelete' ||
+        kind === 'toggleEmergency' || kind === 'toggleWarranty') {
       woAction(id, kind, payload);
       return;
     }
@@ -4802,20 +4878,6 @@ function App() {
         const { id: _drop, history: _h, ...rest } = src;
         const newId = addOrder({ ...rest, status: src.status, dateCreated: todayIso() });
         if (newId) { setSelectedWO(newId); pushRecent(newId); toast('Duplicated → ' + newId); }
-        break;
-      }
-      case 'toggleEmergency': {
-        updateOrder(id, cur => ({
-          ...cur, emergency: !cur.emergency,
-          history: [...(cur.history || []), histEntry(cur.emergency ? 'emergency: cleared' : 'emergency: set')],
-        }));
-        break;
-      }
-      case 'toggleWarranty': {
-        updateOrder(id, cur => ({
-          ...cur, warranty: !cur.warranty,
-          history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
-        }));
         break;
       }
       default: break;
@@ -4950,6 +5012,8 @@ function App() {
             onCheck={handleCheck}
             onClearSelection={clearSelection}
             statuses={statuses}
+            types={types}
+            techs={techs}
             onWoAction={woAction}
             onBulkSetStatus={bulkSetStatus}
           />
