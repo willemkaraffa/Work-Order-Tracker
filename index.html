@@ -2064,15 +2064,17 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
         </div>
         {/* Meta row: PM · type · WO# · status/sync · tech */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <PMChip pm={row.pm} />
-          <TypeIcon kind={row.type} />
-          <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
-          <Dot />
           {!useSyncPill && <>
             <StatusPill status={row.status} size="sm" />
             <Dot />
           </>}
-          {row.tech && <span>{row.tech}</span>}
+          <PMChip pm={row.pm} />
+          <TypeIcon kind={row.type} />
+          <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
+          {row.tech && <>
+            <Dot />
+            <span>{row.tech}</span>
+          </>}
           {showSyncPill && <SyncPill status={row.syncStatus} />}
         </div>
       </div>
