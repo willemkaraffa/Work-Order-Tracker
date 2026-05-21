@@ -1689,7 +1689,7 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus }) {
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
   const scrollRef = React.useRef(null);
@@ -1946,27 +1946,37 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {ctxMenu.tab === 'active' && (<>
-            <MenuCaption>Set status</MenuCaption>
-            {(statuses || DEFAULT_STATUSES).map(s => (
-              <MenuItem key={s} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); closeCtx(); }}>{s}</MenuItem>
-            ))}
-            <MenuDivider />
-          </>)}
-          {ctxMenu.tab === 'sent' && (<>
-            <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToActive'); closeCtx(); }}>Move back to Active</MenuItem>
-            <MenuDivider />
-          </>)}
-          {ctxMenu.tab === 'invoiced' && (<>
-            <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToSent'); closeCtx(); }}>Move back to Sent to invoice</MenuItem>
-            <MenuDivider />
-          </>)}
-          <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
-          {ctxMenu.tab !== 'trash' && (<>
-            <MenuDivider />
-            {/* TODO(line 15): Add to custom filter submenu */}
-            <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
-          </>)}
+          {(() => {
+            const ctxBulk = selectedIds && selectedIds.size > 1 && selectedIds.has(ctxMenu.woId);
+            return (<>
+              {ctxMenu.tab === 'active' && (<>
+                <MenuCaption>{ctxBulk ? ('Set status (' + selectedIds.size + ' selected)') : 'Set status'}</MenuCaption>
+                {(statuses || DEFAULT_STATUSES).map(s => (
+                  <MenuItem key={s} onClick={() => {
+                    if (ctxBulk) { onBulkSetStatus && onBulkSetStatus(s); }
+                    else { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); }
+                    closeCtx();
+                  }}>{s}</MenuItem>
+                ))}
+                <MenuDivider />
+              </>)}
+              {ctxMenu.tab === 'sent' && (<>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToActive'); closeCtx(); }}>Move back to Active</MenuItem>
+                <MenuDivider />
+              </>)}
+              {ctxMenu.tab === 'invoiced' && (<>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToSent'); closeCtx(); }}>Move back to Sent to invoice</MenuItem>
+                <MenuDivider />
+              </>)}
+              <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
+              {ctxMenu.tab !== 'trash' && (<>
+                <MenuDivider />
+                {/* TODO(line 14): bulk variants for Send to Trash / move-back */}
+                {/* TODO(line 15): Add to custom filter submenu */}
+                <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
+              </>)}
+            </>);
+          })()}
         </div>
       )}
     </section>
@@ -4310,6 +4320,18 @@ function App() {
     clearSelection();
   }, [selectedIds, orders, batchUpdate, toast, clearSelection]);
 
+  const bulkSetStatus = React.useCallback((status) => {
+    const ts = Date.now();
+    const ids = selectedIds;
+    batchUpdate(
+      o => ids.has(o.id),
+      cur => ({ ...cur, status,
+                history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] })
+    );
+    toast(ids.size + ' set to ' + status);
+    clearSelection();
+  }, [selectedIds, batchUpdate, toast, clearSelection]);
+
   const VIEW_BUILDERS = {
     active:   () => ({ title: 'Active',          total: activeOrders.length, groups: groupByPhase(activeOrders, phases) }),
     sent:     () => ({ title: 'Sent to invoice', total: sentOrders.length,     groups: groupByPhase(sentOrders, phases) }),
@@ -4906,6 +4928,7 @@ function App() {
             onClearSelection={clearSelection}
             statuses={statuses}
             onWoAction={woAction}
+            onBulkSetStatus={bulkSetStatus}
           />
           {rightPane}
         </div>
