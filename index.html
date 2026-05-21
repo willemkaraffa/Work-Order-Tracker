@@ -1318,6 +1318,44 @@ function FormField({ label, children, span = 1 }) {
   );
 }
 
+// Text-input modal. Replaces window.prompt(), which Electron does not support.
+// state = { title, initial?, placeholder?, submitLabel?, onSubmit(value) } | null
+function NamePromptModal({ state, onClose }) {
+  const [value, setValue] = React.useState('');
+  React.useEffect(() => { setValue(state ? (state.initial || '') : ''); }, [state]);
+  if (!state) return null;
+  const submit = () => {
+    const v = value.trim();
+    if (!v) return;
+    state.onSubmit(v);
+    onClose();
+  };
+  return (
+    <Modal open={!!state} onClose={onClose} title={state.title} width={420}>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+        placeholder={state.placeholder || ''}
+        style={fieldInputStyle}
+      />
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+        <button onClick={onClose} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+          border: '1px solid var(--border-2)', borderRadius: 6, cursor: 'pointer',
+        }}>Cancel</button>
+        <button onClick={submit} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: 'var(--accent)', color: 'var(--accent-fg)',
+          border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
+        }}>{state.submitLabel || 'Save'}</button>
+      </div>
+    </Modal>
+  );
+}
+
 const fieldInputStyle = {
   width: '100%',
   padding: '7px 9px',
@@ -1807,7 +1845,7 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox }) {
   const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
@@ -2149,14 +2187,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 ))}
                 {(!inboxes || inboxes.length === 0) && <MenuCaption>No inboxes yet</MenuCaption>}
                 <MenuDivider />
-                <MenuItem onClick={() => {
-                  const name = window.prompt('New inbox name:');
-                  if (name && name.trim() && onAddInbox) {
-                    const id = onAddInbox(name.trim());
-                    if (id && onAddToInbox) onAddToInbox(id, targetIds);
-                  }
-                  closeCtx();
-                }}>New inbox...</MenuItem>
+                <MenuItem onClick={() => { onAddToNewInbox && onAddToNewInbox(targetIds); closeCtx(); }}>New inbox...</MenuItem>
                 <MenuDivider />
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
               </>);
@@ -4435,6 +4466,7 @@ function App() {
 
   // Modal state
   const [modal, setModal] = React.useState(null); // null | 'add' | { kind: 'edit', id }
+  const [namePrompt, setNamePrompt] = React.useState(null); // text-input modal state
   const editTarget = (modal && modal.kind === 'edit') ? orders.find(o => o.id === modal.id) : null;
 
   // Toast system
@@ -4903,17 +4935,17 @@ function App() {
   }, [orders, selectedIds, batchUpdate, toast, clearSelection, globalSyncWorkbook]);
 
   const onSaveView = React.useCallback(() => {
-    const name = window.prompt('Name this view:');
-    if (!name || !name.trim()) return;
-    const id = addPreset({ name: name.trim(), query, filters, sort: currentSort });
-    if (id) { setCurrentView('sv:' + id); toast('View saved'); }
+    setNamePrompt({ title: 'Save view', placeholder: 'View name', submitLabel: 'Save', onSubmit: (name) => {
+      const id = addPreset({ name, query, filters, sort: currentSort });
+      if (id) { setCurrentView('sv:' + id); toast('View saved'); }
+    }});
   }, [addPreset, query, filters, currentSort, toast]);
   const onRenamePreset = React.useCallback((id) => {
     const p = presets.find(x => x.id === id);
-    const name = window.prompt('Rename view:', p?.name || '');
-    if (!name || !name.trim()) return;
-    updatePreset(id, { name: name.trim() });
-    toast('View renamed');
+    setNamePrompt({ title: 'Rename view', initial: p?.name || '', onSubmit: (name) => {
+      updatePreset(id, { name });
+      toast('View renamed');
+    }});
   }, [presets, updatePreset, toast]);
   const onDeletePreset = React.useCallback((id) => {
     if (!window.confirm('Delete this saved view?')) return;
@@ -4923,17 +4955,17 @@ function App() {
   }, [deletePreset, currentView, toast]);
 
   const onAddInbox = React.useCallback(() => {
-    const name = window.prompt('New inbox name:');
-    if (!name || !name.trim()) return;
-    const id = addInbox(name.trim());
-    if (id) { setCurrentView('ib:' + id); toast('Inbox created'); }
+    setNamePrompt({ title: 'New inbox', placeholder: 'Inbox name', submitLabel: 'Create', onSubmit: (name) => {
+      const id = addInbox(name);
+      if (id) { setCurrentView('ib:' + id); toast('Inbox created'); }
+    }});
   }, [addInbox, toast]);
   const onRenameInbox = React.useCallback((id) => {
     const b = inboxes.find(x => x.id === id);
-    const name = window.prompt('Rename inbox:', b?.name || '');
-    if (!name || !name.trim()) return;
-    renameInbox(id, name.trim());
-    toast('Inbox renamed');
+    setNamePrompt({ title: 'Rename inbox', initial: b?.name || '', onSubmit: (name) => {
+      renameInbox(id, name);
+      toast('Inbox renamed');
+    }});
   }, [inboxes, renameInbox, toast]);
   const onDeleteInbox = React.useCallback((id) => {
     if (!window.confirm('Delete this inbox? (Work orders are not deleted.)')) return;
@@ -4946,6 +4978,17 @@ function App() {
     const n = Array.isArray(woId) ? woId.length : 1;
     toast(n > 1 ? (n + ' added to inbox') : 'Added to inbox');
   }, [addToInbox, toast]);
+  // Create a new inbox then drop the given WO ids into it (from the list menu).
+  const onAddToNewInbox = React.useCallback((woIds) => {
+    setNamePrompt({ title: 'New inbox', placeholder: 'Inbox name', submitLabel: 'Create & add', onSubmit: (name) => {
+      const id = addInbox(name);
+      if (id) {
+        addToInbox(id, woIds);
+        const n = Array.isArray(woIds) ? woIds.length : 1;
+        toast(n > 1 ? (n + ' added to new inbox') : 'Added to new inbox');
+      }
+    }});
+  }, [addInbox, addToInbox, toast]);
 
   const handleAddWO = React.useCallback(() => { setModal('add'); }, []);
 
@@ -5299,7 +5342,7 @@ function App() {
             inboxes={inboxes}
             onWoAction={woAction}
             onBulkSetStatus={bulkSetStatus}
-            onAddInbox={addInbox}
+            onAddToNewInbox={onAddToNewInbox}
             onAddToInbox={onAddToInbox}
             onRemoveFromInbox={removeFromInbox}
             onReorderInbox={reorderInbox}
@@ -5316,6 +5359,7 @@ function App() {
             onSubmit={submitAdd}
           />
         </Modal>
+        <NamePromptModal state={namePrompt} onClose={() => setNamePrompt(null)} />
         <Modal
           open={!!editTarget}
           onClose={() => setModal(null)}
