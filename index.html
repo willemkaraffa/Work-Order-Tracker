@@ -2344,7 +2344,7 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
         <NoteComposer onSave={(note) => onAddNote && onAddNote(data.wo, note)} />
         {data.notes.map((n, i) => (
           <NoteCard
-            key={n.id ?? i} {...n}
+            key={n.id} {...n}
             onEdit={onEditNote && !n.legacy ? (newBody) => onEditNote(data.wo, n.id, newBody) : null}
             onDelete={onDeleteNote && !n.legacy ? () => onDeleteNote(data.wo, n.id) : null}
             onPin={onPinNote && !n.legacy ? () => onPinNote(data.wo, n.id) : null}
@@ -3922,6 +3922,14 @@ function migrateOrders(orders) {
   return orders.map(o => {
     const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
     const baseTs = o.dateCreated ? new Date(o.dateCreated).getTime() : Date.now();
+
+    // 0) Ensure every existing card has a stable id (guards against id-less cards
+    //    from old imports; id-less keys caused React to reuse wrong NoteCard instances).
+    for (let i = 0; i < cards.length; i++) {
+      if (!cards[i].id) {
+        cards[i] = { ...cards[i], id: 'n_mig_fix_' + (o.id || 'x') + '_' + i };
+      }
+    }
 
     // 1) Legacy notes -> single Note card (only if cards is empty)
     if (cards.length === 0 && typeof o.notes === 'string' && o.notes.trim()) {
