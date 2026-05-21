@@ -2056,10 +2056,14 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             letterSpacing: '-0.005em',
           }}>{row.addr}</span>
-          {row.city && <span style={{ color: 'var(--text-2)', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap' }}>· {row.city}</span>}
           {row.flags?.map((f) => <FlagGlyph key={f} kind={f} />)}
-          {row.age != null && (
-            <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
+          {(row.city || row.age != null) && (
+            <div style={{ marginLeft: 'auto', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              {row.city && <span style={{ color: 'var(--text-2)', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap' }}>{row.city}</span>}
+              {row.age != null && (
+                <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
+              )}
+            </div>
           )}
         </div>
         {/* Meta row: PM · type · WO# · status/sync · tech */}
