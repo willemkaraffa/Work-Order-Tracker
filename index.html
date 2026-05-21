@@ -1819,6 +1819,17 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
   const setF = (k) => (v) => setFilters(f => ({ ...f, [k]: v }));
   const resolved = data || TT_VIEW_DATA[view] || TT_VIEW_DATA.active;
+  // Reorder a stop within a route inbox: swap the row with its adjacent VISIBLE
+  // neighbor inside the stored woIds (preserves any stale/unresolved ids).
+  const moveInRoute = (rows, ri, dir) => {
+    const j = ri + dir;
+    if (!resolved.inboxId || !onReorderInbox || j < 0 || j >= rows.length) return;
+    const woIds = (resolved.inboxWoIds || []).slice();
+    const a = woIds.indexOf(rows[ri].wo);
+    const b = woIds.indexOf(rows[j].wo);
+    if (a < 0 || b < 0) return;
+    onReorderInbox(resolved.inboxId, swapAt(woIds, a, b));
+  };
   const groups = resolved.groups || [];
 
   React.useEffect(() => {
@@ -2035,26 +2046,42 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 first={gi === 0}
                 onToggle={() => toggle(g.phase)}
               />
-              {isOpen && g.rows.map((r) => (
-                <ListRow
-                  key={r.wo}
-                  row={r}
-                  view={view}
-                  hideAge={resolved.hideAge}
-                  density={density}
-                  selected={selectedWO === r.wo}
-                  checked={selectedIds ? selectedIds.has(r.wo) : false}
-                  onClick={() => onSelectWO(r.wo)}
-                  onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
-                  onContextMenu={(e, woId, tab) => {
-                    const estH = tab === 'active' ? 330 : 140;
-                    const x = window.innerWidth  - e.clientX < 220 ? e.clientX - 220 : e.clientX;
-                    const y = window.innerHeight - e.clientY < estH  ? e.clientY - estH  : e.clientY;
-                    setCtxSub(null);
-                    setCtxMenu({ woId, x, y, tab });
-                  }}
-                />
-              ))}
+              {isOpen && g.rows.map((r, ri) => {
+                const rowEl = (
+                  <ListRow
+                    key={r.wo}
+                    row={r}
+                    view={view}
+                    hideAge={resolved.hideAge}
+                    density={density}
+                    selected={selectedWO === r.wo}
+                    checked={selectedIds ? selectedIds.has(r.wo) : false}
+                    onClick={() => onSelectWO(r.wo)}
+                    onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
+                    onContextMenu={(e, woId, tab) => {
+                      const estH = tab === 'active' ? 360 : 160;
+                      const x = window.innerWidth  - e.clientX < 220 ? e.clientX - 220 : e.clientX;
+                      const y = window.innerHeight - e.clientY < estH  ? e.clientY - estH  : e.clientY;
+                      setCtxSub(null);
+                      setCtxMenu({ woId, x, y, tab });
+                    }}
+                  />
+                );
+                if (!isInboxView) return rowEl;
+                return (
+                  <div key={r.wo} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>{rowEl}</div>
+                    <div style={{ flexShrink: 0, paddingRight: 8 }}>
+                      <ReorderBtns
+                        onUp={() => moveInRoute(g.rows, ri, -1)}
+                        onDown={() => moveInRoute(g.rows, ri, 1)}
+                        disableUp={ri === 0}
+                        disableDown={ri === g.rows.length - 1}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </React.Fragment>
           );
         })}
@@ -2113,6 +2140,27 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
               <MenuDivider />
               <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
             </>);
+            if (ctxSub === 'inbox') {
+              const targetIds = ctxBulk ? Array.from(selectedIds) : ctxMenu.woId;
+              return (<>
+                <MenuCaption>{ctxBulk ? ('Add to inbox (' + selectedIds.size + ' selected)') : 'Add to inbox'}</MenuCaption>
+                {(inboxes || []).map(b => (
+                  <MenuItem key={b.id} onClick={() => { onAddToInbox && onAddToInbox(b.id, targetIds); closeCtx(); }}>{b.name || 'Untitled inbox'}</MenuItem>
+                ))}
+                {(!inboxes || inboxes.length === 0) && <MenuCaption>No inboxes yet</MenuCaption>}
+                <MenuDivider />
+                <MenuItem onClick={() => {
+                  const name = window.prompt('New inbox name:');
+                  if (name && name.trim() && onAddInbox) {
+                    const id = onAddInbox(name.trim());
+                    if (id && onAddToInbox) onAddToInbox(id, targetIds);
+                  }
+                  closeCtx();
+                }}>New inbox...</MenuItem>
+                <MenuDivider />
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+              </>);
+            }
             return (<>
               {ctxMenu.tab === 'active' && (<>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('status'); }}>{ctxBulk ? ('Set status (' + selectedIds.size + ') ›') : 'Set status ›'}</MenuItem>
@@ -2133,9 +2181,14 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 <MenuDivider />
               </>)}
               <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
+              {ctxMenu.tab !== 'trash' && (
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('inbox'); }}>{ctxBulk ? ('Add to inbox (' + selectedIds.size + ') ›') : 'Add to inbox ›'}</MenuItem>
+              )}
+              {isInboxView && data.inboxId && (
+                <MenuItem onClick={() => { onRemoveFromInbox && onRemoveFromInbox(data.inboxId, ctxMenu.woId); closeCtx(); }}>Remove from this inbox</MenuItem>
+              )}
               {ctxMenu.tab !== 'trash' && (<>
                 <MenuDivider />
-                {/* TODO(line 15): Add to custom filter submenu */}
                 <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
               </>)}
             </>);
@@ -4602,7 +4655,7 @@ function App() {
       title: activeInbox.name || 'Inbox',
       total: rows.length,
       groups: rows.length ? [{ phase: activeInbox.name || 'Inbox', count: rows.length, rows, dot: 'var(--text-2)' }] : [],
-      inbox: true, inboxId: activeInbox.id,
+      inbox: true, inboxId: activeInbox.id, inboxWoIds: activeInbox.woIds || [],
     };
   } else if (activePreset) {
     viewData = { ...VIEW_BUILDERS.active(), title: activePreset.name || 'Saved view' };
