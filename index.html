@@ -200,6 +200,22 @@ function syncIntervalMs(value) {
   return SYNC_INTERVAL_MS[value] || 0;
 }
 
+// Turn raw Python stderr/err text from a failed workbook sync into a short,
+// user-readable message. Skips openpyxl warnings (which appear on the first
+// stderr line) and recognizes the common "file open in Excel" lock case.
+function workbookSyncErrorMessage(raw) {
+  const text = String(raw || '');
+  // Windows file lock during the atomic save: workbook is open in Excel.
+  if (/Access is denied/i.test(text) || /Failed to save workbook/i.test(text)) {
+    return 'Workbook is open in Excel. Close it and sync again.';
+  }
+  // Otherwise surface the last meaningful line, ignoring warnings/blank lines.
+  const lines = text.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/UserWarning|warn\(msg\)|warnings\.warn/i.test(l));
+  return lines.length ? lines[lines.length - 1] : 'Unknown error';
+}
+
 const MIGRATION_VERSION = '2.0';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
@@ -217,6 +233,12 @@ const DEFAULT_STATUS_COLORS = {
 function statusColor(status, statusColors) {
   return (statusColors && statusColors[status]) || DEFAULT_STATUS_COLORS[status] || '#6b7280';
 }
+
+const TYPE_COLORS = {
+  P: '#3b82f6', // Plumbing - blue
+  H: '#f97316', // HVAC - orange
+  E: '#eab308', // Electrical - amber
+};
 
 const PhasesContext = React.createContext(DEFAULT_PHASES);
 function usePhases() { return React.useContext(PhasesContext); }
@@ -270,13 +292,15 @@ function PMChip({ pm }) {
 }
 
 function TypeIcon({ kind }) {
-  const label = kind === 'P' ? 'Plumbing' : kind === 'H' ? 'HVAC' : 'Electric';
+  const label = kind === 'P' ? 'Plumbing' : kind === 'H' ? 'HVAC' : kind === 'E' ? 'Electrical' : 'Other';
+  const c = TYPE_COLORS[kind] || '#6b7280';
   return (
     <span title={label} style={{
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: 18, height: 18, borderRadius: 4,
-      border: '1px solid var(--border-2)',
-      color: 'var(--text-2)', fontSize: 10, fontWeight: 700,
+      width: 20, height: 20, borderRadius: 4,
+      border: `1px solid ${hexToRgba(c, 0.5)}`,
+      background: hexToRgba(c, 0.18),
+      color: c, fontSize: 11, fontWeight: 800,
       fontFamily: 'ui-monospace, monospace',
       flexShrink: 0,
     }}>{kind}</span>
@@ -429,8 +453,8 @@ function SortDropdown({ sort, onChange }) {
     document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [open]);
-  const label = (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
-  const arrow = sort.dir === 'asc' ? '↑' : '↓';
+  const cleared = !sort.key;
+  const label = cleared ? 'Phase order' : (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
   return (
     <div ref={wrapRef} style={{ position: 'relative' }}>
       <div onClick={() => setOpen(o => !o)} style={{
@@ -439,7 +463,7 @@ function SortDropdown({ sort, onChange }) {
         background: 'var(--bg-surface)',
         display: 'inline-flex', alignItems: 'center', gap: 4,
         fontSize: 13, color: 'var(--text-1)', cursor: 'pointer',
-      }}>{label} {arrow}</div>
+      }}>{label}</div>
       {open && (
         <div style={{
           position: 'absolute', top: 28, right: 0,
@@ -448,15 +472,15 @@ function SortDropdown({ sort, onChange }) {
           boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
           padding: '4px 0', zIndex: 60,
         }}>
+          <MenuItem onClick={() => { onChange({ key: '', dir: sort.dir }); setOpen(false); }}>
+            {cleared ? '* ' : '  '}Phase order (default)
+          </MenuItem>
+          <MenuDivider />
           {SORT_DEFS.map(s => (
-            <MenuItem key={s.key} onClick={() => { onChange({ key: s.key, dir: sort.dir }); setOpen(false); }}>
+            <MenuItem key={s.key} onClick={() => { onChange({ key: s.key, dir: s.key === 'status' ? 'desc' : sort.dir }); setOpen(false); }}>
               {s.key === sort.key ? '* ' : '  '}{s.label}
             </MenuItem>
           ))}
-          <MenuDivider />
-          <MenuItem onClick={() => { onChange({ key: sort.key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }); setOpen(false); }}>
-            Direction: {sort.dir === 'asc' ? 'Ascending' : 'Descending'}
-          </MenuItem>
         </div>
       )}
     </div>
@@ -655,6 +679,7 @@ function toDisplayRow(o) {
     syncStatus: o.syncStatus || null,
     tab: o.tab || 'active',
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
+    lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
   };
 }
 
@@ -668,7 +693,24 @@ function groupByPhase(orders, phases) {
   const groups = [];
   for (const p of list) {
     if (buckets[p.name] && buckets[p.name].length) {
-      groups.push({ phase: p.name, count: buckets[p.name].length, rows: buckets[p.name], dot: p.fg });
+      // Default within-phase ordering (priority, highest first):
+      //   1) status position in the phase's status list (Settings -> Workflow)
+      //   2) city, alphabetical (A-Z) -- groups same-city WOs together
+      //   3) days open (days-in-stage), oldest first (within a city)
+      //   4) tie-break: newest first by createdTs
+      // A user-applied sort (sortRows) or filter overrides this downstream.
+      const orderMap = new Map((p.statuses || []).map((s, i) => [s, i]));
+      const rows = [...buckets[p.name]].sort((a, b) => {
+        const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
+        const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
+        if (ai !== bi) return ai - bi;
+        const c = String(a.city || '').localeCompare(String(b.city || ''));
+        if (c !== 0) return c;
+        const ad = (b.ageDays ?? -1) - (a.ageDays ?? -1);
+        if (ad !== 0) return ad;
+        return (b.createdTs || 0) - (a.createdTs || 0);
+      });
+      groups.push({ phase: p.name, count: rows.length, rows, dot: p.fg });
     }
   }
   // Catch any unrecognized bucket names
@@ -680,17 +722,24 @@ function groupByPhase(orders, phases) {
   return groups;
 }
 
-function sortRows(rows, sort) {
+function sortRows(rows, sort, phaseStatuses) {
   const dir = sort.dir === 'asc' ? 1 : -1;
   const k = sort.key;
   return [...rows].sort((a, b) => {
     if (k === 'age')  return (((a.ageDays ?? -1) - (b.ageDays ?? -1)) * dir);
-    if (k === 'addr') return String(a.addr).localeCompare(String(b.addr)) * dir;
     if (k === 'wo') {
       const ai = parseInt(String(a.wo).replace(/[^0-9]/g, ''), 10) || 0;
       const bi = parseInt(String(b.wo).replace(/[^0-9]/g, ''), 10) || 0;
       return (ai - bi) * dir;
     }
+    if (k === 'status') {
+      const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
+      const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
+      const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
+      if (ai !== bi) return bi - ai;
+      return (b.createdTs || 0) - (a.createdTs || 0);
+    }
+    if (k === 'lastNote') return ((a.lastNoteTs || 0) - (b.lastNoteTs || 0)) * dir;
     return ((a.createdTs || 0) - (b.createdTs || 0)) * dir;
   });
 }
@@ -804,13 +853,6 @@ function toDetailData(o) {
         time: fmtNoteTime(n.ts), body: n.body || '',
         pinned: !!n.pinned, edited: !!n.edited,
       }));
-      if (o.notes) {
-        list.push({
-          id: '_legacy', type: 'Note',
-          time: fmtCreated(o.dateCreated), body: o.notes,
-          pinned: false, edited: false, legacy: true,
-        });
-      }
       return list;
     })(),
     activity: (Array.isArray(o.history) ? o.history : [])
@@ -877,7 +919,7 @@ function useWorkOrders() {
     let cancelled = false;
     (async () => {
       const fresh = () => ({
-        orders: [], presets: [],
+        orders: [], presets: [], inboxes: [],
         statuses: DEFAULT_STATUSES.slice(),
         phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
@@ -903,6 +945,7 @@ function useWorkOrders() {
         }
         if (!Array.isArray(parsed.orders))   parsed.orders   = [];
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
+        if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         if (!parsed.statusColors || typeof parsed.statusColors !== 'object') parsed.statusColors = {};
@@ -1037,6 +1080,51 @@ function useWorkOrders() {
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
 
+  // --- Custom inboxes (manual-membership, ordered WO lists) ---
+  const persistInboxes = (cur, inboxes) => {
+    const next = { ...cur, inboxes };
+    dataRef.current = next; setData(next);
+    if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
+  };
+  const addInbox = React.useCallback((name) => {
+    const cur = dataRef.current;
+    if (!cur) return null;
+    const id = 'ib_' + Date.now().toString(36);
+    persistInboxes(cur, [...(cur.inboxes || []), { id, name, woIds: [] }]);
+    return id;
+  }, []);
+  const renameInbox = React.useCallback((id, name) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, name } : b));
+  }, []);
+  const deleteInbox = React.useCallback((id) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).filter(b => b.id !== id));
+  }, []);
+  const addToInbox = React.useCallback((id, woId) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => {
+      if (b.id !== id) return b;
+      const have = new Set(b.woIds || []);
+      const incoming = (Array.isArray(woId) ? woId : [woId]).filter(w => !have.has(w));
+      return { ...b, woIds: [...(b.woIds || []), ...incoming] };
+    }));
+  }, []);
+  const removeFromInbox = React.useCallback((id, woId) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b =>
+      b.id === id ? { ...b, woIds: (b.woIds || []).filter(w => w !== woId) } : b));
+  }, []);
+  const reorderInbox = React.useCallback((id, woIds) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, woIds } : b));
+  }, []);
+
   const deleteOrdersHard = React.useCallback((ids) => {
     const cur = dataRef.current;
     if (!cur) return;
@@ -1165,7 +1253,8 @@ function useWorkOrders() {
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
 
-  return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData];
+  return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
+          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox];
 }
 
 /* ---------- modal + form primitives ---------- */
@@ -1226,6 +1315,44 @@ function FormField({ label, children, span = 1 }) {
       <div style={{ fontSize: 12, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>{label}</div>
       {children}
     </div>
+  );
+}
+
+// Text-input modal. Replaces window.prompt(), which Electron does not support.
+// state = { title, initial?, placeholder?, submitLabel?, onSubmit(value) } | null
+function NamePromptModal({ state, onClose }) {
+  const [value, setValue] = React.useState('');
+  React.useEffect(() => { setValue(state ? (state.initial || '') : ''); }, [state]);
+  if (!state) return null;
+  const submit = () => {
+    const v = value.trim();
+    if (!v) return;
+    state.onSubmit(v);
+    onClose();
+  };
+  return (
+    <Modal open={!!state} onClose={onClose} title={state.title} width={420}>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+        placeholder={state.placeholder || ''}
+        style={fieldInputStyle}
+      />
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+        <button onClick={onClose} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+          border: '1px solid var(--border-2)', borderRadius: 6, cursor: 'pointer',
+        }}>Cancel</button>
+        <button onClick={submit} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: 'var(--accent)', color: 'var(--accent-fg)',
+          border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
+        }}>{state.submitLabel || 'Save'}</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1346,7 +1473,7 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
           </div>
         </FormField>
 
-        <FormField label="Notes" span={2}>
+        <FormField label="More Information" span={2}>
           <textarea
             rows={3}
             style={{ ...fieldInputStyle, resize: 'vertical', minHeight: 60 }}
@@ -1406,7 +1533,7 @@ function MenuCaption({ children }) {
 }
 
 /* ---------- sidebar ---------- */
-function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, onAddWO, onRenamePreset, onDeletePreset, onToolSync, onToolExport, onToolPreflight }) {
+function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, inboxes, onAddWO, onRenamePreset, onDeletePreset, onAddInbox, onRenameInbox, onDeleteInbox, onToolSync, onToolExport, onToolPreflight }) {
   const [toolsOpen, setToolsOpen] = React.useState(false);
   const views = [
     { id: 'attention',  label: 'Needs attention', count: counts.attention, icon: '✦', iconColor: 'var(--flag-emergency)' },
@@ -1463,6 +1590,7 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, on
           {onToolPreflight && <SBRow label="Preflight"      onClick={onToolPreflight} />}
           {onToolSync      && <SBRow label="Sync workbook"  onClick={onToolSync} />}
           {onToolExport    && <SBRow label="Export CSV"     onClick={onToolExport} />}
+          {onAddInbox      && <SBRow label="New inbox..."   onClick={onAddInbox} />}
         </div>
       )}
       <div style={{ height: 12 }} />
@@ -1492,6 +1620,22 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, on
           onClick={() => onSelectView('sv:' + p.id)}
           onRename={onRenamePreset}
           onDelete={onDeletePreset}
+        />
+      ))}
+
+      {(inboxes && inboxes.length > 0) && (
+        <div style={{ marginTop: 16, marginBottom: 4, padding: '0 10px', fontSize: 13, color: 'var(--text-3)' }}>
+          Inboxes
+        </div>
+      )}
+      {(inboxes || []).map(b => (
+        <InboxSBRow
+          key={b.id}
+          inbox={b}
+          selected={activeView === 'ib:' + b.id}
+          onClick={() => onSelectView('ib:' + b.id)}
+          onRename={onRenameInbox}
+          onDelete={onDeleteInbox}
         />
       ))}
 
@@ -1589,6 +1733,62 @@ function PresetSBRow({ preset, selected, onClick, onRename, onDelete }) {
   );
 }
 
+function InboxSBRow({ inbox, selected, onClick, onRename, onDelete }) {
+  const [hover, setHover] = React.useState(false);
+  const [menu, setMenu] = React.useState(false);
+  const wrapRef = React.useRef(null);
+  const count = Array.isArray(inbox.woIds) ? inbox.woIds.length : 0;
+  React.useEffect(() => {
+    if (!menu) return;
+    const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setMenu(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setMenu(false); };
+    setTimeout(() => document.addEventListener('click', onDoc), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [menu]);
+  return (
+    <div ref={wrapRef}
+         onMouseEnter={() => setHover(true)}
+         onMouseLeave={() => setHover(false)}
+         style={{ position: 'relative' }}>
+      <div onClick={onClick} style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 10px', borderRadius: 6,
+        background: selected ? 'var(--bg-row-sel)' : (hover ? 'var(--bg-hover)' : 'transparent'),
+        color: 'var(--text-1)',
+        fontWeight: selected ? 600 : 400,
+        fontSize: 14, cursor: 'pointer', userSelect: 'none',
+      }}>
+        <span style={{ color: 'var(--text-3)', fontSize: 13 }}>{'☰'}</span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {inbox.name || 'Untitled inbox'}
+        </span>
+        {hover ? (
+          <span onClick={(e) => { e.stopPropagation(); setMenu(true); }}
+                style={{ color: 'var(--text-3)', fontSize: 13, cursor: 'pointer' }}>
+            {'...'}
+          </span>
+        ) : (
+          <span style={{ fontSize: 13, color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' }}>{count}</span>
+        )}
+      </div>
+      {menu && (
+        <div style={{
+          position: 'absolute', top: 32, right: 4,
+          minWidth: 140, background: 'var(--bg-surface)',
+          border: '1px solid var(--border-2)', borderRadius: 8,
+          boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
+          padding: '4px 0', zIndex: 70,
+        }}>
+          <MenuItem onClick={() => { setMenu(false); onRename(inbox.id); }}>Rename</MenuItem>
+          <MenuDivider />
+          <MenuItem danger onClick={() => { setMenu(false); onDelete(inbox.id); }}>Delete</MenuItem>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- list pane ---------- */
 const TT_GROUPS = [
   { phase: 'Awaiting PM', count: 3, rows: [
@@ -1645,12 +1845,29 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox }) {
+  const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
+  const scrollRef = React.useRef(null);
+  const savedScrollTop = React.useRef(0);
+  const [ctxMenu, setCtxMenu] = React.useState(null); // { woId, x, y, tab } | null
+  const [ctxSub, setCtxSub] = React.useState(null);   // 'status' | 'pm' | 'type' | 'tech' | null
+  const closeCtx = () => { setCtxMenu(null); setCtxSub(null); };
   const toggle = (p) => setCollapsed(s => ({ ...s, [p]: !s[p] }));
   const setF = (k) => (v) => setFilters(f => ({ ...f, [k]: v }));
   const resolved = data || TT_VIEW_DATA[view] || TT_VIEW_DATA.active;
+  // Reorder a stop within a route inbox: swap the row with its adjacent VISIBLE
+  // neighbor inside the stored woIds (preserves any stale/unresolved ids).
+  const moveInRoute = (rows, ri, dir) => {
+    const j = ri + dir;
+    if (!resolved.inboxId || !onReorderInbox || j < 0 || j >= rows.length) return;
+    const woIds = (resolved.inboxWoIds || []).slice();
+    const a = woIds.indexOf(rows[ri].wo);
+    const b = woIds.indexOf(rows[j].wo);
+    if (a < 0 || b < 0) return;
+    onReorderInbox(resolved.inboxId, swapAt(woIds, a, b));
+  };
   const groups = resolved.groups || [];
 
   React.useEffect(() => {
@@ -1676,6 +1893,27 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
   const statusOptions = optsFor('status');
   const techOptions   = optsFor('tech');
 
+  const dirDisabled = !sort || !sort.key || sort.key === 'status';
+
+  React.useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = savedScrollTop.current;
+  }, [sort && sort.key, sort && sort.dir]);
+
+  React.useEffect(() => {
+    if (!ctxMenu) return;
+    const onKey = (e) => { if (e.key === 'Escape') closeCtx(); };
+    setTimeout(() => {
+      document.addEventListener('click', closeCtx);
+      document.addEventListener('contextmenu', closeCtx);
+    }, 0);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('click', closeCtx);
+      document.removeEventListener('contextmenu', closeCtx);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu]);
+
   const matchesFilters = (r) =>
     (!filters.pm     || r.pm     === filters.pm)     &&
     (!filters.type   || r.type   === filters.type)   &&
@@ -1699,7 +1937,11 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
     : groups;
 
   const sortedGroups = (sort && sort.key)
-    ? filteredGroups.map(g => ({ ...g, rows: sortRows(g.rows, sort) }))
+    ? filteredGroups.map(g => {
+        const phaseConfig = (phases || []).find(p => p.name === g.phase);
+        const phaseStatuses = (phaseConfig && phaseConfig.statuses) || [];
+        return { ...g, rows: sortRows(g.rows, sort, phaseStatuses) };
+      })
     : filteredGroups;
 
   const flatRows = React.useMemo(() => {
@@ -1759,6 +2001,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
             ? <span onClick={() => setQuery('')} style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text-3)' }}>{'✕'}</span>
             : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>/</span>}
         </div>
+        {!isInboxView && (
         <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <FilterDropdown label="PM"     value={filters.pm}     options={pmOptions}     onChange={setF('pm')} />
           <FilterDropdown label="Type"   value={filters.type}   options={typeOptions}   onChange={setF('type')} />
@@ -1771,6 +2014,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
             >Clear filters</span>
           )}
         </div>
+        )}
         <div style={{
           marginTop: 12, fontSize: 13, color: 'var(--text-2)',
           fontVariantNumeric: 'tabular-nums',
@@ -1789,16 +2033,32 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
               fontFamily: 'inherit', fontSize: 12, cursor: 'pointer',
             }}>Save view</button>
           )}
-          {sort && setSort && (
+          {sort && setSort && !isInboxView && (
             <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
               <span style={{ color: 'var(--text-3)' }}>Sort:</span>
               <SortDropdown sort={sort} onChange={setSort} />
+              <div
+                onClick={dirDisabled ? undefined : () => setSort({ key: sort.key, dir: sort.dir === 'asc' ? 'desc' : 'asc' })}
+                style={{
+                  height: 24, padding: '0 7px',
+                  border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-surface)',
+                  display: 'inline-flex', alignItems: 'center',
+                  fontSize: 13, userSelect: 'none',
+                  cursor: dirDisabled ? 'default' : 'pointer',
+                  color: dirDisabled ? 'var(--text-3)' : 'var(--text-1)',
+                }}
+              >{sort.dir === 'asc' ? '↑' : '↓'}</div>
             </span>
           )}
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      <div
+        ref={scrollRef}
+        onScroll={(e) => { savedScrollTop.current = e.currentTarget.scrollTop; }}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
+      >
         <BulkBar count={selectedIds ? selectedIds.size : 0} actions={bulkActions || []} onClear={onClearSelection} />
         {resolved.loading ? (
           <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
@@ -1806,7 +2066,8 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
           </div>
         ) : sortedGroups.length === 0 ? (
           <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
-            {hasActiveFilter ? 'No matches.' :
+            {isInboxView ? 'This inbox is empty. Right-click a work order and choose "Add to inbox".' :
+             hasActiveFilter ? 'No matches.' :
              view === 'trash' ? 'Trash is empty.' :
              view === 'paid'  ? 'No paid work orders to show.' :
                                 'Nothing here.'}
@@ -1823,23 +2084,148 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, density, sort
                 first={gi === 0}
                 onToggle={() => toggle(g.phase)}
               />
-              {isOpen && g.rows.map((r) => (
-                <ListRow
-                  key={r.wo}
-                  row={r}
-                  view={view}
-                  hideAge={resolved.hideAge}
-                  density={density}
-                  selected={selectedWO === r.wo}
-                  checked={selectedIds ? selectedIds.has(r.wo) : false}
-                  onClick={() => onSelectWO(r.wo)}
-                  onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
-                />
-              ))}
+              {isOpen && g.rows.map((r, ri) => {
+                const rowEl = (
+                  <ListRow
+                    key={r.wo}
+                    row={r}
+                    view={view}
+                    hideAge={resolved.hideAge}
+                    density={density}
+                    selected={selectedWO === r.wo}
+                    checked={selectedIds ? selectedIds.has(r.wo) : false}
+                    onClick={() => onSelectWO(r.wo)}
+                    onCheck={(e) => { if (onCheck) onCheck(r.wo, e.shiftKey); }}
+                    onContextMenu={(e, woId, tab) => {
+                      const estH = tab === 'active' ? 360 : 160;
+                      const x = window.innerWidth  - e.clientX < 220 ? e.clientX - 220 : e.clientX;
+                      const y = window.innerHeight - e.clientY < estH  ? e.clientY - estH  : e.clientY;
+                      setCtxSub(null);
+                      setCtxMenu({ woId, x, y, tab });
+                    }}
+                  />
+                );
+                if (!isInboxView) return rowEl;
+                return (
+                  <div key={r.wo} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>{rowEl}</div>
+                    <div style={{ flexShrink: 0, paddingRight: 8 }}>
+                      <ReorderBtns
+                        onUp={() => moveInRoute(g.rows, ri, -1)}
+                        onDown={() => moveInRoute(g.rows, ri, 1)}
+                        disableUp={ri === 0}
+                        disableDown={ri === g.rows.length - 1}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </React.Fragment>
           );
         })}
       </div>
+      {ctxMenu && (
+        <div
+          style={{
+            position: 'fixed', top: ctxMenu.y, left: ctxMenu.x,
+            minWidth: 200, maxHeight: 360, overflowY: 'auto',
+            background: 'var(--bg-surface)',
+            border: '1px solid var(--border-2)', borderRadius: 8,
+            boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
+            padding: '4px 0', zIndex: 200,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {(() => {
+            const ctxBulk = selectedIds && selectedIds.size > 1 && selectedIds.has(ctxMenu.woId);
+            const ctxRow = groups.flatMap(g => g.rows || []).find(r => r.wo === ctxMenu.woId);
+            const isEmergency = ctxRow?.flags?.includes('emergency');
+            const isWarranty = ctxRow?.flags?.includes('warranty');
+            if (ctxSub === 'status') return (<>
+              <MenuCaption>{ctxBulk ? ('Set status (' + selectedIds.size + ' selected)') : 'Set status'}</MenuCaption>
+              {(statuses || DEFAULT_STATUSES).map(s => (
+                <MenuItem key={s} onClick={() => {
+                  if (ctxBulk) { onBulkSetStatus && onBulkSetStatus(s); }
+                  else { onWoAction && onWoAction(ctxMenu.woId, 'setStatus', s); }
+                  closeCtx();
+                }}>{s}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'pm') return (<>
+              <MenuCaption>Set PM</MenuCaption>
+              {(pms || []).map(p => (
+                <MenuItem key={p.name} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setPm', p.name); closeCtx(); }}>{p.name}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'type') return (<>
+              <MenuCaption>Set type</MenuCaption>
+              {(types || []).map(t => (
+                <MenuItem key={t} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setType', t); closeCtx(); }}>{t}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'tech') return (<>
+              <MenuCaption>Set tech</MenuCaption>
+              <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setTech', ''); closeCtx(); }}>Unassigned</MenuItem>
+              {(techs || []).map(t => (
+                <MenuItem key={t} onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'setTech', t); closeCtx(); }}>{t}</MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+            </>);
+            if (ctxSub === 'inbox') {
+              const targetIds = ctxBulk ? Array.from(selectedIds) : ctxMenu.woId;
+              return (<>
+                <MenuCaption>{ctxBulk ? ('Add to inbox (' + selectedIds.size + ' selected)') : 'Add to inbox'}</MenuCaption>
+                {(inboxes || []).map(b => (
+                  <MenuItem key={b.id} onClick={() => { onAddToInbox && onAddToInbox(b.id, targetIds); closeCtx(); }}>{b.name || 'Untitled inbox'}</MenuItem>
+                ))}
+                {(!inboxes || inboxes.length === 0) && <MenuCaption>No inboxes yet</MenuCaption>}
+                <MenuDivider />
+                <MenuItem onClick={() => { onAddToNewInbox && onAddToNewInbox(targetIds); closeCtx(); }}>New inbox...</MenuItem>
+                <MenuDivider />
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub(null); }}>{'←'} Back</MenuItem>
+              </>);
+            }
+            return (<>
+              {ctxMenu.tab === 'active' && (<>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('status'); }}>{ctxBulk ? ('Set status (' + selectedIds.size + ') ›') : 'Set status ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('pm'); }}>{'Set PM ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('type'); }}>{'Set type ›'}</MenuItem>
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('tech'); }}>{'Set tech ›'}</MenuItem>
+                <MenuDivider />
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleEmergency'); closeCtx(); }}>{isEmergency ? 'Clear emergency flag' : 'Mark emergency'}</MenuItem>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleWarranty'); closeCtx(); }}>{isWarranty ? 'Clear warranty flag' : 'Mark warranty'}</MenuItem>
+                <MenuDivider />
+              </>)}
+              {ctxMenu.tab === 'sent' && (<>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToActive'); closeCtx(); }}>Move back to Active</MenuItem>
+                <MenuDivider />
+              </>)}
+              {ctxMenu.tab === 'invoiced' && (<>
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'backToSent'); closeCtx(); }}>Move back to Sent to invoice</MenuItem>
+                <MenuDivider />
+              </>)}
+              <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
+              {ctxMenu.tab !== 'trash' && (
+                <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('inbox'); }}>{ctxBulk ? ('Add to inbox (' + selectedIds.size + ') ›') : 'Add to inbox ›'}</MenuItem>
+              )}
+              {isInboxView && data.inboxId && (
+                <MenuItem onClick={() => { onRemoveFromInbox && onRemoveFromInbox(data.inboxId, ctxMenu.woId); closeCtx(); }}>Remove from this inbox</MenuItem>
+              )}
+              {ctxMenu.tab !== 'trash' && (<>
+                <MenuDivider />
+                <MenuItem danger onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'softDelete'); closeCtx(); }}>Send to Trash</MenuItem>
+              </>)}
+            </>);
+          })()}
+        </div>
+      )}
     </section>
   );
 }
@@ -1877,7 +2263,7 @@ function PhaseHeader({ phase, count, dot, open, first, onToggle }) {
   );
 }
 
-function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck }) {
+function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck, onContextMenu }) {
   const ageHidden = hideAge || row.age == null;
   const ageBg = ageHidden ? 'transparent' :
     row.ageLevel === 1 ? 'var(--age-1)' :
@@ -1887,16 +2273,20 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
   const showSyncPill = useSyncPill && row.syncStatus;
   const d = densityFor(density);
   return (
-    <div onClick={(e) => {
-      if (e.target && (e.target.tagName === 'INPUT' || e.target.dataset?.role === 'check')) return;
-      onClick(e);
-    }} style={{
-      padding: `${d.rowPadY}px 14px`,
-      background: (checked || selected) ? 'var(--bg-row-sel)' : ageBg,
-      borderBottom: '1px solid var(--border-2)',
-      cursor: 'pointer',
-      display: 'flex', gap: 10, alignItems: 'flex-start',
-    }}>
+    <div
+      onClick={(e) => {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.dataset?.role === 'check')) return;
+        onClick(e);
+      }}
+      onContextMenu={onContextMenu ? (e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, row.wo, row.tab); } : undefined}
+      style={{
+        padding: `${d.rowPadY}px 14px`,
+        background: (checked || selected) ? 'var(--bg-row-sel)' : ageBg,
+        borderBottom: '1px solid var(--border-2)',
+        cursor: 'pointer',
+        display: 'flex', gap: 10, alignItems: 'flex-start',
+      }}
+    >
       <input
         type="checkbox"
         checked={!!checked}
@@ -1913,24 +2303,27 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             letterSpacing: '-0.005em',
           }}>{row.addr}</span>
-          {row.city && <span style={{ color: 'var(--text-2)', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap' }}>· {row.city}</span>}
           {row.flags?.map((f) => <FlagGlyph key={f} kind={f} />)}
-          {row.age != null && (
-            <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
+          {(row.city || row.age != null) && (
+            <div style={{ marginLeft: 'auto', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              {row.city && <span style={{ color: 'var(--text-2)', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap' }}>{row.city}</span>}
+              {row.age != null && (
+                <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
+              )}
+            </div>
           )}
         </div>
-        {/* Meta row: PM · type · WO# · status/sync · tech */}
+        {/* Meta row: status · PM · type · tech · [sync] | WO# right-aligned */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <PMChip pm={row.pm} />
-          <TypeIcon kind={row.type} />
-          <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
-          <Dot />
           {!useSyncPill && <>
             <StatusPill status={row.status} size="sm" />
             <Dot />
           </>}
+          <PMChip pm={row.pm} />
+          <TypeIcon kind={row.type} />
           {row.tech && <span>{row.tech}</span>}
           {showSyncPill && <SyncPill status={row.syncStatus} />}
+          <span style={{ marginLeft: 'auto', flexShrink: 0, fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
         </div>
       </div>
     </div>
@@ -2060,7 +2453,19 @@ function openMaps(addr) {
   else window.open(url, '_blank');
 }
 
-function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEdit, onAction, statuses }) {
+function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onAction, statuses }) {
+  const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
+  const statusRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!statusMenuOpen) return;
+    const close = () => setStatusMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [statusMenuOpen]);
+
   if (!data) {
     return (
       <section style={{
@@ -2116,7 +2521,35 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
             ? (data.syncStatus
                 ? <SyncPill status={data.syncStatus} />
                 : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>not yet synced</span>)
-            : <StatusPill status={data.status} />}
+            : data.tab === 'active' ? (
+              <div
+                ref={statusRef}
+                style={{ position: 'relative', display: 'inline-block', cursor: 'pointer' }}
+                onClick={(e) => { e.stopPropagation(); setStatusMenuOpen(o => !o); }}
+              >
+                <StatusPill status={data.status} />
+                {statusMenuOpen && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, marginTop: 4,
+                    minWidth: 200, background: 'var(--bg-surface)',
+                    border: '1px solid var(--border-2)', borderRadius: 8,
+                    boxShadow: '0 12px 30px rgba(0,0,0,0.45)',
+                    padding: '4px 0', zIndex: 60,
+                  }}>
+                    <MenuCaption>Set status</MenuCaption>
+                    {(statuses || DEFAULT_STATUSES).map(s => (
+                      <MenuItem key={s} onClick={(e) => {
+                        e.stopPropagation();
+                        setStatusMenuOpen(false);
+                        onAction && onAction('setStatus', s);
+                      }}>{s}</MenuItem>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <StatusPill status={data.status} />
+            )}
           {data.tab !== 'paid' && data.ageDays != null && (
             <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>
               {data.ageDays} {data.ageDays === 1 ? 'day' : 'days'} {data.tab === 'invoiced' ? 'invoiced' : data.tab === 'sent' ? 'in billing queue' : 'in phase'}
@@ -2147,8 +2580,16 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
         display: 'flex', flexDirection: 'column', gap: 12,
         flex: 1, minHeight: 0, overflowY: 'auto',
       }}>
+        <MoreInfoCard value={data.raw?.notes || ''} onSave={(text) => onSetMisc && onSetMisc(data.wo, text)} />
         <NoteComposer onSave={(note) => onAddNote && onAddNote(data.wo, note)} />
-        {data.notes.map((n, i) => <NoteCard key={n.id ?? i} {...n} />)}
+        {data.notes.map((n, i) => (
+          <NoteCard
+            key={n.id} {...n}
+            onEdit={onEditNote && !n.legacy ? (newBody) => onEditNote(data.wo, n.id, newBody) : null}
+            onDelete={onDeleteNote && !n.legacy ? () => onDeleteNote(data.wo, n.id) : null}
+            onPin={onPinNote && !n.legacy ? () => onPinNote(data.wo, n.id) : null}
+          />
+        ))}
       </div>
 
       <div style={{
@@ -2239,13 +2680,111 @@ function NoteComposer({ onSave }) {
   );
 }
 
-function NoteCard({ type, time, body, pinned, edited }) {
+// Always-present "More Information" (Misc) card. A super-pinned header extension
+// bound to o.notes; for details that do not fit the structured header fields.
+// Ports NoteCard's inline-edit mechanism (draft state + resync effect) but is
+// permanent and allows clearing to empty.
+function MoreInfoCard({ value, onSave }) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(value);
+  // Resync (and drop any unsaved draft) when the underlying value changes,
+  // including switching to a different WO.
+  React.useEffect(() => { setDraft(value); setEditing(false); }, [value]);
+
+  const save = () => {
+    if (draft !== value && onSave) onSave(draft);
+    setEditing(false);
+  };
+
   return (
     <div style={{
+      border: '1px solid var(--border-2)',
+      borderLeft: '3px solid var(--accent)',
+      background: 'var(--accent-soft)',
+      borderRadius: 8,
+      padding: '12px 14px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 13, color: 'var(--text-2)' }}>
+        <span style={{ fontWeight: 600, color: 'var(--text-1)' }}>More Information</span>
+        {!editing && (
+          <span
+            onClick={() => setEditing(true)}
+            style={{ marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer', padding: '0 6px', userSelect: 'none', fontSize: 12 }}
+            title="Edit"
+          >Edit</span>
+        )}
+      </div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            autoFocus
+            placeholder="Alternate phone, contact names, access details..."
+            style={{
+              width: '100%', fontFamily: 'inherit', fontSize: 15,
+              background: 'transparent', color: 'var(--text-1)',
+              border: '1px solid var(--border-2)', borderRadius: 4,
+              padding: 6, resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
+            <button onClick={() => { setDraft(value); setEditing(false); }} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+              border: '1px solid var(--border-2)', borderRadius: 4, cursor: 'pointer',
+            }}>Cancel</button>
+            <button onClick={save} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--accent)', color: 'white',
+              border: 'none', borderRadius: 4, cursor: 'pointer',
+            }}>Save</button>
+          </div>
+        </div>
+      ) : (
+        value
+          ? <div onClick={() => setEditing(true)} style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)', whiteSpace: 'pre-wrap', cursor: 'text' }}>{value}</div>
+          : <div onClick={() => setEditing(true)} style={{ marginTop: 6, fontSize: 14, color: 'var(--text-3)', fontStyle: 'italic', cursor: 'text' }}>Add alternate phone, contact names, access details...</div>
+      )}
+    </div>
+  );
+}
+
+function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit, onDelete, onPin }) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [editing, setEditing]   = React.useState(false);
+  const [draft, setDraft]       = React.useState(body);
+  const wrapRef = React.useRef(null);
+
+  React.useEffect(() => { setDraft(body); }, [body]);
+
+  React.useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [menuOpen]);
+
+  const saveEdit = () => {
+    const trimmed = draft.trim();
+    if (trimmed && trimmed !== body && onEdit) onEdit(trimmed);
+    setEditing(false);
+  };
+
+  const showMenu = !legacy && (onEdit || onDelete || onPin);
+
+  const menuItemStyle = { padding: '6px 12px', fontSize: 13, cursor: 'pointer', color: 'var(--text-1)' };
+
+  return (
+    <div ref={wrapRef} style={{
       border: '1px solid var(--border-1)',
       background: pinned ? 'var(--accent-soft)' : 'var(--bg-surface)',
       borderRadius: 8,
       padding: '12px 14px',
+      position: 'relative',
     }}>
       <div style={{
         display: 'flex', alignItems: 'baseline', gap: 8,
@@ -2256,9 +2795,69 @@ function NoteCard({ type, time, body, pinned, edited }) {
         <Dot />
         <span style={{ fontVariantNumeric: 'tabular-nums' }}>{time}</span>
         {edited && <span style={{ color: 'var(--text-3)' }}>· edited</span>}
-        <span style={{ marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer' }}>{'⋯'}</span>
+        {showMenu && (
+          <span
+            onClick={(e) => { e.stopPropagation(); setMenuOpen(m => !m); }}
+            style={{
+              marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer',
+              padding: '0 6px', userSelect: 'none',
+            }}
+            title="Note actions"
+          >{'⋯'}</span>
+        )}
       </div>
-      <div style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)' }}>{body}</div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            autoFocus
+            style={{
+              width: '100%', fontFamily: 'inherit', fontSize: 15,
+              background: 'transparent', color: 'var(--text-1)',
+              border: '1px solid var(--border-2)', borderRadius: 4,
+              padding: 6, resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
+            <button onClick={() => { setDraft(body); setEditing(false); }} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+              border: '1px solid var(--border-2)', borderRadius: 4, cursor: 'pointer',
+            }}>Cancel</button>
+            <button onClick={saveEdit} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--accent)', color: 'white',
+              border: 'none', borderRadius: 4, cursor: 'pointer',
+            }}>Save</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)', whiteSpace: 'pre-wrap' }}>{body}</div>
+      )}
+      {menuOpen && (
+        <div style={{
+          position: 'absolute', top: 30, right: 8, zIndex: 20,
+          background: 'var(--bg-surface-2)',
+          border: '1px solid var(--border-2)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+          minWidth: 140, padding: '4px 0',
+        }}>
+          {onEdit && (
+            <div onClick={() => { setEditing(true); setMenuOpen(false); }} style={menuItemStyle}>Edit</div>
+          )}
+          {onPin && (
+            <div onClick={() => { onPin(); setMenuOpen(false); }} style={menuItemStyle}>{pinned ? 'Unpin' : 'Pin'}</div>
+          )}
+          {onDelete && (
+            <div onClick={() => {
+              if (window.confirm('Delete this note?')) onDelete();
+              setMenuOpen(false);
+            }} style={{ ...menuItemStyle, color: 'var(--flag-emergency)' }}>Delete</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2266,7 +2865,7 @@ function NoteCard({ type, time, body, pinned, edited }) {
 /* ---------- landing (right-pane variant) ---------- */
 function Landing({ alerts = [], onSelectWO, onProceed }) {
   return (
-    <section style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-canvas)' }}>
+    <section style={{ minWidth: 0, minHeight: 0, height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-canvas)' }}>
       <div style={{
         padding: '36px 40px 24px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -2511,6 +3110,25 @@ const miniBtnStyle = {
   cursor: 'pointer', flexShrink: 0, lineHeight: 1,
 };
 
+// Reusable up/down reorder buttons. Used by Workflow editors (phases,
+// statuses, PMs, types, techs) and any future ordered list.
+function ReorderBtns({ onUp, onDown, disableUp, disableDown }) {
+  return (
+    <span style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
+      <button onClick={onUp}   style={miniBtnStyle} disabled={disableUp}>{'▲'}</button>
+      <button onClick={onDown} style={miniBtnStyle} disabled={disableDown}>{'▼'}</button>
+    </span>
+  );
+}
+
+// Generic swap helper for ordered arrays. Returns a new array.
+function swapAt(arr, i, j) {
+  if (i < 0 || j < 0 || i >= arr.length || j >= arr.length) return arr;
+  const next = [...arr];
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
 function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs }) {
   const [statusesOpen, setStatusesOpen] = React.useState(false);
   const [pmsOpen, setPmsOpen] = React.useState(false);
@@ -2526,18 +3144,8 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
     }
     setEditingId(null);
   };
-  const moveUp = (idx) => {
-    if (idx === 0) return;
-    const next = [...phases];
-    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-    setPhases(next);
-  };
-  const moveDown = (idx) => {
-    if (idx === phases.length - 1) return;
-    const next = [...phases];
-    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-    setPhases(next);
-  };
+  const moveUp = (idx) => setPhases(swapAt(phases, idx, idx - 1));
+  const moveDown = (idx) => setPhases(swapAt(phases, idx, idx + 1));
   const addPhase = () => {
     const id = 'ph_' + Date.now().toString(36);
     setPhases([...phases, { id, name: 'New phase', fg: '#6b7280', bg: 'var(--bg-surface-2)', statuses: [] }]);
@@ -2563,10 +3171,10 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
             border: '1px solid var(--border-1)', borderRadius: 6,
             background: 'var(--bg-surface)', minWidth: 0,
           }}>
-            <span style={{ display: 'flex', flexDirection: 'column', gap: 1, flexShrink: 0 }}>
-              <button onClick={() => moveUp(idx)} style={miniBtnStyle} disabled={idx === 0}>{'▲'}</button>
-              <button onClick={() => moveDown(idx)} style={miniBtnStyle} disabled={idx === phases.length - 1}>{'▼'}</button>
-            </span>
+            <ReorderBtns
+              onUp={() => moveUp(idx)} onDown={() => moveDown(idx)}
+              disableUp={idx === 0} disableDown={idx === phases.length - 1}
+            />
             <input
               type="color"
               value={normalizeHex(p.fg)}
@@ -2657,6 +3265,17 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
+  const editInputRef = React.useRef(null);
+
+  // Explicit focus on edit-mode entry. autoFocus has React-18 timing quirks
+  // where focus can be lost during the same commit, triggering immediate
+  // onBlur and dismissing the input before the user can type.
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   // Returns the phase id/name that owns this status, or '' if none.
   const phaseOf = (statusName) => {
@@ -2722,6 +3341,23 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
     setNewName('');
   };
 
+  // Per-phase status order auto-derives from the global order: filter each
+  // phase's status list against the new global ordering. Keeps phases in
+  // sync without a separate UI.
+  const syncPhasesToGlobal = (newGlobal) => {
+    if (!phases || !setPhases) return;
+    setPhases(phases.map(p => ({
+      ...p,
+      statuses: newGlobal.filter(s => (p.statuses || []).includes(s)),
+    })));
+  };
+  const moveStatus = (idx, delta) => {
+    const next = swapAt(statuses, idx, idx + delta);
+    if (next === statuses) return;
+    setStatuses(next);
+    syncPhasesToGlobal(next);
+  };
+
   const setColor = (name, hex) => setStatusColors({ ...statusColors, [name]: hex });
 
   const selectStyle = {
@@ -2761,10 +3397,14 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {statuses.map((s, idx) => (
-            <div key={idx} style={{
+            <div key={s} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => moveStatus(idx, -1)} onDown={() => moveStatus(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === statuses.length - 1}
+              />
               <input
                 type="color"
                 value={statusColors[s] || '#6b7280'}
@@ -2774,7 +3414,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
               />
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
@@ -2836,6 +3476,14 @@ function PMsEditor({ pms, setPms, onClose }) {
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
   const [newColor, setNewColor] = React.useState('#1a73e8');
+  const editInputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   const commitRename = (idx) => {
     const trimmed = editingName.trim();
@@ -2860,6 +3508,8 @@ function PMsEditor({ pms, setPms, onClose }) {
     setNewName('');
     setNewColor('#1a73e8');
   };
+
+  const movePm = (idx, delta) => setPms(swapAt(pms, idx, idx + delta));
 
   return (
     <div
@@ -2891,10 +3541,14 @@ function PMsEditor({ pms, setPms, onClose }) {
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {pms.map((pm, idx) => (
-            <div key={idx} style={{
+            <div key={pm.name} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => movePm(idx, -1)} onDown={() => movePm(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === pms.length - 1}
+              />
               <input
                 type="color"
                 value={normalizeHex(pm.color)}
@@ -2904,7 +3558,7 @@ function PMsEditor({ pms, setPms, onClose }) {
               />
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
@@ -2958,6 +3612,14 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
+  const editInputRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (editingIdx !== null && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingIdx]);
 
   const commitRename = (idx) => {
     const trimmed = editingName.trim();
@@ -2976,6 +3638,8 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
     setItems([...items, n]);
     setNewName('');
   };
+
+  const moveItem = (idx, delta) => setItems(swapAt(items, idx, idx + delta));
 
   return (
     <div
@@ -3007,13 +3671,17 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
         </div>
         <div style={{ padding: '14px 22px', overflowY: 'auto', flex: 1 }}>
           {items.map((v, idx) => (
-            <div key={idx} style={{
+            <div key={v} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
             }}>
+              <ReorderBtns
+                onUp={() => moveItem(idx, -1)} onDown={() => moveItem(idx, 1)}
+                disableUp={idx === 0} disableDown={idx === items.length - 1}
+              />
               {editingIdx === idx
                 ? <input
-                    autoFocus
+                    ref={editInputRef}
                     value={editingName}
                     onChange={e => setEditingName(e.target.value)}
                     onBlur={() => commitRename(idx)}
@@ -3068,10 +3736,11 @@ const ALERT_DEFS = [
 ];
 
 const SORT_DEFS = [
-  { key: 'created', label: 'Created' },
-  { key: 'age',     label: 'Age' },
-  { key: 'addr',    label: 'Address' },
-  { key: 'wo',      label: 'WO #' },
+  { key: 'created',  label: 'Created' },
+  { key: 'age',      label: 'Age' },
+  { key: 'wo',       label: 'WO #' },
+  { key: 'status',   label: 'Status (reverse)' },
+  { key: 'lastNote', label: 'Last Note' },
 ];
 
 function AlertsSection({ thresholds, setThresholds }) {
@@ -3111,14 +3780,14 @@ function WorkbookSection({ onGlobalSync, workbookPath, onPickWorkbook, syncInter
     <div>
       <SettingTitle sub="Where work orders are persisted. Sync settings.">Workbook</SettingTitle>
       <SettingRow label="Workbook path" hint="Used by sync_to_lookup.py and the in-app sync button.">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 480 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <code style={{
+            flex: 1, minWidth: 0, display: 'block',
             fontSize: 12, color: 'var(--text-2)',
             background: 'var(--bg-surface-2)', padding: '4px 8px', borderRadius: 4,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            maxWidth: 360,
           }} title={workbookPath || ''}>{workbookPath || '(not set)'}</code>
-          <ActionBtn onClick={onPickWorkbook}>Change...</ActionBtn>
+          <ActionBtn onClick={onPickWorkbook} style={{ flexShrink: 0 }}>Browse...</ActionBtn>
         </div>
       </SettingRow>
       <SettingRow label="Sync interval" hint="How often the local cache reconciles with the workbook.">
@@ -3129,7 +3798,7 @@ function WorkbookSection({ onGlobalSync, workbookPath, onPickWorkbook, syncInter
           { value: 'manual', label: 'Manual' },
         ]} />
       </SettingRow>
-      <SettingRow label="Sync now" hint="Re-sync every Sent-to-Invoice WO; overwrites duplicates in the workbook.">
+      <SettingRow label="Sync now" hint="Re-sync every Sent-to-Invoice and Invoiced WO; overwrites duplicates in the workbook.">
         <ActionBtn primary onClick={onGlobalSync}>Sync workbook</ActionBtn>
       </SettingRow>
     </div>
@@ -3249,6 +3918,10 @@ function FullScreenLanding({ onProceed, onSelectWO, alerts, loading }) {
       zIndex: 250,
     }}>
       <div style={{
+        flex: 1, minHeight: 0, width: '100%', overflowY: 'auto',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+      }}>
+      <div style={{
         marginTop: '8vh',
         display: 'flex', flexDirection: 'column', alignItems: 'center',
         gap: 16,
@@ -3309,10 +3982,10 @@ function FullScreenLanding({ onProceed, onSelectWO, alerts, loading }) {
           </div>
         )}
       </div>
-
-      <div style={{ flex: 1 }} />
+      </div>
 
       <div style={{
+        flexShrink: 0,
         padding: '24px 0 32px',
         opacity: (mounted && !leaving) ? 1 : 0,
         transition: leaving ? 'none' : 'opacity 800ms ease 900ms',
@@ -3551,26 +4224,25 @@ function ToastHost({ toasts }) {
   );
 }
 
-// Phase-11 migration: archive priority field into a note card, convert
-// legacy single notes string into one initial Note card. Idempotent --
+// Phase-11 migration: archive priority field into a note card, and backfill
+// stable ids onto existing note cards. (o.notes is the "More Information" field
+// as of change8 and is no longer folded into the note stream.) Idempotent --
 // safe to run more than once.
 function migrateOrders(orders) {
   if (!Array.isArray(orders)) return orders;
   return orders.map(o => {
     const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
-    const baseTs = o.dateCreated ? new Date(o.dateCreated).getTime() : Date.now();
 
-    // 1) Legacy notes -> single Note card (only if cards is empty)
-    if (cards.length === 0 && typeof o.notes === 'string' && o.notes.trim()) {
-      cards.push({
-        id: 'n_mig_notes_' + (o.id || baseTs),
-        ts: baseTs,
-        type: 'Note',
-        body: o.notes.trim(),
-        pinned: false,
-        edited: false,
-      });
+    // 0) Ensure every existing card has a stable id (guards against id-less cards
+    //    from old imports; id-less keys caused React to reuse wrong NoteCard instances).
+    for (let i = 0; i < cards.length; i++) {
+      if (!cards[i].id) {
+        cards[i] = { ...cards[i], id: 'n_mig_fix_' + (o.id || 'x') + '_' + i };
+      }
     }
+
+    // 1) o.notes is now the "More Information" (Misc) field (change8); it is no
+    //    longer folded into the note stream. Preserved as-is on the order.
 
     // 2) Priority field -> archive card (skip if already imported)
     const prio = typeof o.priority === 'string' ? o.priority.trim() : '';
@@ -3662,10 +4334,12 @@ function App() {
   const [currentView, setCurrentView] = React.useState('active');
 
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
-         addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData] = useWorkOrders();
+         addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
+         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
   const presets = data?.presets || [];
+  const inboxes = data?.inboxes || [];
   const phases  = Array.isArray(data?.phases) ? data.phases : DEFAULT_PHASES;
   const statusColors = data?.statusColors || DEFAULT_STATUS_COLORS;
   const statuses = data?.statuses || DEFAULT_STATUSES;
@@ -3792,6 +4466,7 @@ function App() {
 
   // Modal state
   const [modal, setModal] = React.useState(null); // null | 'add' | { kind: 'edit', id }
+  const [namePrompt, setNamePrompt] = React.useState(null); // text-input modal state
   const editTarget = (modal && modal.kind === 'edit') ? orders.find(o => o.id === modal.id) : null;
 
   // Toast system
@@ -3972,6 +4647,18 @@ function App() {
     clearSelection();
   }, [selectedIds, orders, batchUpdate, toast, clearSelection]);
 
+  const bulkSetStatus = React.useCallback((status) => {
+    const ts = Date.now();
+    const ids = selectedIds;
+    batchUpdate(
+      o => ids.has(o.id),
+      cur => ({ ...cur, status,
+                history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] })
+    );
+    toast(ids.size + ' set to ' + status);
+    clearSelection();
+  }, [selectedIds, batchUpdate, toast, clearSelection]);
+
   const VIEW_BUILDERS = {
     active:   () => ({ title: 'Active',          total: activeOrders.length, groups: groupByPhase(activeOrders, phases) }),
     sent:     () => ({ title: 'Sent to invoice', total: sentOrders.length,     groups: groupByPhase(sentOrders, phases) }),
@@ -3982,13 +4669,26 @@ function App() {
 
   const activePresetId = (typeof currentView === 'string' && currentView.startsWith('sv:')) ? currentView.slice(3) : null;
   const activePreset = activePresetId ? (presets.find(p => p.id === activePresetId) || null) : null;
-  const effectiveQuery   = activePreset ? (activePreset.query   || '') : query;
-  const effectiveFilters = activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : filters;
-  const effectiveSort    = activePreset ? (activePreset.sort    || currentSort) : currentSort;
+  const activeInboxId = (typeof currentView === 'string' && currentView.startsWith('ib:')) ? currentView.slice(3) : null;
+  const activeInbox = activeInboxId ? (inboxes.find(b => b.id === activeInboxId) || null) : null;
+  const effectiveQuery   = (activePreset || activeInbox) ? (activePreset ? (activePreset.query || '') : '') : query;
+  const effectiveFilters = (activePreset || activeInbox) ? (activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : { pm: '', type: '', status: '', tech: '' }) : filters;
+  const effectiveSort    = activeInbox ? { key: '', dir: 'asc' } : (activePreset ? (activePreset.sort || currentSort) : currentSort);
 
   let viewData;
   if (loading) {
     viewData = { title: '...', total: 0, groups: [], loading: true };
+  } else if (activeInbox) {
+    // Curated, manually-ordered list: resolve woIds against live (non-trashed)
+    // orders, preserve the inbox's order, drop ids that no longer resolve.
+    const byId = new Map(orders.filter(o => !o.deleted).map(o => [o.id, o]));
+    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(toDisplayRow);
+    viewData = {
+      title: activeInbox.name || 'Inbox',
+      total: rows.length,
+      groups: rows.length ? [{ phase: activeInbox.name || 'Inbox', count: rows.length, rows, dot: 'var(--text-2)' }] : [],
+      inbox: true, inboxId: activeInbox.id, inboxWoIds: activeInbox.woIds || [],
+    };
   } else if (activePreset) {
     viewData = { ...VIEW_BUILDERS.active(), title: activePreset.name || 'Saved view' };
   } else if (VIEW_BUILDERS[currentView]) {
@@ -4089,19 +4789,24 @@ function App() {
       toast('Workbook sync unavailable', 'err');
       return false;
     }
+    let errMsg = 'Unknown error';
     try {
       const r = await window.workbook.sync(workbookPath || '');
       if (r && r.ok) {
         updateOrder(id, cur => ({ ...cur, syncStatus: 'synced' }));
+        toast('Workbook synced');
         return true;
       }
-    } catch {}
+      errMsg = workbookSyncErrorMessage(r && (r.err || r.error));
+    } catch (e) {
+      errMsg = workbookSyncErrorMessage(e && e.message);
+    }
     updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-    toast('Workbook sync failed', 'err');
+    toast('Workbook sync failed: ' + errMsg, 'err');
     return false;
   }, [updateOrder, toast, workbookPath]);
 
-  const sendToInvoice = React.useCallback((id) => {
+  const sendToInvoice = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
     if (!o) return;
     if (!o.bidAmount || !String(o.bidAmount).trim()) {
@@ -4111,10 +4816,12 @@ function App() {
     updateOrder(id, cur => ({
       ...cur,
       tab: 'sent',
+      syncStatus: 'pending',
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'sent to billing queue', detail: '' }],
     }));
-  }, [orders, updateOrder, toast]);
+    await syncWOToWorkbook(o);
+  }, [orders, updateOrder, toast, syncWOToWorkbook]);
 
   const markInvoiced = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
@@ -4155,12 +4862,12 @@ function App() {
     try {
       const r = await window.workbook.sync(workbookPath || '');
       if (r && r.ok) {
-        batchUpdate(o => !o.deleted && o.tab === 'invoiced', cur => ({ ...cur, syncStatus: 'synced' }));
+        batchUpdate(o => !o.deleted && (o.tab === 'invoiced' || o.tab === 'sent'), cur => ({ ...cur, syncStatus: 'synced' }));
         if (!silent) toast('Workbook synced');
       } else {
-        const msg = (r && (r.err || r.error)) || 'Unknown error';
+        const msg = workbookSyncErrorMessage(r && (r.err || r.error));
         // Failures toast even in silent mode -- user needs to know.
-        toast('Workbook sync failed: ' + String(msg).split('\n')[0], 'err');
+        toast('Workbook sync failed: ' + msg, 'err');
       }
     } catch (e) {
       toast('Workbook sync failed', 'err');
@@ -4202,7 +4909,7 @@ function App() {
       ['Date Created', o => o.dateCreated || ''],
       ['Tab',          o => o.tab || 'active'],
       ['Phase',        (_o, phase) => phase],
-      ['Notes',        o => o.notes || ''],
+      ['More Information', o => o.notes || ''],
       ['Portal Link',  o => o.portalLink || ''],
     ];
     const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
@@ -4228,17 +4935,17 @@ function App() {
   }, [orders, selectedIds, batchUpdate, toast, clearSelection, globalSyncWorkbook]);
 
   const onSaveView = React.useCallback(() => {
-    const name = window.prompt('Name this view:');
-    if (!name || !name.trim()) return;
-    const id = addPreset({ name: name.trim(), query, filters, sort: currentSort });
-    if (id) { setCurrentView('sv:' + id); toast('View saved'); }
+    setNamePrompt({ title: 'Save view', placeholder: 'View name', submitLabel: 'Save', onSubmit: (name) => {
+      const id = addPreset({ name, query, filters, sort: currentSort });
+      if (id) { setCurrentView('sv:' + id); toast('View saved'); }
+    }});
   }, [addPreset, query, filters, currentSort, toast]);
   const onRenamePreset = React.useCallback((id) => {
     const p = presets.find(x => x.id === id);
-    const name = window.prompt('Rename view:', p?.name || '');
-    if (!name || !name.trim()) return;
-    updatePreset(id, { name: name.trim() });
-    toast('View renamed');
+    setNamePrompt({ title: 'Rename view', initial: p?.name || '', onSubmit: (name) => {
+      updatePreset(id, { name });
+      toast('View renamed');
+    }});
   }, [presets, updatePreset, toast]);
   const onDeletePreset = React.useCallback((id) => {
     if (!window.confirm('Delete this saved view?')) return;
@@ -4246,6 +4953,42 @@ function App() {
     if (currentView === 'sv:' + id) setCurrentView('active');
     toast('View deleted');
   }, [deletePreset, currentView, toast]);
+
+  const onAddInbox = React.useCallback(() => {
+    setNamePrompt({ title: 'New inbox', placeholder: 'Inbox name', submitLabel: 'Create', onSubmit: (name) => {
+      const id = addInbox(name);
+      if (id) { setCurrentView('ib:' + id); toast('Inbox created'); }
+    }});
+  }, [addInbox, toast]);
+  const onRenameInbox = React.useCallback((id) => {
+    const b = inboxes.find(x => x.id === id);
+    setNamePrompt({ title: 'Rename inbox', initial: b?.name || '', onSubmit: (name) => {
+      renameInbox(id, name);
+      toast('Inbox renamed');
+    }});
+  }, [inboxes, renameInbox, toast]);
+  const onDeleteInbox = React.useCallback((id) => {
+    if (!window.confirm('Delete this inbox? (Work orders are not deleted.)')) return;
+    deleteInbox(id);
+    if (currentView === 'ib:' + id) setCurrentView('active');
+    toast('Inbox deleted');
+  }, [deleteInbox, currentView, toast]);
+  const onAddToInbox = React.useCallback((inboxId, woId) => {
+    addToInbox(inboxId, woId);
+    const n = Array.isArray(woId) ? woId.length : 1;
+    toast(n > 1 ? (n + ' added to inbox') : 'Added to inbox');
+  }, [addToInbox, toast]);
+  // Create a new inbox then drop the given WO ids into it (from the list menu).
+  const onAddToNewInbox = React.useCallback((woIds) => {
+    setNamePrompt({ title: 'New inbox', placeholder: 'Inbox name', submitLabel: 'Create & add', onSubmit: (name) => {
+      const id = addInbox(name);
+      if (id) {
+        addToInbox(id, woIds);
+        const n = Array.isArray(woIds) ? woIds.length : 1;
+        toast(n > 1 ? (n + ' added to new inbox') : 'Added to new inbox');
+      }
+    }});
+  }, [addInbox, addToInbox, toast]);
 
   const handleAddWO = React.useCallback(() => { setModal('add'); }, []);
 
@@ -4289,21 +5032,134 @@ function App() {
     });
   }, [updateOrder]);
 
-  // ⋯ menu actions on the detail pane.
-  const detailAction = React.useCallback((kind, payload) => {
-    const id = selectedWO;
+  const editNote = React.useCallback((id, noteId, newBody) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      return {
+        ...cur,
+        noteCards: cards.map(c => c.id === noteId ? { ...c, body: newBody, edited: true } : c),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: 'note edited', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
+  const setMisc = React.useCallback((id, text) => {
+    updateOrder(id, cur => ({
+      ...cur, notes: text,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action: 'more info edited', detail: '' }],
+    }));
+  }, [updateOrder]);
+
+  const deleteNote = React.useCallback((id, noteId) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      return {
+        ...cur,
+        noteCards: cards.filter(c => c.id !== noteId),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: 'note deleted', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
+  const togglePinNote = React.useCallback((id, noteId) => {
+    updateOrder(id, cur => {
+      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
+      const target = cards.find(c => c.id === noteId);
+      const willPin = target && !target.pinned;
+      return {
+        ...cur,
+        noteCards: cards.map(c => c.id === noteId ? { ...c, pinned: !c.pinned } : c),
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: willPin ? 'note pinned' : 'note unpinned', detail: '' }],
+      };
+    });
+  }, [updateOrder]);
+
+  // Explicit-id action handler shared by context menu and detail pane.
+  const woAction = React.useCallback((id, kind, payload) => {
     if (!id) return;
     const histEntry = (action, detail) => ({ ts: Date.now(), action, detail: detail || '' });
     switch (kind) {
-      case 'setStatus': {
+      case 'setStatus':
         updateOrder(id, cur => ({
-          ...cur,
-          status: payload,
+          ...cur, status: payload,
           history: [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)],
         }));
         toast('Status: ' + payload);
         break;
-      }
+      case 'backToActive':
+        updateOrder(id, cur => ({
+          ...cur, tab: 'active',
+          history: [...(cur.history || []), histEntry('back to Active')],
+        }));
+        toast('Moved to Active');
+        break;
+      case 'backToSent':
+        updateOrder(id, cur => ({
+          ...cur, tab: 'sent',
+          history: [...(cur.history || []), histEntry('back to Sent to invoice')],
+        }));
+        toast('Moved to Sent to invoice');
+        break;
+      case 'softDelete':
+        updateOrder(id, cur => ({
+          ...cur, deleted: true,
+          history: [...(cur.history || []), histEntry('sent to Trash')],
+        }));
+        toast('Sent to Trash');
+        break;
+      case 'setPm':
+        updateOrder(id, cur => ({
+          ...cur, pm: payload,
+          history: [...(cur.history || []), histEntry('pm', (cur.pm || '') + ' → ' + payload)],
+        }));
+        toast('PM: ' + payload);
+        break;
+      case 'setType':
+        updateOrder(id, cur => ({
+          ...cur, type: payload,
+          history: [...(cur.history || []), histEntry('type', (cur.type || '') + ' → ' + payload)],
+        }));
+        toast('Type: ' + payload);
+        break;
+      case 'setTech':
+        updateOrder(id, cur => ({
+          ...cur, tech: payload,
+          history: [...(cur.history || []), histEntry('tech', (cur.tech || '') + ' → ' + (payload || 'Unassigned'))],
+        }));
+        toast('Tech: ' + (payload || 'Unassigned'));
+        break;
+      case 'toggleEmergency':
+        updateOrder(id, cur => ({
+          ...cur, emergency: !cur.emergency,
+          history: [...(cur.history || []), histEntry(cur.emergency ? 'emergency: cleared' : 'emergency: set')],
+        }));
+        break;
+      case 'toggleWarranty':
+        updateOrder(id, cur => ({
+          ...cur, warranty: !cur.warranty,
+          history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
+        }));
+        break;
+      default: break;
+    }
+  }, [updateOrder, toast]);
+
+  // ⋯ menu actions on the detail pane.
+  const detailAction = React.useCallback((kind, payload) => {
+    const id = selectedWO;
+    if (!id) return;
+    // Delegate shared cases to woAction.
+    if (kind === 'setStatus' || kind === 'backToActive' || kind === 'backToSent' || kind === 'softDelete' ||
+        kind === 'toggleEmergency' || kind === 'toggleWarranty') {
+      woAction(id, kind, payload);
+      return;
+    }
+    const histEntry = (action, detail) => ({ ts: Date.now(), action, detail: detail || '' });
+    switch (kind) {
       case 'markPaid': {
         updateOrder(id, cur => ({
           ...cur, tab: 'paid',
@@ -4312,36 +5168,12 @@ function App() {
         toast('Marked Paid');
         break;
       }
-      case 'backToActive': {
-        updateOrder(id, cur => ({
-          ...cur, tab: 'active',
-          history: [...(cur.history || []), histEntry('back to Active')],
-        }));
-        toast('Moved to Active');
-        break;
-      }
-      case 'backToSent': {
-        updateOrder(id, cur => ({
-          ...cur, tab: 'sent',
-          history: [...(cur.history || []), histEntry('back to Sent to invoice')],
-        }));
-        toast('Moved to Sent to invoice');
-        break;
-      }
       case 'backToInvoiced': {
         updateOrder(id, cur => ({
           ...cur, tab: 'invoiced',
           history: [...(cur.history || []), histEntry('back to Invoiced')],
         }));
         toast('Moved to Invoiced');
-        break;
-      }
-      case 'softDelete': {
-        updateOrder(id, cur => ({
-          ...cur, deleted: true,
-          history: [...(cur.history || []), histEntry('sent to Trash')],
-        }));
-        toast('Sent to Trash');
         break;
       }
       case 'restore': {
@@ -4367,23 +5199,9 @@ function App() {
         if (newId) { setSelectedWO(newId); pushRecent(newId); toast('Duplicated → ' + newId); }
         break;
       }
-      case 'toggleEmergency': {
-        updateOrder(id, cur => ({
-          ...cur, emergency: !cur.emergency,
-          history: [...(cur.history || []), histEntry(cur.emergency ? 'emergency: cleared' : 'emergency: set')],
-        }));
-        break;
-      }
-      case 'toggleWarranty': {
-        updateOrder(id, cur => ({
-          ...cur, warranty: !cur.warranty,
-          history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
-        }));
-        break;
-      }
       default: break;
     }
-  }, [orders, selectedWO, updateOrder, deleteOrderHard, addOrder, toast]);
+  }, [selectedWO, woAction, orders, updateOrder, deleteOrderHard, addOrder, toast]);
 
   const themeVars = theme === 'light' ? TT_LIGHT : TT_DARK;
   // Apply theme tokens at :root so Modal/Toast (rendered outside the themed container)
@@ -4448,6 +5266,10 @@ function App() {
       onMarkPaid={markPaid}
       onSyncWO={retrySyncWO}
       onAddNote={addNote}
+      onEditNote={editNote}
+      onDeleteNote={deleteNote}
+      onPinNote={togglePinNote}
+      onSetMisc={setMisc}
       onEdit={(id) => setModal({ kind: 'edit', id })}
       onAction={detailAction}
       statuses={statuses}
@@ -4470,17 +5292,22 @@ function App() {
           color: 'var(--text-1)',
           display: 'grid',
           gridTemplateColumns: '220px 1fr 1.2fr',
+          gridTemplateRows: 'minmax(0, 1fr)',
           overflow: 'hidden',
         }}>
           <Sidebar
             activeView={currentView}
             counts={counts}
             presets={presets}
+            inboxes={inboxes}
             onSelectView={setCurrentView}
             onOpenSettings={() => setCurrentView('settings')}
             onAddWO={handleAddWO}
             onRenamePreset={onRenamePreset}
             onDeletePreset={onDeletePreset}
+            onAddInbox={onAddInbox}
+            onRenameInbox={onRenameInbox}
+            onDeleteInbox={onDeleteInbox}
             onToolSync={() => globalSyncWorkbook({ silent: false })}
             onToolExport={exportViewCsv}
             onToolPreflight={runPreflight}
@@ -4488,14 +5315,16 @@ function App() {
           <ListPane
             view={currentView}
             data={viewData}
+            phases={phases}
             density={density}
             sort={effectiveSort}
-            setSort={activePreset ? (() => {}) : setSort}
+            setSort={(activePreset || activeInbox) ? (() => {}) : setSort}
             query={effectiveQuery}
-            setQuery={activePreset ? (() => {}) : setQuery}
+            setQuery={(activePreset || activeInbox) ? (() => {}) : setQuery}
             filters={effectiveFilters}
-            setFilters={activePreset ? (() => {}) : setFilters}
-            isPresetView={!!activePreset}
+            setFilters={(activePreset || activeInbox) ? (() => {}) : setFilters}
+            isPresetView={!!activePreset || !!activeInbox}
+            isInboxView={!!activeInbox}
             onSaveView={onSaveView}
             selectedWO={(currentView === 'attention' || currentView === 'settings') ? null : selectedWO}
             onSelectWO={(wo) => {
@@ -4507,6 +5336,16 @@ function App() {
             selectedIds={selectedIds}
             onCheck={handleCheck}
             onClearSelection={clearSelection}
+            statuses={statuses}
+            types={types}
+            techs={techs}
+            inboxes={inboxes}
+            onWoAction={woAction}
+            onBulkSetStatus={bulkSetStatus}
+            onAddToNewInbox={onAddToNewInbox}
+            onAddToInbox={onAddToInbox}
+            onRemoveFromInbox={removeFromInbox}
+            onReorderInbox={reorderInbox}
           />
           {rightPane}
         </div>
@@ -4520,6 +5359,7 @@ function App() {
             onSubmit={submitAdd}
           />
         </Modal>
+        <NamePromptModal state={namePrompt} onClose={() => setNamePrompt(null)} />
         <Modal
           open={!!editTarget}
           onClose={() => setModal(null)}
