@@ -2533,7 +2533,7 @@ function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit, onDele
 /* ---------- landing (right-pane variant) ---------- */
 function Landing({ alerts = [], onSelectWO, onProceed }) {
   return (
-    <section style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-canvas)' }}>
+    <section style={{ minWidth: 0, minHeight: 0, height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-canvas)' }}>
       <div style={{
         padding: '36px 40px 24px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -4865,6 +4865,7 @@ function App() {
           color: 'var(--text-1)',
           display: 'grid',
           gridTemplateColumns: '220px 1fr 1.2fr',
+          gridTemplateRows: 'minmax(0, 1fr)',
           overflow: 'hidden',
         }}>
           <Sidebar
