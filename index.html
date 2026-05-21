@@ -856,13 +856,6 @@ function toDetailData(o) {
         time: fmtNoteTime(n.ts), body: n.body || '',
         pinned: !!n.pinned, edited: !!n.edited,
       }));
-      if (o.notes) {
-        list.push({
-          id: '_legacy', type: 'Note',
-          time: fmtCreated(o.dateCreated), body: o.notes,
-          pinned: false, edited: false, legacy: true,
-        });
-      }
       return list;
     })(),
     activity: (Array.isArray(o.history) ? o.history : [])
@@ -1398,7 +1391,7 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
           </div>
         </FormField>
 
-        <FormField label="Notes" span={2}>
+        <FormField label="More Information" span={2}>
           <textarea
             rows={3}
             style={{ ...fieldInputStyle, resize: 'vertical', minHeight: 60 }}
@@ -2256,7 +2249,7 @@ function openMaps(addr) {
   else window.open(url, '_blank');
 }
 
-function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onEdit, onAction, statuses }) {
+function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onAction, statuses }) {
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
   const statusRef = React.useRef(null);
 
@@ -2383,6 +2376,7 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
         display: 'flex', flexDirection: 'column', gap: 12,
         flex: 1, minHeight: 0, overflowY: 'auto',
       }}>
+        <MoreInfoCard value={data.raw?.notes || ''} onSave={(text) => onSetMisc && onSetMisc(data.wo, text)} />
         <NoteComposer onSave={(note) => onAddNote && onAddNote(data.wo, note)} />
         {data.notes.map((n, i) => (
           <NoteCard
@@ -2478,6 +2472,77 @@ function NoteComposer({ onSave }) {
           color: 'var(--text-1)', lineHeight: 1.5,
         }}
       />
+    </div>
+  );
+}
+
+// Always-present "More Information" (Misc) card. A super-pinned header extension
+// bound to o.notes; for details that do not fit the structured header fields.
+// Ports NoteCard's inline-edit mechanism (draft state + resync effect) but is
+// permanent and allows clearing to empty.
+function MoreInfoCard({ value, onSave }) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(value);
+  // Resync (and drop any unsaved draft) when the underlying value changes,
+  // including switching to a different WO.
+  React.useEffect(() => { setDraft(value); setEditing(false); }, [value]);
+
+  const save = () => {
+    if (draft !== value && onSave) onSave(draft);
+    setEditing(false);
+  };
+
+  return (
+    <div style={{
+      border: '1px solid var(--border-2)',
+      borderLeft: '3px solid var(--accent)',
+      background: 'var(--accent-soft)',
+      borderRadius: 8,
+      padding: '12px 14px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 13, color: 'var(--text-2)' }}>
+        <span style={{ fontWeight: 600, color: 'var(--text-1)' }}>More Information</span>
+        {!editing && (
+          <span
+            onClick={() => setEditing(true)}
+            style={{ marginLeft: 'auto', color: 'var(--text-3)', cursor: 'pointer', padding: '0 6px', userSelect: 'none', fontSize: 12 }}
+            title="Edit"
+          >Edit</span>
+        )}
+      </div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            autoFocus
+            placeholder="Alternate phone, contact names, access details..."
+            style={{
+              width: '100%', fontFamily: 'inherit', fontSize: 15,
+              background: 'transparent', color: 'var(--text-1)',
+              border: '1px solid var(--border-2)', borderRadius: 4,
+              padding: 6, resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
+            <button onClick={() => { setDraft(value); setEditing(false); }} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+              border: '1px solid var(--border-2)', borderRadius: 4, cursor: 'pointer',
+            }}>Cancel</button>
+            <button onClick={save} style={{
+              fontFamily: 'inherit', fontSize: 12, padding: '4px 10px',
+              background: 'var(--accent)', color: 'white',
+              border: 'none', borderRadius: 4, cursor: 'pointer',
+            }}>Save</button>
+          </div>
+        </div>
+      ) : (
+        value
+          ? <div onClick={() => setEditing(true)} style={{ marginTop: 6, fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)', whiteSpace: 'pre-wrap', cursor: 'text' }}>{value}</div>
+          : <div onClick={() => setEditing(true)} style={{ marginTop: 6, fontSize: 14, color: 'var(--text-3)', fontStyle: 'italic', cursor: 'text' }}>Add alternate phone, contact names, access details...</div>
+      )}
     </div>
   );
 }
@@ -3956,14 +4021,14 @@ function ToastHost({ toasts }) {
   );
 }
 
-// Phase-11 migration: archive priority field into a note card, convert
-// legacy single notes string into one initial Note card. Idempotent --
+// Phase-11 migration: archive priority field into a note card, and backfill
+// stable ids onto existing note cards. (o.notes is the "More Information" field
+// as of change8 and is no longer folded into the note stream.) Idempotent --
 // safe to run more than once.
 function migrateOrders(orders) {
   if (!Array.isArray(orders)) return orders;
   return orders.map(o => {
     const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
-    const baseTs = o.dateCreated ? new Date(o.dateCreated).getTime() : Date.now();
 
     // 0) Ensure every existing card has a stable id (guards against id-less cards
     //    from old imports; id-less keys caused React to reuse wrong NoteCard instances).
@@ -3973,17 +4038,8 @@ function migrateOrders(orders) {
       }
     }
 
-    // 1) Legacy notes -> single Note card (only if cards is empty)
-    if (cards.length === 0 && typeof o.notes === 'string' && o.notes.trim()) {
-      cards.push({
-        id: 'n_mig_notes_' + (o.id || baseTs),
-        ts: baseTs,
-        type: 'Note',
-        body: o.notes.trim(),
-        pinned: false,
-        edited: false,
-      });
-    }
+    // 1) o.notes is now the "More Information" (Misc) field (change8); it is no
+    //    longer folded into the note stream. Preserved as-is on the order.
 
     // 2) Priority field -> archive card (skip if already imported)
     const prio = typeof o.priority === 'string' ? o.priority.trim() : '';
@@ -4634,7 +4690,7 @@ function App() {
       ['Date Created', o => o.dateCreated || ''],
       ['Tab',          o => o.tab || 'active'],
       ['Phase',        (_o, phase) => phase],
-      ['Notes',        o => o.notes || ''],
+      ['More Information', o => o.notes || ''],
       ['Portal Link',  o => o.portalLink || ''],
     ];
     const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
@@ -4731,6 +4787,14 @@ function App() {
                   { ts: Date.now(), action: 'note edited', detail: '' }],
       };
     });
+  }, [updateOrder]);
+
+  const setMisc = React.useCallback((id, text) => {
+    updateOrder(id, cur => ({
+      ...cur, notes: text,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action: 'more info edited', detail: '' }],
+    }));
   }, [updateOrder]);
 
   const deleteNote = React.useCallback((id, noteId) => {
@@ -4950,6 +5014,7 @@ function App() {
       onEditNote={editNote}
       onDeleteNote={deleteNote}
       onPinNote={togglePinNote}
+      onSetMisc={setMisc}
       onEdit={(id) => setModal({ kind: 'edit', id })}
       onAction={detailAction}
       statuses={statuses}
