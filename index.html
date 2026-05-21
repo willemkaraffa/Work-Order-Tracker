@@ -721,7 +721,15 @@ function sortRows(rows, sort, phaseStatuses) {
   const k = sort.key;
   return [...rows].sort((a, b) => {
     if (k === 'age')  return (((a.ageDays ?? -1) - (b.ageDays ?? -1)) * dir);
-    if (k === 'addr') return String(a.addr).localeCompare(String(b.addr)) * dir;
+    if (k === 'city') {
+      const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
+      const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
+      const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
+      if (ai !== bi) return ai - bi;
+      const c = String(a.city || '').localeCompare(String(b.city || ''));
+      if (c !== 0) return c * dir;
+      return (b.ageDays ?? -1) - (a.ageDays ?? -1);
+    }
     if (k === 'wo') {
       const ai = parseInt(String(a.wo).replace(/[^0-9]/g, ''), 10) || 0;
       const bi = parseInt(String(b.wo).replace(/[^0-9]/g, ''), 10) || 0;
@@ -3419,7 +3427,7 @@ const ALERT_DEFS = [
 const SORT_DEFS = [
   { key: 'created',  label: 'Created' },
   { key: 'age',      label: 'Age' },
-  { key: 'addr',     label: 'Address' },
+  { key: 'city',     label: 'City (route)' },
   { key: 'wo',       label: 'WO #' },
   { key: 'status',   label: 'Status (reverse)' },
   { key: 'lastNote', label: 'Last Note' },
