@@ -1807,7 +1807,7 @@ const TT_VIEW_DATA = {
   'sv-await':  { title: 'Awaiting PM response',  total: 3, groups: [TT_GROUPS[0]] },
 };
 
-function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs }) {
+function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox }) {
   const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   const inputRef = React.useRef(null);
@@ -1952,6 +1952,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
             ? <span onClick={() => setQuery('')} style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text-3)' }}>{'✕'}</span>
             : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>/</span>}
         </div>
+        {!isInboxView && (
         <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <FilterDropdown label="PM"     value={filters.pm}     options={pmOptions}     onChange={setF('pm')} />
           <FilterDropdown label="Type"   value={filters.type}   options={typeOptions}   onChange={setF('type')} />
@@ -1964,6 +1965,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
             >Clear filters</span>
           )}
         </div>
+        )}
         <div style={{
           marginTop: 12, fontSize: 13, color: 'var(--text-2)',
           fontVariantNumeric: 'tabular-nums',
@@ -1982,7 +1984,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
               fontFamily: 'inherit', fontSize: 12, cursor: 'pointer',
             }}>Save view</button>
           )}
-          {sort && setSort && (
+          {sort && setSort && !isInboxView && (
             <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
               <span style={{ color: 'var(--text-3)' }}>Sort:</span>
               <SortDropdown sort={sort} onChange={setSort} />
@@ -2015,7 +2017,8 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
           </div>
         ) : sortedGroups.length === 0 ? (
           <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
-            {hasActiveFilter ? 'No matches.' :
+            {isInboxView ? 'This inbox is empty. Right-click a work order and choose "Add to inbox".' :
+             hasActiveFilter ? 'No matches.' :
              view === 'trash' ? 'Trash is empty.' :
              view === 'paid'  ? 'No paid work orders to show.' :
                                 'Nothing here.'}
@@ -4581,13 +4584,26 @@ function App() {
 
   const activePresetId = (typeof currentView === 'string' && currentView.startsWith('sv:')) ? currentView.slice(3) : null;
   const activePreset = activePresetId ? (presets.find(p => p.id === activePresetId) || null) : null;
-  const effectiveQuery   = activePreset ? (activePreset.query   || '') : query;
-  const effectiveFilters = activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : filters;
-  const effectiveSort    = activePreset ? (activePreset.sort    || currentSort) : currentSort;
+  const activeInboxId = (typeof currentView === 'string' && currentView.startsWith('ib:')) ? currentView.slice(3) : null;
+  const activeInbox = activeInboxId ? (inboxes.find(b => b.id === activeInboxId) || null) : null;
+  const effectiveQuery   = (activePreset || activeInbox) ? (activePreset ? (activePreset.query || '') : '') : query;
+  const effectiveFilters = (activePreset || activeInbox) ? (activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : { pm: '', type: '', status: '', tech: '' }) : filters;
+  const effectiveSort    = activeInbox ? { key: '', dir: 'asc' } : (activePreset ? (activePreset.sort || currentSort) : currentSort);
 
   let viewData;
   if (loading) {
     viewData = { title: '...', total: 0, groups: [], loading: true };
+  } else if (activeInbox) {
+    // Curated, manually-ordered list: resolve woIds against live (non-trashed)
+    // orders, preserve the inbox's order, drop ids that no longer resolve.
+    const byId = new Map(orders.filter(o => !o.deleted).map(o => [o.id, o]));
+    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(toDisplayRow);
+    viewData = {
+      title: activeInbox.name || 'Inbox',
+      total: rows.length,
+      groups: rows.length ? [{ phase: activeInbox.name || 'Inbox', count: rows.length, rows, dot: 'var(--text-2)' }] : [],
+      inbox: true, inboxId: activeInbox.id,
+    };
   } else if (activePreset) {
     viewData = { ...VIEW_BUILDERS.active(), title: activePreset.name || 'Saved view' };
   } else if (VIEW_BUILDERS[currentView]) {
@@ -5206,12 +5222,13 @@ function App() {
             phases={phases}
             density={density}
             sort={effectiveSort}
-            setSort={activePreset ? (() => {}) : setSort}
+            setSort={(activePreset || activeInbox) ? (() => {}) : setSort}
             query={effectiveQuery}
-            setQuery={activePreset ? (() => {}) : setQuery}
+            setQuery={(activePreset || activeInbox) ? (() => {}) : setQuery}
             filters={effectiveFilters}
-            setFilters={activePreset ? (() => {}) : setFilters}
-            isPresetView={!!activePreset}
+            setFilters={(activePreset || activeInbox) ? (() => {}) : setFilters}
+            isPresetView={!!activePreset || !!activeInbox}
+            isInboxView={!!activeInbox}
             onSaveView={onSaveView}
             selectedWO={(currentView === 'attention' || currentView === 'settings') ? null : selectedWO}
             onSelectWO={(wo) => {
@@ -5226,8 +5243,13 @@ function App() {
             statuses={statuses}
             types={types}
             techs={techs}
+            inboxes={inboxes}
             onWoAction={woAction}
             onBulkSetStatus={bulkSetStatus}
+            onAddInbox={addInbox}
+            onAddToInbox={onAddToInbox}
+            onRemoveFromInbox={removeFromInbox}
+            onReorderInbox={reorderInbox}
           />
           {rightPane}
         </div>
