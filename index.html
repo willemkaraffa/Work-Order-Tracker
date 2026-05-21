@@ -919,7 +919,7 @@ function useWorkOrders() {
     let cancelled = false;
     (async () => {
       const fresh = () => ({
-        orders: [], presets: [],
+        orders: [], presets: [], inboxes: [],
         statuses: DEFAULT_STATUSES.slice(),
         phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
@@ -945,6 +945,7 @@ function useWorkOrders() {
         }
         if (!Array.isArray(parsed.orders))   parsed.orders   = [];
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
+        if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         if (!parsed.statusColors || typeof parsed.statusColors !== 'object') parsed.statusColors = {};
@@ -1079,6 +1080,51 @@ function useWorkOrders() {
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
 
+  // --- Custom inboxes (manual-membership, ordered WO lists) ---
+  const persistInboxes = (cur, inboxes) => {
+    const next = { ...cur, inboxes };
+    dataRef.current = next; setData(next);
+    if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
+  };
+  const addInbox = React.useCallback((name) => {
+    const cur = dataRef.current;
+    if (!cur) return null;
+    const id = 'ib_' + Date.now().toString(36);
+    persistInboxes(cur, [...(cur.inboxes || []), { id, name, woIds: [] }]);
+    return id;
+  }, []);
+  const renameInbox = React.useCallback((id, name) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, name } : b));
+  }, []);
+  const deleteInbox = React.useCallback((id) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).filter(b => b.id !== id));
+  }, []);
+  const addToInbox = React.useCallback((id, woId) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => {
+      if (b.id !== id) return b;
+      const have = new Set(b.woIds || []);
+      const incoming = (Array.isArray(woId) ? woId : [woId]).filter(w => !have.has(w));
+      return { ...b, woIds: [...(b.woIds || []), ...incoming] };
+    }));
+  }, []);
+  const removeFromInbox = React.useCallback((id, woId) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b =>
+      b.id === id ? { ...b, woIds: (b.woIds || []).filter(w => w !== woId) } : b));
+  }, []);
+  const reorderInbox = React.useCallback((id, woIds) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, woIds } : b));
+  }, []);
+
   const deleteOrdersHard = React.useCallback((ids) => {
     const cur = dataRef.current;
     if (!cur) return;
@@ -1207,7 +1253,8 @@ function useWorkOrders() {
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
 
-  return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData];
+  return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
+          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox];
 }
 
 /* ---------- modal + form primitives ---------- */
@@ -4127,10 +4174,12 @@ function App() {
   const [currentView, setCurrentView] = React.useState('active');
 
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
-         addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData] = useWorkOrders();
+         addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
+         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
   const presets = data?.presets || [];
+  const inboxes = data?.inboxes || [];
   const phases  = Array.isArray(data?.phases) ? data.phases : DEFAULT_PHASES;
   const statusColors = data?.statusColors || DEFAULT_STATUS_COLORS;
   const statuses = data?.statuses || DEFAULT_STATUSES;
