@@ -3990,33 +3990,35 @@ function BulkBar({ count, actions, onClear }) {
 
 function UpdateBanner({ state, onInstall }) {
   if (!state) return null;
-  const { status, version } = state;
-  if (status === 'available' || status === 'downloaded') {
-    return (
-      <div style={{
-        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
-        background: 'var(--accent)', color: 'var(--accent-fg)',
-        padding: '8px 20px',
-        display: 'flex', alignItems: 'center', gap: 12,
-        fontSize: 13, fontWeight: 500,
-      }}>
-        <span style={{ flex: 1 }}>
-          {status === 'downloaded'
-            ? 'Update ready' + (version ? ' v' + version : '') + '. Restart to install.'
-            : 'Update available' + (version ? ' v' + version : '') + '.'}
-        </span>
-        {status === 'downloaded' && onInstall && (
-          <button onClick={onInstall} style={{
-            height: 26, padding: '0 12px',
-            background: 'rgba(255,255,255,0.25)',
-            color: '#fff', border: '1px solid rgba(255,255,255,0.4)',
-            borderRadius: 6, fontFamily: 'inherit', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-          }}>Restart now</button>
-        )}
-      </div>
-    );
-  }
-  return null;
+  // Status vocabulary must match main.js update-status emissions:
+  // 'available' -> 'downloading' (with percent) -> 'ready'. Keep the banner up
+  // through the whole sequence so it does not flash and vanish mid-download.
+  const { status, version, percent } = state;
+  if (status !== 'available' && status !== 'downloading' && status !== 'ready') return null;
+  const isReady = status === 'ready';
+  let label;
+  if (isReady) label = 'Update ready' + (version ? ' v' + version : '') + '. Restart to install.';
+  else if (status === 'downloading') label = 'Downloading update' + (typeof percent === 'number' ? ' ' + percent + '%' : '') + '...';
+  else label = 'Update available' + (version ? ' v' + version : '') + '. Downloading...';
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+      background: 'var(--accent)', color: 'var(--accent-fg)',
+      padding: '8px 20px',
+      display: 'flex', alignItems: 'center', gap: 12,
+      fontSize: 13, fontWeight: 500,
+    }}>
+      <span style={{ flex: 1 }}>{label}</span>
+      {isReady && onInstall && (
+        <button onClick={onInstall} style={{
+          height: 26, padding: '0 12px',
+          background: 'rgba(255,255,255,0.25)',
+          color: '#fff', border: '1px solid rgba(255,255,255,0.4)',
+          borderRadius: 6, fontFamily: 'inherit', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+        }}>Restart now</button>
+      )}
+    </div>
+  );
 }
 
 function MigrationDialog({ onApply, onSkip, backupBeforeApply, setBackupBeforeApply }) {
@@ -4170,8 +4172,9 @@ function migrateOrders(orders) {
       }
     }
 
-    // 3) Strip priority field; carry everything else through.
-    const { priority: _drop, ...rest } = o;
+    // 3) Strip priority + dead workbook-sync fields (syncStatus, bidItems);
+    //    carry everything else through.
+    const { priority: _drop, syncStatus: _drop2, bidItems: _drop3, ...rest } = o;
     return { ...rest, noteCards: cards };
   });
 }
@@ -4208,11 +4211,13 @@ function computeInvoiceTotals(invoice, pm) {
     const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
     const unit = money(Number(li.unitPrice));
     const taxable = !!li.taxable;
-    const preTaxUnit = (taxable && isMSR) ? money(unit / TAX_RATE) : unit;
-    const lineSubtotal = money(preTaxUnit * qty);
-    if (taxable) taxableSubtotal += lineSubtotal;
-    else nonTaxableSubtotal += lineSubtotal;
-    return { ...li, qty, unitPrice: unit, preTaxUnit, lineSubtotal };
+    // Accumulate raw (unrounded) line values so the cent rounding happens once
+    // on the subtotals, not per line (avoids 1-cent drift on multi-line invoices).
+    const preTaxUnitRaw = (taxable && isMSR) ? (unit / TAX_RATE) : unit;
+    const lineRaw = preTaxUnitRaw * qty;
+    if (taxable) taxableSubtotal += lineRaw;
+    else nonTaxableSubtotal += lineRaw;
+    return { ...li, qty, unitPrice: unit, preTaxUnit: money(preTaxUnitRaw), lineSubtotal: money(lineRaw) };
   });
   taxableSubtotal = money(taxableSubtotal);
   nonTaxableSubtotal = money(nonTaxableSubtotal);
@@ -4445,9 +4450,15 @@ function ServiceLibrary({ toast }) {
 function blankLine() {
   return { name: '', desc: '', qty: 1, unitPrice: 0, category: 'labor', taxable: false, agreement: '' };
 }
-function InvoiceEditor({ order, library, onSave, onClose }) {
+const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
+function InvoiceEditor({ order, library, existingNumbers, onSave, onClose }) {
   const pm = (order && order.pm) || '';
   const isMSR = String(pm).toUpperCase() === 'MSR';
+  // Invoice numbers already used by OTHER work orders (duplicate guard).
+  const usedNumbers = React.useMemo(
+    () => new Set((existingNumbers || []).map(normInvoiceNum)),
+    [existingNumbers]
+  );
   const tabName = String(pm).toUpperCase() === 'AMH' ? 'AMH' : 'General';
   const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
   const catalogByName = React.useMemo(() => {
@@ -4489,8 +4500,11 @@ function InvoiceEditor({ order, library, onSave, onClose }) {
 
   const fmt = (n) => '$' + money(n).toFixed(2);
 
+  const isDup = !!String(number).trim() && usedNumbers.has(normInvoiceNum(number));
+
   const save = () => {
     if (!String(number).trim()) { onSave && onSave(null, 'Invoice # is required'); return; }
+    if (isDup) { onSave && onSave(null, `Invoice # ${String(number).trim()} is already used by another work order`); return; }
     const clean = lines
       .filter(l => String(l.name).trim() || Number(l.unitPrice))
       .map(l => ({
@@ -4544,9 +4558,10 @@ function InvoiceEditor({ order, library, onSave, onClose }) {
         <button onClick={onClose} style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
           border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
           fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Cancel</button>
-        <button onClick={save} style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+        <button onClick={save} disabled={isDup} style={{ height: 32, padding: '0 14px', borderRadius: 7,
+          cursor: isDup ? 'not-allowed' : 'pointer',
           border: 'none', background: 'var(--accent)', color: 'var(--accent-fg)',
-          fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Save invoice</button>
+          fontFamily: 'inherit', fontSize: 13, fontWeight: 600, opacity: isDup ? 0.5 : 1 }}>Save invoice</button>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 22px 22px' }}>
@@ -4554,7 +4569,9 @@ function InvoiceEditor({ order, library, onSave, onClose }) {
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-3)' }}>
             Invoice #
             <input value={number} onChange={(e) => setNumber(e.target.value)} placeholder="e.g. 1042"
-              style={{ ...inputStyle, height: 32, width: 180 }} />
+              style={{ ...inputStyle, height: 32, width: 180,
+                borderColor: isDup ? 'var(--flag-emergency)' : 'var(--border-1)' }} />
+            {isDup && <span style={{ color: 'var(--flag-emergency)', fontSize: 11 }}>Already used by another WO</span>}
           </label>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-3)' }}>
             Date
@@ -4595,12 +4612,12 @@ function InvoiceEditor({ order, library, onSave, onClose }) {
                 </td>
                 <td style={{ padding: '4px 6px' }}>
                   <input type="number" min="1" step="1" value={l.qty}
-                    onChange={(e) => setLine(i, { qty: e.target.value === '' ? '' : parseInt(e.target.value, 10) || 1 })}
+                    onChange={(e) => setLine(i, { qty: e.target.value })}
                     style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
                 </td>
                 <td style={{ padding: '4px 6px' }}>
                   <input type="number" step="0.01" value={l.unitPrice}
-                    onChange={(e) => setLine(i, { unitPrice: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0 })}
+                    onChange={(e) => setLine(i, { unitPrice: e.target.value })}
                     style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
                 </td>
                 <td style={{ padding: '4px 6px', textAlign: 'center' }}>
@@ -5189,6 +5206,11 @@ function App() {
 
   const saveInvoice = React.useCallback((id, invoice, errMsg) => {
     if (!invoice) { if (errMsg) toast(errMsg, 'err'); return; }
+    // Authoritative duplicate-number guard (editor also blocks, this is the backstop).
+    const wanted = String(invoice.number || '').trim().toLowerCase();
+    const dup = orders.some(o => o.id !== id && !o.deleted && o.invoice
+      && String(o.invoice.number || '').trim().toLowerCase() === wanted);
+    if (dup) { toast(`Invoice # ${invoice.number} is already used by another work order`, 'err'); return; }
     updateOrder(id, cur => ({
       ...cur,
       invoice,
@@ -5197,7 +5219,14 @@ function App() {
     }));
     setInvoiceEditorWO(null);
     toast('Invoice saved');
-  }, [updateOrder, toast]);
+  }, [orders, updateOrder, toast]);
+
+  // Clear a stuck editor target if its WO disappears (e.g. deleted elsewhere).
+  React.useEffect(() => {
+    if (invoiceEditorWO != null && !orders.some(o => o.id === invoiceEditorWO)) {
+      setInvoiceEditorWO(null);
+    }
+  }, [invoiceEditorWO, orders]);
 
   // Sidebar WO-view selection always returns to the Work Orders module.
   const selectView = React.useCallback((v) => {
@@ -5724,10 +5753,14 @@ function App() {
         {invoiceEditorWO != null && (() => {
           const wo = orders.find(o => o.id === invoiceEditorWO);
           if (!wo) return null;
+          const existingNumbers = orders
+            .filter(o => o.id !== invoiceEditorWO && !o.deleted && o.invoice && o.invoice.number)
+            .map(o => o.invoice.number);
           return (
             <InvoiceEditor
               order={wo}
               library={editorLibrary}
+              existingNumbers={existingNumbers}
               onSave={(invoice, errMsg) => saveInvoice(invoiceEditorWO, invoice, errMsg)}
               onClose={() => setInvoiceEditorWO(null)}
             />
