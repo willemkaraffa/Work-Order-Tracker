@@ -15,7 +15,8 @@ contextBridge.exposeInMainWorld('electronExport', {
 // Auto-updater bridge — renderer listens for update events
 contextBridge.exposeInMainWorld('updater', {
   onStatus: (cb) => ipcRenderer.on('update-status', (_e, data) => cb(data)),
-  install:  ()   => ipcRenderer.invoke('install-update')
+  install:  ()   => ipcRenderer.invoke('install-update'),
+  check:    ()   => ipcRenderer.invoke('check-for-updates'),
 });
 
 contextBridge.exposeInMainWorld('isElectron', true);

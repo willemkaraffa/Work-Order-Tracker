@@ -187,6 +187,8 @@ function densityFor(value) {
 }
 
 const MIGRATION_VERSION = '2.0';
+// Display-only app version (keep in sync with package.json on release).
+const APP_VERSION = '3.2.1';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.
@@ -2907,7 +2909,7 @@ const TT_SECTIONS = [
   { id: 'about',      label: 'About' },
 ];
 
-function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup }) {
+function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate }) {
   const [section, setSection] = React.useState('appearance');
   return (
     <section style={{
@@ -2956,7 +2958,7 @@ function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertTh
         {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
         {section === 'alerts'     && <AlertsSection thresholds={alertThresholds} setThresholds={setAlertThresholds} />}
         {section === 'tray'       && <TraySection trayEnabled={trayEnabled} setTrayEnabled={setTrayEnabled} trayBadgeSource={trayBadgeSource} setTrayBadgeSource={setTrayBadgeSource} />}
-        {section === 'about'      && <AboutSection onResetSettings={onResetSettings} onRestoreBackup={onRestoreBackup} />}
+        {section === 'about'      && <AboutSection onResetSettings={onResetSettings} onRestoreBackup={onRestoreBackup} updateState={updateState} onCheckUpdate={onCheckUpdate} onInstallUpdate={onInstallUpdate} />}
       </div>
     </section>
   );
@@ -3736,7 +3738,7 @@ function TraySection({ trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadg
   );
 }
 
-function AboutSection({ onResetSettings, onRestoreBackup }) {
+function AboutSection({ onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate }) {
   // null = probing, true = backup present, false = absent.
   // While probing the button stays enabled so a click works even on
   // the first 50ms after mount; the restore callback already toasts
@@ -3767,9 +3769,24 @@ function AboutSection({ onResetSettings, onRestoreBackup }) {
         <GambleMark size={48} />
         <div>
           <div style={{ fontSize: 18, fontWeight: 700 }}>Trade Tracker</div>
-          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>by Gamble &middot; v2.0.0</div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>by Gamble &middot; v{APP_VERSION}</div>
         </div>
       </div>
+
+      <div style={{ paddingTop: 16, borderTop: '1px solid var(--border-1)' }}>
+        <SettingRow label="Updates" hint={updateStatusText(updateState)}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {updateState && updateState.status === 'ready' && onInstallUpdate && (
+              <ActionBtn primary onClick={onInstallUpdate}>Restart now</ActionBtn>
+            )}
+            <ActionBtn
+              onClick={onCheckUpdate}
+              disabled={!!updateState && (updateState.status === 'checking' || updateState.status === 'downloading')}
+            >Check for updates</ActionBtn>
+          </div>
+        </SettingRow>
+      </div>
+
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--border-1)' }}>
         <SettingRow label="Reset all settings" hint="Restores theme, density, alerts, and tray to defaults. Does NOT touch your WOs.">
           <ActionBtn
@@ -3986,6 +4003,20 @@ function BulkBar({ count, actions, onClear }) {
       }}>Clear</button>
     </div>
   );
+}
+
+// Human-readable update status for the Settings > About row.
+function updateStatusText(state) {
+  if (!state || state.status === 'none') return 'You are up to date.';
+  const v = state.version ? ' v' + state.version : '';
+  switch (state.status) {
+    case 'checking':    return 'Checking for updates...';
+    case 'available':   return 'Update available' + v + '. Downloading...';
+    case 'downloading': return 'Downloading update' + (typeof state.percent === 'number' ? ' ' + state.percent + '%' : '') + '...';
+    case 'ready':       return 'Update ready' + v + '. Restart to install.';
+    case 'error':       return 'Update check failed' + (state.error ? ': ' + state.error : '') + '.';
+    default:            return '';
+  }
 }
 
 function UpdateBanner({ state, onInstall }) {
@@ -4966,9 +4997,25 @@ function App() {
       });
     }
     if (window.updater && window.updater.onStatus) {
-      window.updater.onStatus((d) => setUpdateState(d));
+      // Sticky: once a real update is in flight (available/downloading/ready),
+      // ignore a later transient 'none'/'error' so the banner can't flash away
+      // mid-update. A fresh 'checking' or real status still overrides.
+      window.updater.onStatus((d) => setUpdateState(prev => {
+        const inFlight = prev && (prev.status === 'available' || prev.status === 'downloading' || prev.status === 'ready');
+        if (inFlight && d && (d.status === 'none' || d.status === 'error')) return prev;
+        return d;
+      }));
     }
   }, []);
+
+  const checkForUpdates = React.useCallback(async () => {
+    if (!window.updater || !window.updater.check) { toast('Updater unavailable', 'err'); return; }
+    toast('Checking for updates...');
+    try {
+      const r = await window.updater.check();
+      if (r && r.ok === false) toast('Update check failed: ' + (r.error || 'unknown'), 'err');
+    } catch (e) { toast('Update check failed', 'err'); }
+  }, [toast]);
 
   // Partitions
   // Phase 13: pre-13 WOs with tab='invoiced' remain in Invoiced. Migrate
@@ -5610,6 +5657,9 @@ function App() {
       setTrayBadgeSource={setTrayBadgeSource}
       onResetSettings={resetSettings}
       onRestoreBackup={restorePreMigrationBackup}
+      updateState={updateState}
+      onCheckUpdate={checkForUpdates}
+      onInstallUpdate={() => window.updater && window.updater.install && window.updater.install()}
     />;
   } else {
     rightPane = <DetailPane

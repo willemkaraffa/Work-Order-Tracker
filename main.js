@@ -149,11 +149,22 @@ function setupAutoUpdater(win) {
   autoUpdater.logger = require('electron-log');
   autoUpdater.logger.transports.file.level = 'info';
 
+  autoUpdater.on('checking-for-update',   ()  => win.webContents.send('update-status', { status: 'checking' }));
   autoUpdater.on('update-available',   (info) => win.webContents.send('update-status', { status: 'available',    version: info.version }));
   autoUpdater.on('update-not-available',  ()  => win.webContents.send('update-status', { status: 'none' }));
   autoUpdater.on('download-progress', (prog)  => win.webContents.send('update-status', { status: 'downloading', percent: Math.floor(prog.percent) }));
   autoUpdater.on('update-downloaded',  (info) => win.webContents.send('update-status', { status: 'ready',       version: info.version }));
-  autoUpdater.on('error',               (err) => { console.log('Updater error:', err.message); win.webContents.send('update-status', { status: 'none' }); });
+  autoUpdater.on('error',               (err) => { console.log('Updater error:', err.message); win.webContents.send('update-status', { status: 'error', error: err.message }); });
+
+  // Manual "Check for updates" trigger from the renderer (Settings button).
+  // Works regardless of app.isPackaged; in dev it surfaces an error via events.
+  ipcMain.handle('check-for-updates', async () => {
+    try { await autoUpdater.checkForUpdates(); return { ok: true }; }
+    catch (e) {
+      win.webContents.send('update-status', { status: 'error', error: e.message });
+      return { ok: false, error: e.message };
+    }
+  });
 
   setTimeout(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 3000);
   setInterval(() => { if (app.isPackaged) autoUpdater.checkForUpdates(); }, 4 * 60 * 60 * 1000);
