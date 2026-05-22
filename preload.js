@@ -26,13 +26,6 @@ contextBridge.exposeInMainWorld('extensionBridge', {
   acknowledge: () => ipcRenderer.invoke('import-acknowledged')
 });
 
-// Workbook sync bridge
-contextBridge.exposeInMainWorld('workbook', {
-  sync:      (overridePath) => ipcRenderer.invoke('sync-workbook',    overridePath || ''),
-  choose:    (currentPath)  => ipcRenderer.invoke('choose-workbook',  currentPath  || ''),
-  preflight: (overridePath) => ipcRenderer.invoke('preflight-check',  overridePath || ''),
-});
-
 // Service-item library bridge — xlsx seed / import / export (persistence stays
 // in window.storage under key 'service_library').
 contextBridge.exposeInMainWorld('library', {

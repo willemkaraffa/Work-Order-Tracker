@@ -2,7 +2,6 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, globalShor
 const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
-const { spawn }      = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const { scrapeWO }   = require('./scraper');
 const libraryIO      = require('./library_io');
@@ -362,7 +361,11 @@ ipcMain.handle('tray-set-state', (_e, state) => {
   return true;
 });
 
-// ── IPC: Workbook Sync ────────────────────────────────────────────────────────
+// ── Workbook path resolver ────────────────────────────────────────────────────
+// The RazorSync sync/preflight pipeline was retired (invoices are now recorded
+// in-app). This resolver survives only as the default location for the one-time
+// "Seed General" import in library-seed-general (the workbook's "Service Items"
+// sheet seeds the service library).
 function resolveWorkbookPath(overridePath) {
   // Priority: explicit setting -> auto-detect chain.
   if (overridePath && overridePath.trim() && fs.existsSync(overridePath.trim())) {
@@ -377,108 +380,6 @@ function resolveWorkbookPath(overridePath) {
   ];
   return candidates.find(p => fs.existsSync(p)) || (overridePath || candidates[0]);
 }
-
-ipcMain.handle('sync-workbook', (_e, overridePath) => new Promise((resolve) => {
-  const scriptPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'sync_to_lookup.py')
-    : path.join(__dirname, 'sync_to_lookup.py');
-
-  const wbPath = resolveWorkbookPath(overridePath);
-
-  if (!fs.existsSync(scriptPath)) {
-    return resolve({ ok: false, out: '', err: `sync_to_lookup.py not found at ${scriptPath}` });
-  }
-  if (!fs.existsSync(wbPath)) {
-    return resolve({ ok: false, out: '', err: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings -> RazorSync Invoice Tracker Workbook.` });
-  }
-
-  // Decrypt stored AMH credentials and pass to Python via environment variables
-  let spawnEnv = process.env;
-  try {
-    const store = readStore();
-    const enc = store[CRED_PREFIX + 'AMH'];
-    if (enc && safeStorage.isEncryptionAvailable()) {
-      const creds = JSON.parse(safeStorage.decryptString(Buffer.from(enc, 'base64')));
-      if (creds && creds.username) {
-        spawnEnv = { ...process.env, AMH_EMAIL: creds.username, AMH_PASSWORD: creds.password || '' };
-      }
-    }
-  } catch (e) { /* no creds stored or decrypt failed — Python falls back to defaults */ }
-
-  // Try 'python' first; fall back to 'python3' (common on Windows where the
-  // Store stub redirects or the user installed via python.org with 'python3').
-  let out = '', err = '';
-  function trySpawn(cmd) {
-    const py = spawn(cmd, [scriptPath, wbPath], { windowsHide: true, env: spawnEnv });
-    py.stdout.on('data', d => { out += d.toString(); });
-    py.stderr.on('data', d => { err += d.toString(); });
-    py.on('close', code => resolve({ ok: code === 0, out, err }));
-    py.on('error', e => {
-      if (cmd === 'python' && e.code === 'ENOENT') {
-        // 'python' not found — retry with 'python3'
-        out = ''; err = '';
-        trySpawn('python3');
-      } else {
-        const hint = e.code === 'ENOENT'
-          ? 'Python not found. Install Python 3 and ensure "python" or "python3" is on your PATH.'
-          : e.message;
-        resolve({ ok: false, out, err: hint });
-      }
-    });
-  }
-  trySpawn('python');
-}));
-
-ipcMain.handle('preflight-check', (_e, overridePath) => new Promise((resolve) => {
-  // Mirrors sync-workbook resolution but runs preflight_qa.py --json instead.
-  const scriptPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'preflight_qa.py')
-    : path.join(__dirname, 'preflight_qa.py');
-
-  const wbPath = resolveWorkbookPath(overridePath);
-
-  if (!fs.existsSync(scriptPath)) {
-    return resolve({ ok: false, error: `preflight_qa.py not found at ${scriptPath}` });
-  }
-  if (!fs.existsSync(wbPath)) {
-    return resolve({ ok: false, error: `Workbook not found at:\n  ${wbPath}\n\nSet the path in Settings.` });
-  }
-
-  let out = '', err = '';
-  function trySpawn(cmd) {
-    const py = spawn(cmd, [scriptPath, '--json', wbPath], { windowsHide: true });
-    py.stdout.on('data', d => { out += d.toString(); });
-    py.stderr.on('data', d => { err += d.toString(); });
-    py.on('close', code => {
-      if (code !== 0) return resolve({ ok: false, error: err.slice(-500) || `Python exited ${code}` });
-      try {
-        const parsed = JSON.parse(out.trim().split('\n').pop());
-        resolve(parsed);
-      } catch (e) {
-        resolve({ ok: false, error: 'Could not parse preflight output: ' + out.slice(0, 200) });
-      }
-    });
-    py.on('error', e => {
-      if (cmd === 'python' && e.code === 'ENOENT') { out = ''; err = ''; trySpawn('python3'); }
-      else resolve({ ok: false, error: e.code === 'ENOENT' ? 'Python not found on PATH.' : e.message });
-    });
-  }
-  trySpawn('python');
-}));
-
-ipcMain.handle('choose-workbook', async (_e, currentPath) => {
-  const defaultDir = currentPath && fs.existsSync(path.dirname(currentPath))
-    ? path.dirname(currentPath)
-    : path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'WORK ORDERS');
-  const result = await dialog.showOpenDialog({
-    title: 'Select RazorSync Invoice Tracker Workbook',
-    defaultPath: defaultDir,
-    filters: [{ name: 'Excel Workbook', extensions: ['xlsx', 'xlsm'] }],
-    properties: ['openFile']
-  });
-  if (result.canceled || !result.filePaths || !result.filePaths.length) return { path: '' };
-  return { path: result.filePaths[0] };
-});
 
 ipcMain.handle('import-acknowledged', () => ({ ok: true }));
 ipcMain.handle('export-csv', async (_e, csv) => {

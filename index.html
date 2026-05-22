@@ -173,9 +173,6 @@ const DEFAULT_PHASES = [
   { id: 'billing',  name: 'Billing',     fg: 'var(--p-billing)',  bg: 'var(--p-billing-bg)',  statuses: [] /* tab-derived (Sent/Invoiced) */ },
 ];
 
-// Real workbook location used by sync_to_lookup.py. Configurable via Settings → Workbook.
-const WORKBOOK_PATH_DEFAULT = 'C:\\Users\\pvega\\OneDrive\\Desktop\\WORK ORDERS\\RazorSync_Invoice_Tracker.xlsx';
-
 // Density scale tokens. Read in App via `settings.density`, applied to
 // list-row padding and primary line font-size. Values picked so compact
 // fits ~25% more rows on screen and generous gives ~15% breathing room
@@ -187,33 +184,6 @@ const DENSITY_MAP = {
 };
 function densityFor(value) {
   return DENSITY_MAP[value] || DENSITY_MAP.balanced;
-}
-
-// Sync-interval token -> milliseconds. 'manual' returns 0 (no timer).
-const SYNC_INTERVAL_MS = {
-  '30s': 30 * 1000,
-  '2m':  2  * 60 * 1000,
-  '10m': 10 * 60 * 1000,
-  'manual': 0,
-};
-function syncIntervalMs(value) {
-  return SYNC_INTERVAL_MS[value] || 0;
-}
-
-// Turn raw Python stderr/err text from a failed workbook sync into a short,
-// user-readable message. Skips openpyxl warnings (which appear on the first
-// stderr line) and recognizes the common "file open in Excel" lock case.
-function workbookSyncErrorMessage(raw) {
-  const text = String(raw || '');
-  // Windows file lock during the atomic save: workbook is open in Excel.
-  if (/Access is denied/i.test(text) || /Failed to save workbook/i.test(text)) {
-    return 'Workbook is open in Excel. Close it and sync again.';
-  }
-  // Otherwise surface the last meaningful line, ignoring warnings/blank lines.
-  const lines = text.split('\n')
-    .map(l => l.trim())
-    .filter(l => l && !/UserWarning|warn\(msg\)|warnings\.warn/i.test(l));
-  return lines.length ? lines[lines.length - 1] : 'Unknown error';
 }
 
 const MIGRATION_VERSION = '2.0';
@@ -351,27 +321,6 @@ function ActionBtn({ children, primary, onClick, type = 'button', disabled, styl
       cursor: disabled ? 'not-allowed' : 'pointer',
       ...extraStyle,
     }}>{children}</button>
-  );
-}
-
-function SyncPill({ status }) {
-  if (status !== 'synced' && status !== 'failed' && status !== 'pending') return null;
-  const cfg = status === 'synced'
-    ? { c: '#10b981', label: 'synced' }
-    : status === 'failed'
-    ? { c: '#ef4444', label: 'failed sync' }
-    : { c: '#a8a8a8', label: 'syncing…' };
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center',
-      height: 20, padding: '0 8px',
-      border: `1px solid ${hexToRgba(cfg.c, 0.45)}`,
-      background: hexToRgba(cfg.c, 0.18),
-      color: cfg.c,
-      borderRadius: 999,
-      fontSize: 11, fontWeight: 600,
-      letterSpacing: '0.02em',
-    }}>{cfg.label}</span>
   );
 }
 
@@ -676,7 +625,6 @@ function toDisplayRow(o) {
     age: ageDays == null ? null : ageDays + 'd',
     ageLevel: ageLevelForDays(ageDays),
     status: o.status || 'Open',
-    syncStatus: o.syncStatus || null,
     tab: o.tab || 'active',
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
     lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
@@ -859,7 +807,6 @@ function toDetailData(o) {
       .slice().reverse()
       .map(h => fmtHistTime(h.ts) + ' — ' + (h.action || '') + (h.detail ? ': ' + h.detail : '')),
     nextAction,
-    syncStatus: o.syncStatus || null,
     tab: o.tab || 'active',
     raw: o,
   };
@@ -926,7 +873,7 @@ function useWorkOrders() {
         pms:   DEFAULT_PMS.slice(),
         types: DEFAULT_TYPES.slice(),
         techs: DEFAULT_TECHS.slice(),
-        settings: { workbookPath: WORKBOOK_PATH_DEFAULT },
+        settings: {},
       });
       if (!window.storage || !window.storage.get) {
         const empty = fresh();
@@ -951,7 +898,6 @@ function useWorkOrders() {
         if (!parsed.statusColors || typeof parsed.statusColors !== 'object') parsed.statusColors = {};
         parsed.statusColors = { ...DEFAULT_STATUS_COLORS, ...parsed.statusColors };
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
-        if (!parsed.settings.workbookPath) parsed.settings.workbookPath = WORKBOOK_PATH_DEFAULT;
         if (!parsed.settings.viewSorts || typeof parsed.settings.viewSorts !== 'object') parsed.settings.viewSorts = {};
         if (!Array.isArray(parsed.pms)   || !parsed.pms.length)   parsed.pms   = DEFAULT_PMS.slice();
         if (!Array.isArray(parsed.types) || !parsed.types.length) parsed.types = DEFAULT_TYPES.slice();
@@ -985,7 +931,7 @@ function useWorkOrders() {
     }
   }, []);
 
-  // Patch top-level settings object (e.g. workbookPath, density, theme).
+  // Patch top-level settings object (e.g. density, theme).
   const updateSettings = React.useCallback((patch) => {
     const cur = dataRef.current;
     if (!cur) return;
@@ -1533,7 +1479,7 @@ function MenuCaption({ children }) {
 }
 
 /* ---------- sidebar ---------- */
-function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, counts, presets, inboxes, onAddWO, onRenamePreset, onDeletePreset, onAddInbox, onRenameInbox, onDeleteInbox, onToolSync, onToolExport, onToolPreflight }) {
+function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, counts, presets, inboxes, onAddWO, onRenamePreset, onDeletePreset, onAddInbox, onRenameInbox, onDeleteInbox, onToolExport }) {
   const [toolsOpen, setToolsOpen] = React.useState(false);
   const views = [
     { id: 'attention',  label: 'Needs attention', count: counts.attention, icon: '✦', iconColor: 'var(--flag-emergency)' },
@@ -1587,8 +1533,6 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, cou
       {toolsOpen && (
         <div style={{ marginLeft: 14, display: 'flex', flexDirection: 'column', gap: 1 }}>
           {/* onToolImport: push-driven via extensionBridge; no manual fire path. */}
-          {onToolPreflight && <SBRow label="Preflight"      onClick={onToolPreflight} />}
-          {onToolSync      && <SBRow label="Sync workbook"  onClick={onToolSync} />}
           {onToolExport    && <SBRow label="Export CSV"     onClick={onToolExport} />}
           {onAddInbox      && <SBRow label="New inbox..."   onClick={onAddInbox} />}
         </div>
@@ -2277,8 +2221,6 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
     row.ageLevel === 1 ? 'var(--age-1)' :
     row.ageLevel === 2 ? 'var(--age-2)' :
     row.ageLevel === 3 ? 'var(--age-3)' : 'transparent';
-  const useSyncPill = view === 'sent' || view === 'invoiced';
-  const showSyncPill = useSyncPill && row.syncStatus;
   const d = densityFor(density);
   return (
     <div
@@ -2321,16 +2263,16 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             </div>
           )}
         </div>
-        {/* Meta row: status · PM · type · tech · [sync] | WO# right-aligned */}
+        {/* Meta row: status · PM · type · tech | WO# right-aligned.
+            Status pill hidden in billing tabs (sent/invoiced). */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {!useSyncPill && <>
+          {view !== 'sent' && view !== 'invoiced' && <>
             <StatusPill status={row.status} size="sm" />
             <Dot />
           </>}
           <PMChip pm={row.pm} />
           <TypeIcon kind={row.type} />
           {row.tech && <span>{row.tech}</span>}
-          {showSyncPill && <SyncPill status={row.syncStatus} />}
           <span style={{ marginLeft: 'auto', flexShrink: 0, fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
         </div>
       </div>
@@ -2461,7 +2403,7 @@ function openMaps(addr) {
   else window.open(url, '_blank');
 }
 
-function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onEditInvoice, onAction, statuses }) {
+function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onEditInvoice, onAction, statuses }) {
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
   const statusRef = React.useRef(null);
 
@@ -2508,11 +2450,6 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
           <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>{data.wo}</div>
           {data.flags?.map(f => <FlagGlyph key={f} kind={f} />)}
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            {data.tab === 'invoiced' && (data.syncStatus === 'failed' || data.syncStatus === 'pending') && onSyncWO && (
-              <ActionBtn onClick={() => onSyncWO(data.wo)}>
-                {data.syncStatus === 'pending' ? 'Syncing…' : 'Sync workbook'}
-              </ActionBtn>
-            )}
             <ActionBtn onClick={() => onEdit && onEdit(data.wo)}>Edit</ActionBtn>
             {onEditInvoice && <ActionBtn onClick={() => onEditInvoice(data.wo)}>Invoice</ActionBtn>}
             {data.nextAction && <ActionBtn primary onClick={handlePrimary}>{data.nextAction} {'→'}</ActionBtn>}
@@ -2526,11 +2463,7 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
           {data.city && <>{' '}<span style={{ color: 'var(--text-2)', fontWeight: 400 }}>· {data.city}</span></>}
         </div>
         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
-          {data.tab === 'invoiced'
-            ? (data.syncStatus
-                ? <SyncPill status={data.syncStatus} />
-                : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>not yet synced</span>)
-            : data.tab === 'active' ? (
+          {data.tab === 'active' ? (
               <div
                 ref={statusRef}
                 style={{ position: 'relative', display: 'inline-block', cursor: 'pointer' }}
@@ -2556,7 +2489,7 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
                   </div>
                 )}
               </div>
-            ) : (
+            ) : (data.tab === 'sent' || data.tab === 'invoiced') ? null : (
               <StatusPill status={data.status} />
             )}
           {data.tab !== 'paid' && data.ageDays != null && (
@@ -2970,12 +2903,11 @@ const TT_SECTIONS = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'workflow',   label: 'Workflow' },
   { id: 'alerts',     label: 'Alerts' },
-  { id: 'workbook',   label: 'Workbook' },
   { id: 'tray',       label: 'Tray' },
   { id: 'about',      label: 'About' },
 ];
 
-function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, onGlobalSync, workbookPath, onPickWorkbook, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, syncInterval, setSyncInterval, onResetSettings, onRestoreBackup }) {
+function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup }) {
   const [section, setSection] = React.useState('appearance');
   return (
     <section style={{
@@ -3023,7 +2955,6 @@ function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertTh
         {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} />}
         {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
         {section === 'alerts'     && <AlertsSection thresholds={alertThresholds} setThresholds={setAlertThresholds} />}
-        {section === 'workbook'   && <WorkbookSection onGlobalSync={onGlobalSync} workbookPath={workbookPath} onPickWorkbook={onPickWorkbook} syncInterval={syncInterval} setSyncInterval={setSyncInterval} />}
         {section === 'tray'       && <TraySection trayEnabled={trayEnabled} setTrayEnabled={setTrayEnabled} trayBadgeSource={trayBadgeSource} setTrayBadgeSource={setTrayBadgeSource} />}
         {section === 'about'      && <AboutSection onResetSettings={onResetSettings} onRestoreBackup={onRestoreBackup} />}
       </div>
@@ -3784,36 +3715,6 @@ function AlertsSection({ thresholds, setThresholds }) {
   );
 }
 
-function WorkbookSection({ onGlobalSync, workbookPath, onPickWorkbook, syncInterval, setSyncInterval }) {
-  return (
-    <div>
-      <SettingTitle sub="Where work orders are persisted. Sync settings.">Workbook</SettingTitle>
-      <SettingRow label="Workbook path" hint="Used by sync_to_lookup.py and the in-app sync button.">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <code style={{
-            flex: 1, minWidth: 0, display: 'block',
-            fontSize: 12, color: 'var(--text-2)',
-            background: 'var(--bg-surface-2)', padding: '4px 8px', borderRadius: 4,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }} title={workbookPath || ''}>{workbookPath || '(not set)'}</code>
-          <ActionBtn onClick={onPickWorkbook} style={{ flexShrink: 0 }}>Browse...</ActionBtn>
-        </div>
-      </SettingRow>
-      <SettingRow label="Sync interval" hint="How often the local cache reconciles with the workbook.">
-        <Seg value={syncInterval} onChange={setSyncInterval} options={[
-          { value: '30s', label: '30 s' },
-          { value: '2m',  label: '2 min' },
-          { value: '10m', label: '10 min' },
-          { value: 'manual', label: 'Manual' },
-        ]} />
-      </SettingRow>
-      <SettingRow label="Sync now" hint="Re-sync every Sent-to-Invoice and Invoiced WO; overwrites duplicates in the workbook.">
-        <ActionBtn primary onClick={onGlobalSync}>Sync workbook</ActionBtn>
-      </SettingRow>
-    </div>
-  );
-}
-
 function TraySection({ trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource }) {
   return (
     <div>
@@ -3870,7 +3771,7 @@ function AboutSection({ onResetSettings, onRestoreBackup }) {
         </div>
       </div>
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--border-1)' }}>
-        <SettingRow label="Reset all settings" hint="Restores theme, density, alerts, sync interval, tray, and workbook path to defaults. Does NOT touch your WOs.">
+        <SettingRow label="Reset all settings" hint="Restores theme, density, alerts, and tray to defaults. Does NOT touch your WOs.">
           <ActionBtn
             onClick={onResetSettings}
             style={{ background: 'var(--flag-emergency)', color: 'var(--accent-fg)', border: 'none' }}
@@ -4273,64 +4174,6 @@ function migrateOrders(orders) {
     const { priority: _drop, ...rest } = o;
     return { ...rest, noteCards: cards };
   });
-}
-
-/* ---------- Preflight modal ---------- */
-function PreflightModal({ state, onClose, onRerun }) {
-  const r = state || {};
-  let body;
-  if (r.loading) {
-    body = <p style={{ color: 'var(--text-2)', fontSize: 13 }}>Running preflight against the Invoiced tab...</p>;
-  } else if (r.error) {
-    body = <p style={{ color: 'var(--flag-emergency)', fontSize: 13, whiteSpace: 'pre-wrap' }}>{String(r.error)}</p>;
-  } else if (r.data) {
-    const d = r.data;
-    const sections = [
-      { title: 'Suspicious WO ids (>8 digits)',         rows: d.suspiciousId || [],
-        fmt: (x) => x.wo + ' -- ' + (x.address || '') },
-      { title: 'Missing customer / address',            rows: d.missingMeta  || [],
-        fmt: (x) => (x.wo || '(no id)') + ' pm=' + (x.pm || '?') + " addr='" + (x.address || '') + "'" },
-      { title: 'No line items resolved',                rows: d.noItems      || [],
-        fmt: (x) => x.wo + ' ' + (x.pm || '?') + ' -- ' + (x.address || '') + ' (' + x.source + ')' },
-      { title: 'MSR address with no folder match',      rows: d.msrNoFolder  || [],
-        fmt: (x) => x.wo + ' -- ' + (x.address || '') },
-      { title: 'Mapping fell back to Labor!/Materials!',rows: d.fallback     || [],
-        fmt: (x) => x.wo + ' -- ' + (x.address || '') + ' :: ' + (x.items || []).map(it => it.name + ' -> ' + it.mapped).join(', ') },
-      { title: '$0 unit price',                         rows: d.zeroPrice    || [],
-        fmt: (x) => x.wo + ' -- ' + (x.address || '') + ' :: ' + (x.items || []).map(it => it.name + ' -> ' + (it.mapped || '(unmapped)')).join(', ') },
-    ];
-    const total = sections.reduce((n, s) => n + s.rows.length, 0);
-    body = (
-      <div>
-        <p style={{ color: 'var(--text-2)', fontSize: 12, margin: '0 0 10px 0' }}>
-          {total} issue(s) across {d.totalOrders || 0} Invoiced WO(s).
-        </p>
-        {sections.map(s => (
-          <div key={s.title} style={{ marginTop: 10 }}>
-            <strong style={{ fontSize: 13, color: s.rows.length ? 'var(--flag-warranty)' : 'var(--text-2)' }}>
-              {s.title} ({s.rows.length})
-            </strong>
-            {s.rows.length > 0 && (
-              <ul style={{ margin: '6px 0 12px 18px', padding: 0, fontSize: 12, color: 'var(--text-1)' }}>
-                {s.rows.map((x, i) => <li key={x.wo || ('idx-' + i)}>{s.fmt(x)}</li>)}
-              </ul>
-            )}
-          </div>
-        ))}
-      </div>
-    );
-  } else {
-    body = null;
-  }
-  return (
-    <Modal open={!!state} onClose={onClose} title="Preflight check" width={720}>
-      <div style={{ overflowY: 'auto', maxHeight: '60vh' }}>{body}</div>
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
-        <ActionBtn onClick={onRerun}>Re-run</ActionBtn>
-        <ActionBtn primary onClick={onClose}>Close</ActionBtn>
-      </div>
-    </Modal>
-  );
 }
 
 // ── Service-item Library module ──────────────────────────────────────────────
@@ -4927,7 +4770,6 @@ function App() {
   const statusColors = data?.statusColors || DEFAULT_STATUS_COLORS;
   const statuses = data?.statuses || DEFAULT_STATUSES;
   const settings = data?.settings || {};
-  const workbookPath = settings.workbookPath || WORKBOOK_PATH_DEFAULT;
   const theme = (settings && settings.theme) || 'dark';
   const setTheme = React.useCallback((t) => updateSettings({ theme: t }), [updateSettings]);
   const density = (settings && settings.density) || 'balanced';
@@ -4947,8 +4789,6 @@ function App() {
   const setTrayEnabled = React.useCallback((v) => updateSettings({ trayEnabled: v !== 'off' }), [updateSettings]);
   const trayBadgeSource = settings.trayBadgeSource || 'attention';
   const setTrayBadgeSource = React.useCallback((v) => updateSettings({ trayBadgeSource: v }), [updateSettings]);
-  const syncInterval = settings.syncInterval || '2m';
-  const setSyncInterval = React.useCallback((v) => updateSettings({ syncInterval: v }), [updateSettings]);
   const resetSettings = React.useCallback(() => {
     const ok = window.confirm(
       'Reset all settings to defaults? Your work orders will NOT be affected. Continue?'
@@ -4960,8 +4800,6 @@ function App() {
       theme: 'dark',
       density: 'balanced',
       alertThresholds: DEFAULT_ALERT_THRESHOLDS,
-      workbookPath: WORKBOOK_PATH_DEFAULT,
-      syncInterval: '2m',
       trayEnabled: true,
       trayBadgeSource: 'attention',
       viewSorts: {},
@@ -4998,25 +4836,6 @@ function App() {
       toast('Restore failed', 'err');
     }
   }, [toast]);
-  const [preflightState, setPreflightState] = React.useState(null);
-  // shape: null | { loading: true } | { error: string } | { data: {...} }
-  const runPreflight = React.useCallback(async () => {
-    if (!window.workbook || !window.workbook.preflight) {
-      toast('Preflight unavailable in this build', 'err');
-      return;
-    }
-    setPreflightState({ loading: true });
-    try {
-      const r = await window.workbook.preflight(settings.workbookPath || '');
-      if (!r || !r.ok) {
-        setPreflightState({ error: (r && r.error) || 'Unknown error' });
-        return;
-      }
-      setPreflightState({ data: r.data });
-    } catch (e) {
-      setPreflightState({ error: String(e && e.message || e) });
-    }
-  }, [settings.workbookPath, toast]);
   const needsMigration = !loading && settings && settings.migrationApplied !== MIGRATION_VERSION;
   const [backupBeforeApply, setBackupBeforeApply] = React.useState(true);
   // NOTE: backup is automatic via main.js rotateBackups() on every writeStore.
@@ -5161,20 +4980,6 @@ function App() {
       recents,
     });
   }, [trayEnabled, trayBadgeSource, recentWOs, orders, alerts]);
-
-  // Phase 13: periodic workbook sync. Runs only when syncInterval !=
-  // 'manual' AND a workbookPath is set AND the bridge is present.
-  // Re-arms whenever syncInterval or workbookPath changes.
-  React.useEffect(() => {
-    const ms = syncIntervalMs(syncInterval);
-    if (!ms) return;
-    if (!workbookPath) return;
-    if (!window.workbook || !window.workbook.sync) return;
-    const handle = setInterval(() => {
-      globalSyncWorkbook({ silent: true });
-    }, ms);
-    return () => clearInterval(handle);
-  }, [syncInterval, workbookPath, globalSyncWorkbook]);
 
   // React to tray click actions (add, open, select WO).
   React.useEffect(() => {
@@ -5334,61 +5139,6 @@ function App() {
   );
   const detailData = toDetailData(selectedRecord);
 
-  // Scrape (AMH only) → workbook sync. Returns true on success.
-  // Per-WO syncStatus is updated as it progresses ('pending' → 'synced' | 'failed').
-  const syncWOToWorkbook = React.useCallback(async (o) => {
-    if (!o) return false;
-    const id = o.id;
-    updateOrder(id, cur => ({ ...cur, syncStatus: 'pending' }));
-
-    // Scrape step (AMH-only). If it fails, skip sync entirely.
-    if ((o.pm || '').toUpperCase() === 'AMH') {
-      if (!window.scraper || !window.scraper.scrapeWO) {
-        updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-        toast('Scraper unavailable; workbook sync skipped', 'err');
-        return false;
-      }
-      let result;
-      try {
-        result = await window.scraper.scrapeWO({ id: o.id, pm: o.pm, address: o.address });
-      } catch (e) {
-        updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-        toast(`Scrape failed for ${id}; workbook sync skipped`, 'err');
-        return false;
-      }
-      if (!result || !result.ok) {
-        updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-        toast(`Scrape failed for ${id}; workbook sync skipped`, 'err');
-        return false;
-      }
-      if (Array.isArray(result.items) && result.items.length) {
-        updateOrder(id, cur => ({ ...cur, bidItems: result.items }));
-      }
-    }
-
-    // Workbook sync
-    if (!window.workbook || !window.workbook.sync) {
-      updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-      toast('Workbook sync unavailable', 'err');
-      return false;
-    }
-    let errMsg = 'Unknown error';
-    try {
-      const r = await window.workbook.sync(workbookPath || '');
-      if (r && r.ok) {
-        updateOrder(id, cur => ({ ...cur, syncStatus: 'synced' }));
-        toast('Workbook synced');
-        return true;
-      }
-      errMsg = workbookSyncErrorMessage(r && (r.err || r.error));
-    } catch (e) {
-      errMsg = workbookSyncErrorMessage(e && e.message);
-    }
-    updateOrder(id, cur => ({ ...cur, syncStatus: 'failed' }));
-    toast('Workbook sync failed: ' + errMsg, 'err');
-    return false;
-  }, [updateOrder, toast, workbookPath]);
-
   const sendToInvoice = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
     if (!o) return;
@@ -5422,11 +5172,6 @@ function App() {
                 { ts: Date.now(), action: 'marked Paid', detail: '' }],
     }));
   }, [updateOrder]);
-
-  const retrySyncWO = React.useCallback(async (id) => {
-    const o = orders.find(x => x.id === id);
-    if (o) await syncWOToWorkbook(o);
-  }, [orders, syncWOToWorkbook]);
 
   // Invoice editor (slice 3). Reads the service library fresh from storage so
   // edits made in the Service Items module are reflected in the line-item
@@ -5464,31 +5209,6 @@ function App() {
     setCurrentModule(m);
     setLauncherOpen(false);
   }, []);
-
-  // Global "Sync workbook" — bulk re-sync. On success, marks every tab='invoiced'
-  // WO as 'synced' (overwriting prior 'failed'/unmarked state, including legacy WOs).
-  // Pass { silent: true } from the auto-timer to suppress routine toasts.
-  const globalSyncWorkbook = React.useCallback(async (opts) => {
-    const silent = !!(opts && opts.silent);
-    if (!window.workbook || !window.workbook.sync) {
-      if (!silent) toast('Workbook sync unavailable', 'err');
-      return;
-    }
-    if (!silent) toast('Syncing workbook…');
-    try {
-      const r = await window.workbook.sync(workbookPath || '');
-      if (r && r.ok) {
-        batchUpdate(o => !o.deleted && (o.tab === 'invoiced' || o.tab === 'sent'), cur => ({ ...cur, syncStatus: 'synced' }));
-        if (!silent) toast('Workbook synced');
-      } else {
-        const msg = workbookSyncErrorMessage(r && (r.err || r.error));
-        // Failures toast even in silent mode -- user needs to know.
-        toast('Workbook sync failed: ' + msg, 'err');
-      }
-    } catch (e) {
-      toast('Workbook sync failed', 'err');
-    }
-  }, [batchUpdate, toast, workbookPath]);
 
   // v2.6.0 parity: export the full visible row set with all tracker columns,
   // not just the 9 display fields. viewData.groups carries the filtered/sorted
@@ -5542,13 +5262,12 @@ function App() {
     if (!targets.length) { toast('No sent WOs selected', 'err'); return; }
     batchUpdate(
       o => selectedIds.has(o.id) && o.tab === 'sent',
-      cur => ({ ...cur, tab: 'invoiced', syncStatus: 'pending',
+      cur => ({ ...cur, tab: 'invoiced',
                 history: [...(cur.history || []), { ts, action: 'marked invoiced (bulk)', detail: '' }] })
     );
     toast(targets.length + ' marked invoiced');
     clearSelection();
-    await globalSyncWorkbook({ silent: true });
-  }, [orders, selectedIds, batchUpdate, toast, clearSelection, globalSyncWorkbook]);
+  }, [orders, selectedIds, batchUpdate, toast, clearSelection]);
 
   const onSaveView = React.useCallback(() => {
     setNamePrompt({ title: 'Save view', placeholder: 'View name', submitLabel: 'Save', onSubmit: (name) => {
@@ -5844,15 +5563,6 @@ function App() {
       alertThresholds={alertThresholds}
       setAlertThresholds={setAlertThresholds}
       onClose={() => setCurrentView('active')}
-      onGlobalSync={globalSyncWorkbook}
-      workbookPath={workbookPath}
-      onPickWorkbook={async () => {
-        if (!window.workbook || !window.workbook.choose) { toast('File picker unavailable', 'err'); return; }
-        try {
-          const r = await window.workbook.choose(workbookPath || '');
-          if (r && r.path) { updateSettings({ workbookPath: r.path }); toast('Workbook path saved'); }
-        } catch { toast('Could not open picker', 'err'); }
-      }}
       phases={phases}
       setPhases={setPhases}
       statuses={statuses}
@@ -5869,8 +5579,6 @@ function App() {
       setTrayEnabled={setTrayEnabled}
       trayBadgeSource={trayBadgeSource}
       setTrayBadgeSource={setTrayBadgeSource}
-      syncInterval={syncInterval}
-      setSyncInterval={setSyncInterval}
       onResetSettings={resetSettings}
       onRestoreBackup={restorePreMigrationBackup}
     />;
@@ -5880,7 +5588,6 @@ function App() {
       onSendToInvoice={sendToInvoice}
       onMarkInvoiced={markInvoiced}
       onMarkPaid={markPaid}
-      onSyncWO={retrySyncWO}
       onAddNote={addNote}
       onEditNote={editNote}
       onDeleteNote={deleteNote}
@@ -5926,9 +5633,7 @@ function App() {
             onAddInbox={onAddInbox}
             onRenameInbox={onRenameInbox}
             onDeleteInbox={onDeleteInbox}
-            onToolSync={() => globalSyncWorkbook({ silent: false })}
             onToolExport={exportViewCsv}
-            onToolPreflight={runPreflight}
           />
           {currentModule === 'service-items' ? (
             <ServiceLibrary toast={toast} />
@@ -6029,11 +5734,6 @@ function App() {
           );
         })()}
         {needsMigration && <MigrationDialog onApply={applyMigration} onSkip={skipMigration} backupBeforeApply={backupBeforeApply} setBackupBeforeApply={setBackupBeforeApply} />}
-        <PreflightModal
-          state={preflightState}
-          onClose={() => setPreflightState(null)}
-          onRerun={runPreflight}
-        />
         <ToastHost toasts={toasts} />
       </ToastContext.Provider>
      </StatusColorsContext.Provider>

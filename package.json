@@ -47,16 +47,6 @@
       "library_io.js",
       "index.html",
       "assets/**"
-    ],
-    "extraFiles": [
-      {
-        "from": "sync_to_lookup.py",
-        "to": "resources/sync_to_lookup.py"
-      },
-      {
-        "from": "preflight_qa.py",
-        "to": "resources/preflight_qa.py"
-      }
     ]
   },
   "dependencies": {
