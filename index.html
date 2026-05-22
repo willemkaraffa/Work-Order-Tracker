@@ -1566,19 +1566,6 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, cou
         </div>
       </div>
 
-      {onOpenLauncher && (
-        <button onClick={onOpenLauncher} title="Switch module" style={{
-          height: 32, padding: '0 12px', border: '1px solid var(--border-1)', borderRadius: 8,
-          background: 'var(--bg-canvas)', color: 'var(--text-1)',
-          fontFamily: 'inherit', fontSize: 13, fontWeight: 600,
-          cursor: 'pointer', marginBottom: 10,
-          display: 'flex', alignItems: 'center', gap: 8,
-        }}>
-          <span style={{ fontSize: 15, lineHeight: 1 }}>⊞</span>
-          Modules
-        </button>
-      )}
-
       <button onClick={onAddWO} style={{
         height: 36, padding: '0 12px',
         border: 'none', borderRadius: 8,
@@ -1653,6 +1640,14 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, cou
       ))}
 
       <div style={{ flex: 1, minHeight: 12 }} />
+      {onOpenLauncher && (
+        <SBRow
+          icon={'⊞'}
+          label="Modules"
+          muted
+          onClick={onOpenLauncher}
+        />
+      )}
       <SBRow
         icon={'⚙'}
         label="Settings"
