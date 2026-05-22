@@ -1533,7 +1533,7 @@ function MenuCaption({ children }) {
 }
 
 /* ---------- sidebar ---------- */
-function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, inboxes, onAddWO, onRenamePreset, onDeletePreset, onAddInbox, onRenameInbox, onDeleteInbox, onToolSync, onToolExport, onToolPreflight }) {
+function Sidebar({ activeView, onSelectView, onOpenSettings, onOpenLauncher, counts, presets, inboxes, onAddWO, onRenamePreset, onDeletePreset, onAddInbox, onRenameInbox, onDeleteInbox, onToolSync, onToolExport, onToolPreflight }) {
   const [toolsOpen, setToolsOpen] = React.useState(false);
   const views = [
     { id: 'attention',  label: 'Needs attention', count: counts.attention, icon: '✦', iconColor: 'var(--flag-emergency)' },
@@ -1565,6 +1565,19 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, in
           <div style={{ fontWeight: 400, fontSize: 10, color: 'var(--text-3)', marginTop: 2 }}>by Gamble</div>
         </div>
       </div>
+
+      {onOpenLauncher && (
+        <button onClick={onOpenLauncher} title="Switch module" style={{
+          height: 32, padding: '0 12px', border: '1px solid var(--border-1)', borderRadius: 8,
+          background: 'var(--bg-canvas)', color: 'var(--text-1)',
+          fontFamily: 'inherit', fontSize: 13, fontWeight: 600,
+          cursor: 'pointer', marginBottom: 10,
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ fontSize: 15, lineHeight: 1 }}>⊞</span>
+          Modules
+        </button>
+      )}
 
       <button onClick={onAddWO} style={{
         height: 36, padding: '0 12px',
@@ -1640,13 +1653,6 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, in
       ))}
 
       <div style={{ flex: 1, minHeight: 12 }} />
-      <SBRow
-        icon={'▦'}
-        label="Service Library"
-        selected={activeView === 'library'}
-        muted={activeView !== 'library'}
-        onClick={() => onSelectView('library')}
-      />
       <SBRow
         icon={'⚙'}
         label="Settings"
@@ -2460,7 +2466,7 @@ function openMaps(addr) {
   else window.open(url, '_blank');
 }
 
-function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onAction, statuses }) {
+function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncWO, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onEditInvoice, onAction, statuses }) {
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
   const statusRef = React.useRef(null);
 
@@ -2513,6 +2519,7 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onSyncW
               </ActionBtn>
             )}
             <ActionBtn onClick={() => onEdit && onEdit(data.wo)}>Edit</ActionBtn>
+            {onEditInvoice && <ActionBtn onClick={() => onEditInvoice(data.wo)}>Invoice</ActionBtn>}
             {data.nextAction && <ActionBtn primary onClick={handlePrimary}>{data.nextAction} {'→'}</ActionBtn>}
             <DetailOverflow data={data} onAction={onAction} statuses={statuses} />
           </div>
@@ -4794,6 +4801,112 @@ function InvoiceEditor({ order, library, onSave, onClose }) {
   );
 }
 
+// ── Module launcher (slice 3) ─────────────────────────────────────────────────
+// Full-screen overlay picker. Switches the top-level module (Work Orders /
+// Invoices / Service Items). Ports the FullScreenLanding overlay style.
+const MODULES = [
+  { id: 'work-orders',   glyph: '▤', title: 'Work Orders',  blurb: 'Track, triage, and bill jobs' },
+  { id: 'invoices',      glyph: '$', title: 'Invoices',     blurb: 'Build invoices for the billing queue' },
+  { id: 'service-items', glyph: '▦', title: 'Service Items', blurb: 'Edit the service-item price library' },
+];
+function ModuleLauncher({ current, onPick, onClose }) {
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    const id = requestAnimationFrame(() => setMounted(true));
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => { cancelAnimationFrame(id); document.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 300, background: 'var(--bg-canvas)',
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      opacity: mounted ? 1 : 0, transition: 'opacity 220ms ease', overflow: 'auto',
+    }}>
+      <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700,
+        fontSize: 30, letterSpacing: '-0.02em', marginBottom: 28 }}>Modules</div>
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', justifyContent: 'center', padding: '0 24px' }}>
+        {MODULES.map(m => (
+          <button key={m.id} onClick={(e) => { e.stopPropagation(); onPick(m.id); }} style={{
+            width: 220, height: 180, borderRadius: 14, cursor: 'pointer', textAlign: 'left',
+            padding: 20, display: 'flex', flexDirection: 'column', gap: 10,
+            border: '1px solid ' + (current === m.id ? 'var(--accent)' : 'var(--border-1)'),
+            background: current === m.id ? 'var(--bg-row-sel)' : 'var(--bg-surface)',
+            color: 'var(--text-1)', fontFamily: 'inherit',
+          }}>
+            <div style={{ fontSize: 34, lineHeight: 1 }}>{m.glyph}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.01em' }}>{m.title}</div>
+            <div style={{ fontSize: 13, color: 'var(--text-3)' }}>{m.blurb}</div>
+          </button>
+        ))}
+      </div>
+      <div style={{ marginTop: 24, fontSize: 12, color: 'var(--text-3)' }}>Esc or click outside to close</div>
+    </div>
+  );
+}
+
+// ── Invoices module (slice 3) ─────────────────────────────────────────────────
+// Billing-queue view: WOs in tab 'sent' or 'invoiced'. Row click opens the
+// invoice editor for that WO. Shows recorded invoice # + grand total when present.
+function InvoicesModule({ sentOrders, invoicedOrders, onOpenInvoice }) {
+  const fmt = (n) => '$' + money(n).toFixed(2);
+  const section = (label, rows) => (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-3)', fontWeight: 600, margin: '0 0 6px' }}>
+        {label} <span style={{ color: 'var(--text-3)' }}>· {rows.length}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ padding: '10px 6px', color: 'var(--text-3)', fontSize: 13 }}>None.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 90 }}>WO</th>
+              <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600 }}>Address</th>
+              <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>PM</th>
+              <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Invoice #</th>
+              <th style={{ textAlign: 'right', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(o => {
+              const inv = o.invoice;
+              const total = inv ? computeInvoiceTotals(inv, o.pm).grandTotal : null;
+              return (
+                <tr key={o.id} onClick={() => onOpenInvoice(o.id)} style={{
+                  borderTop: '1px solid var(--border-1)', cursor: 'pointer',
+                }}>
+                  <td style={{ padding: '8px 6px', fontVariantNumeric: 'tabular-nums' }}>{o.id}</td>
+                  <td style={{ padding: '8px 6px' }}>{o.address || ''}{o.city ? ', ' + o.city : ''}</td>
+                  <td style={{ padding: '8px 6px' }}>{o.pm || ''}</td>
+                  <td style={{ padding: '8px 6px', color: inv ? 'var(--text-1)' : 'var(--text-3)' }}>
+                    {inv && inv.number ? inv.number : 'not invoiced'}
+                  </td>
+                  <td style={{ padding: '8px 6px', textAlign: 'right' }}>{total == null ? '-' : fmt(total)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+  return (
+    <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      <div style={{ flexShrink: 0, padding: '14px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
+        <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+          Invoices
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>Billing queue. Click a row to build or edit its invoice.</div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
+        {section('Sent to invoice', sentOrders)}
+        {section('Invoiced', invoicedOrders)}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [selectedWO, setSelectedWO] = React.useState(null);
   const [recentWOs, setRecentWOs] = React.useState([]);
@@ -4802,6 +4915,11 @@ function App() {
     setRecentWOs(prev => [id, ...prev.filter(x => x !== id)].slice(0, 5));
   }, []);
   const [currentView, setCurrentView] = React.useState('active');
+  // Slice 3: top-level module + launcher overlay + invoice-editor overlay.
+  const [currentModule, setCurrentModule] = React.useState('work-orders');
+  const [launcherOpen, setLauncherOpen] = React.useState(false);
+  const [invoiceEditorWO, setInvoiceEditorWO] = React.useState(null);
+  const [editorLibrary, setEditorLibrary] = React.useState({ General: [], AMH: [] });
 
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
          addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
@@ -5315,6 +5433,43 @@ function App() {
     if (o) await syncWOToWorkbook(o);
   }, [orders, syncWOToWorkbook]);
 
+  // Invoice editor (slice 3). Reads the service library fresh from storage so
+  // edits made in the Service Items module are reflected in the line-item
+  // autocomplete. saveInvoice persists the invoice on the WO record.
+  const openInvoiceEditor = React.useCallback(async (id) => {
+    let lib = { General: [], AMH: [] };
+    try {
+      const r = window.storage && await window.storage.get('service_library');
+      const v = r && r.value;
+      if (v && typeof v === 'object') lib = { General: [], AMH: [], ...v };
+    } catch { /* keep empty library */ }
+    setEditorLibrary(lib);
+    setInvoiceEditorWO(id);
+  }, []);
+
+  const saveInvoice = React.useCallback((id, invoice, errMsg) => {
+    if (!invoice) { if (errMsg) toast(errMsg, 'err'); return; }
+    updateOrder(id, cur => ({
+      ...cur,
+      invoice,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action: 'invoice saved', detail: invoice.number || '' }],
+    }));
+    setInvoiceEditorWO(null);
+    toast('Invoice saved');
+  }, [updateOrder, toast]);
+
+  // Sidebar WO-view selection always returns to the Work Orders module.
+  const selectView = React.useCallback((v) => {
+    setCurrentModule('work-orders');
+    setCurrentView(v);
+  }, []);
+
+  const pickModule = React.useCallback((m) => {
+    setCurrentModule(m);
+    setLauncherOpen(false);
+  }, []);
+
   // Global "Sync workbook" — bulk re-sync. On success, marks every tab='invoiced'
   // WO as 'synced' (overwriting prior 'failed'/unmarked state, including legacy WOs).
   // Pass { silent: true } from the auto-timer to suppress routine toasts.
@@ -5737,6 +5892,7 @@ function App() {
       onPinNote={togglePinNote}
       onSetMisc={setMisc}
       onEdit={(id) => setModal({ kind: 'edit', id })}
+      onEditInvoice={openInvoiceEditor}
       onAction={detailAction}
       statuses={statuses}
     />;
@@ -5766,8 +5922,9 @@ function App() {
             counts={counts}
             presets={presets}
             inboxes={inboxes}
-            onSelectView={setCurrentView}
-            onOpenSettings={() => setCurrentView('settings')}
+            onSelectView={selectView}
+            onOpenLauncher={() => setLauncherOpen(true)}
+            onOpenSettings={() => { setCurrentModule('work-orders'); setCurrentView('settings'); }}
             onAddWO={handleAddWO}
             onRenamePreset={onRenamePreset}
             onDeletePreset={onDeletePreset}
@@ -5778,8 +5935,14 @@ function App() {
             onToolExport={exportViewCsv}
             onToolPreflight={runPreflight}
           />
-          {currentView === 'library' ? (
+          {currentModule === 'service-items' ? (
             <ServiceLibrary toast={toast} />
+          ) : currentModule === 'invoices' ? (
+            <InvoicesModule
+              sentOrders={sentOrders}
+              invoicedOrders={invoicedOrders}
+              onOpenInvoice={openInvoiceEditor}
+            />
           ) : (
           <React.Fragment>
           <ListPane
@@ -5855,6 +6018,21 @@ function App() {
             onSelectWO={(wo) => { dismissLanding(); setSelectedWO(wo); pushRecent(wo); setCurrentView('active'); }}
           />
         )}
+        {launcherOpen && (
+          <ModuleLauncher current={currentModule} onPick={pickModule} onClose={() => setLauncherOpen(false)} />
+        )}
+        {invoiceEditorWO != null && (() => {
+          const wo = orders.find(o => o.id === invoiceEditorWO);
+          if (!wo) return null;
+          return (
+            <InvoiceEditor
+              order={wo}
+              library={editorLibrary}
+              onSave={(invoice, errMsg) => saveInvoice(invoiceEditorWO, invoice, errMsg)}
+              onClose={() => setInvoiceEditorWO(null)}
+            />
+          );
+        })()}
         {needsMigration && <MigrationDialog onApply={applyMigration} onSkip={skipMigration} backupBeforeApply={backupBeforeApply} setBackupBeforeApply={setBackupBeforeApply} />}
         <PreflightModal
           state={preflightState}
