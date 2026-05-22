@@ -5,6 +5,7 @@ const http   = require('http');
 const { spawn }      = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const { scrapeWO }   = require('./scraper');
+const libraryIO      = require('./library_io');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -485,6 +486,57 @@ ipcMain.handle('export-csv', async (_e, csv) => {
   if (canceled || !filePath) return false;
   fs.writeFileSync(filePath, csv, 'utf8');
   return true;
+});
+
+// ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
+// Renderer owns persistence (window.storage key 'service_library'); main only
+// does the xlsx file I/O. All handlers return { ok, ... } and never throw.
+const AMH_DEFAULT = path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'MSR Excel', 'AMH Premier Pricing All scopes.xlsx');
+
+ipcMain.handle('library-choose-file', async () => {
+  const r = await dialog.showOpenDialog({
+    title: 'Select spreadsheet',
+    filters: [{ name: 'Excel Workbook', extensions: ['xlsx', 'xlsm'] }],
+    properties: ['openFile'],
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, canceled: true };
+  return { ok: true, path: r.filePaths[0] };
+});
+
+ipcMain.handle('library-seed-general', async (_e, overridePath) => {
+  try {
+    const wbPath = (overridePath && overridePath.trim()) ? overridePath.trim() : resolveWorkbookPath('');
+    if (!fs.existsSync(wbPath)) return { ok: false, error: `Workbook not found at:\n  ${wbPath}` };
+    return { ok: true, items: await libraryIO.parseGeneral(wbPath), path: wbPath };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('library-seed-amh', async (_e, overridePath) => {
+  try {
+    const p = (overridePath && overridePath.trim()) ? overridePath.trim() : AMH_DEFAULT;
+    if (!fs.existsSync(p)) return { ok: false, error: `AMH pricing file not found at:\n  ${p}` };
+    return { ok: true, items: await libraryIO.parseAmh(p), path: p };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('library-import-roundtrip', async (_e, filePath) => {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'File not found.' };
+    return { ok: true, tabs: await libraryIO.parseRoundtrip(filePath) };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('library-export', async (_e, tabs) => {
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Export Service Library',
+      defaultPath: 'Service Library.xlsx',
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    await libraryIO.exportLibrary(filePath, tabs || {});
+    return { ok: true, path: filePath };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ── IPC: Credentials (safeStorage encrypted) ─────────────────────────────────

@@ -1641,6 +1641,13 @@ function Sidebar({ activeView, onSelectView, onOpenSettings, counts, presets, in
 
       <div style={{ flex: 1, minHeight: 12 }} />
       <SBRow
+        icon={'▦'}
+        label="Service Library"
+        selected={activeView === 'library'}
+        muted={activeView !== 'library'}
+        onClick={() => onSelectView('library')}
+      />
+      <SBRow
         icon={'⚙'}
         label="Settings"
         selected={activeView === 'settings'}
@@ -4324,6 +4331,469 @@ function PreflightModal({ state, onClose, onRerun }) {
   );
 }
 
+// ── Service-item Library module ──────────────────────────────────────────────
+// Generic source-of-truth library. Tabs are SOURCE-scoped (General / AMH), not
+// PM agreements. Persists to storage key 'service_library' independent of wo_data.
+// xlsx seed/import/export delegated to window.library (main process, exceljs).
+const LIBRARY_TABS = ['General', 'AMH'];
+function emptyLibrary() { return { General: [], AMH: [] }; }
+
+// ── Invoice tax model (slice 2) ───────────────────────────────────────────────
+// TAX_RATE is the tax-INCLUSIVE multiplier (1 + 0.0725). MSR library/quoted
+// prices are tax-INCLUSIVE, so for an MSR WO a taxable line's pre-tax unit is
+// price / TAX_RATE (dividing back out the embedded tax). Every other WO quotes
+// pre-tax, so the unit price is used as-is and tax is added on top. Non-taxable
+// lines (e.g. AMH, already all-inclusive) never get tax applied.
+const TAX_RATE = 1.0725;
+
+function money(n) {
+  const v = (typeof n === 'number' && !Number.isNaN(n)) ? n : 0;
+  return Math.round(v * 100) / 100;
+}
+
+// Pure. invoice = { number, date, lineItems:[{name,desc,qty,unitPrice,category,taxable,agreement}] }.
+// pm = the WO's PM (e.g. 'MSR'); only MSR triggers the divide-out rule.
+// Returns per-line breakdown + { taxableSubtotal, nonTaxableSubtotal, tax, grandTotal }.
+function computeInvoiceTotals(invoice, pm) {
+  const isMSR = String(pm || '').toUpperCase() === 'MSR';
+  const lines = (invoice && Array.isArray(invoice.lineItems)) ? invoice.lineItems : [];
+  let taxableSubtotal = 0;   // pre-tax sum of taxable lines
+  let nonTaxableSubtotal = 0;
+  const rows = lines.map((li) => {
+    const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
+    const unit = money(Number(li.unitPrice));
+    const taxable = !!li.taxable;
+    const preTaxUnit = (taxable && isMSR) ? money(unit / TAX_RATE) : unit;
+    const lineSubtotal = money(preTaxUnit * qty);
+    if (taxable) taxableSubtotal += lineSubtotal;
+    else nonTaxableSubtotal += lineSubtotal;
+    return { ...li, qty, unitPrice: unit, preTaxUnit, lineSubtotal };
+  });
+  taxableSubtotal = money(taxableSubtotal);
+  nonTaxableSubtotal = money(nonTaxableSubtotal);
+  const tax = money(taxableSubtotal * (TAX_RATE - 1));
+  const grandTotal = money(taxableSubtotal + tax + nonTaxableSubtotal);
+  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal };
+}
+
+// Live-verify handle for the MSR 1.0725 round-trip (console: __invoiceCalc(...)).
+if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals; }
+
+function ServiceLibrary({ toast }) {
+  const [lib, setLib] = React.useState(null); // null = loading
+  const [tab, setTab] = React.useState('General');
+  const [q, setQ] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const r = window.storage && await window.storage.get('service_library');
+        const v = r && r.value;
+        if (live) setLib(v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary());
+      } catch { if (live) setLib(emptyLibrary()); }
+    })();
+    return () => { live = false; };
+  }, []);
+
+  const persist = React.useCallback((next) => {
+    setLib(next);
+    if (window.storage && window.storage.set) window.storage.set('service_library', next).catch(() => {});
+  }, []);
+
+  const needLib = React.useCallback(() => {
+    if (!window.library) { toast('Library tools unavailable - fully restart the app (not just reload)', 'err'); return false; }
+    return true;
+  }, [toast]);
+
+  const items = (lib && lib[tab]) || [];
+  const filtered = React.useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const rows = items.map((it, i) => ({ it, i }));
+    if (!needle) return rows;
+    return rows.filter(({ it }) =>
+      (it.name || '').toLowerCase().includes(needle) || (it.desc || '').toLowerCase().includes(needle));
+  }, [items, q]);
+
+  const setItems = React.useCallback((nextItems) => {
+    persist({ ...(lib || emptyLibrary()), [tab]: nextItems });
+  }, [lib, tab, persist]);
+
+  const updateItem = (idx, patch) => setItems(items.map((it, i) => i === idx ? { ...it, ...patch } : it));
+  const deleteItem = (idx) => setItems(items.filter((_, i) => i !== idx));
+  const addItem = () => setItems([{ name: '', desc: '', price: 0, taxable: tab !== 'AMH' }, ...items]);
+
+  const replaceTab = (tabName, newItems, label) => {
+    const cur = (lib && lib[tabName]) || [];
+    if (cur.length && !window.confirm(`Replace all ${cur.length} ${tabName} items with ${newItems.length} from ${label}?`)) return false;
+    persist({ ...(lib || emptyLibrary()), [tabName]: newItems });
+    return true;
+  };
+
+  const seedGeneral = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const r = await window.library.seedGeneral('');
+      if (!r || !r.ok) { toast((r && r.error) || 'Seed failed', 'err'); return; }
+      if (replaceTab('General', r.items, 'workbook')) toast(`General seeded: ${r.items.length} items`);
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
+
+  const seedAmh = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      let r = await window.library.seedAmh('');
+      if (!r || !r.ok) {
+        const pick = await window.library.chooseFile();
+        if (!pick || !pick.ok) return;
+        r = await window.library.seedAmh(pick.path);
+      }
+      if (!r || !r.ok) { toast((r && r.error) || 'AMH seed failed', 'err'); return; }
+      if (replaceTab('AMH', r.items, 'AMH pricing')) toast(`AMH seeded: ${r.items.length} items`);
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
+
+  const importBackup = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const pick = await window.library.chooseFile();
+      if (!pick || !pick.ok) return;
+      const r = await window.library.importRoundtrip(pick.path);
+      if (!r || !r.ok) { toast((r && r.error) || 'Import failed', 'err'); return; }
+      const next = { ...emptyLibrary() };
+      for (const k of Object.keys(r.tabs)) if (LIBRARY_TABS.includes(k)) next[k] = r.tabs[k];
+      if (!window.confirm('Replace the current library with the imported file?')) return;
+      persist(next);
+      toast('Library imported');
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
+
+  const exportBackup = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const r = await window.library.export(lib || emptyLibrary());
+      if (r && r.ok) toast('Exported: ' + r.path);
+      else if (r && !r.canceled) toast((r && r.error) || 'Export failed', 'err');
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
+
+  const btn = (label, onClick, primary) => (
+    <button onClick={onClick} disabled={busy} style={{
+      height: 32, padding: '0 12px', borderRadius: 7, cursor: busy ? 'default' : 'pointer',
+      border: primary ? 'none' : '1px solid var(--border-1)',
+      background: primary ? 'var(--accent)' : 'var(--bg-surface)',
+      color: primary ? 'var(--accent-fg)' : 'var(--text-1)',
+      fontFamily: 'inherit', fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1,
+    }}>{label}</button>
+  );
+
+  const cellInput = (val, onChange, opts = {}) => (
+    <input
+      value={val == null ? '' : val}
+      onChange={(e) => onChange(e.target.value)}
+      type={opts.type || 'text'} step={opts.step}
+      style={{
+        width: '100%', boxSizing: 'border-box', height: 28, padding: '0 8px',
+        border: '1px solid var(--border-1)', borderRadius: 6,
+        background: 'var(--bg-canvas)', color: 'var(--text-1)',
+        fontFamily: 'inherit', fontSize: 13, textAlign: opts.type === 'number' ? 'right' : 'left',
+      }}
+    />
+  );
+
+  return (
+    <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      <div style={{ flexShrink: 0, padding: '14px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+          <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+            Service Library
+          </div>
+          <div style={{ flex: 1 }} />
+          {btn('Seed General', seedGeneral)}
+          {btn('Seed AMH', seedAmh)}
+          {btn('Import backup', importBackup)}
+          {btn('Export backup', exportBackup, true)}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {LIBRARY_TABS.map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              height: 30, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+              border: '1px solid ' + (tab === t ? 'var(--accent)' : 'var(--border-1)'),
+              background: tab === t ? 'var(--bg-row-sel)' : 'transparent',
+              color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+              fontWeight: tab === t ? 600 : 400,
+            }}>{t} <span style={{ color: 'var(--text-3)', marginLeft: 4 }}>{((lib && lib[t]) || []).length}</span></button>
+          ))}
+          <div style={{ flex: 1 }} />
+          <input
+            value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search items..."
+            style={{
+              height: 30, width: 220, padding: '0 10px', borderRadius: 7,
+              border: '1px solid var(--border-1)', background: 'var(--bg-canvas)',
+              color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+            }}
+          />
+          {btn('+ Add item', addItem)}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 18px 18px' }}>
+        {lib === null ? (
+          <div style={{ padding: 24, color: 'var(--text-3)' }}>Loading...</div>
+        ) : filtered.length === 0 ? (
+          <div style={{ padding: 24, color: 'var(--text-3)' }}>
+            {items.length === 0 ? `No items in ${tab}. Use "Seed ${tab === 'AMH' ? 'AMH' : 'General'}" or "+ Add item".` : 'No matches.'}
+          </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-canvas)', zIndex: 1 }}>
+                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '44%' }}>Item Name</th>
+                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '30%' }}>Description</th>
+                <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Price</th>
+                {tab !== 'AMH' && <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Taxable</th>}
+                <th style={{ width: 36 }} />
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(({ it, i }) => (
+                <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
+                  <td style={{ padding: '4px 6px' }}>{cellInput(it.name, (v) => updateItem(i, { name: v }))}</td>
+                  <td style={{ padding: '4px 6px' }}>{cellInput(it.desc, (v) => updateItem(i, { desc: v }))}</td>
+                  <td style={{ padding: '4px 6px' }}>{cellInput(it.price, (v) => updateItem(i, { price: v === '' ? 0 : parseFloat(v) || 0 }), { type: 'number', step: '0.01' })}</td>
+                  {tab !== 'AMH' && (
+                  <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                    <input type="checkbox" checked={!!it.taxable} onChange={(e) => updateItem(i, { taxable: e.target.checked })} />
+                  </td>
+                  )}
+                  <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                    <button onClick={() => deleteItem(i)} title="Delete" style={{
+                      border: 'none', background: 'transparent', color: 'var(--text-3)',
+                      cursor: 'pointer', fontSize: 15, lineHeight: 1,
+                    }}>×</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Invoice editor (slice 2) ──────────────────────────────────────────────────
+// Full-screen overlay. Records an invoice on a WO: manual invoice #/date, line
+// items (autocompleted from the service library), per-line labor/material
+// category + taxable flag, live totals via computeInvoiceTotals. Persists the
+// invoice through onSave(invoice). NOT mounted yet - slice 3 wires the entry
+// point (module launcher). order = the WO record; library = { General, AMH }.
+function blankLine() {
+  return { name: '', desc: '', qty: 1, unitPrice: 0, category: 'labor', taxable: false, agreement: '' };
+}
+function InvoiceEditor({ order, library, onSave, onClose }) {
+  const pm = (order && order.pm) || '';
+  const isMSR = String(pm).toUpperCase() === 'MSR';
+  const tabName = String(pm).toUpperCase() === 'AMH' ? 'AMH' : 'General';
+  const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
+  const catalogByName = React.useMemo(() => {
+    const m = new Map();
+    for (const it of catalog) if (it && it.name) m.set(it.name, it);
+    return m;
+  }, [catalog]);
+
+  const existing = order && order.invoice;
+  const [number, setNumber] = React.useState((existing && existing.number) || '');
+  const [date, setDate] = React.useState((existing && existing.date) || new Date().toISOString().slice(0, 10));
+  const [lines, setLines] = React.useState(
+    (existing && Array.isArray(existing.lineItems) && existing.lineItems.length)
+      ? existing.lineItems.map(li => ({ ...blankLine(), ...li }))
+      : [blankLine()]
+  );
+
+  const setLine = (idx, patch) => setLines(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
+  const removeLine = (idx) => setLines(ls => ls.length > 1 ? ls.filter((_, i) => i !== idx) : ls);
+  const addLine = () => setLines(ls => [...ls, blankLine()]);
+
+  // Picking a catalog name autofills price/desc/taxable; user may override after.
+  const pickName = (idx, name) => {
+    const hit = catalogByName.get(name);
+    if (hit) setLine(idx, {
+      name,
+      desc: hit.desc || '',
+      unitPrice: typeof hit.price === 'number' ? hit.price : (parseFloat(hit.price) || 0),
+      taxable: !!hit.taxable,
+      agreement: tabName,
+    });
+    else setLine(idx, { name });
+  };
+
+  const totals = React.useMemo(
+    () => computeInvoiceTotals({ lineItems: lines }, pm),
+    [lines, pm]
+  );
+
+  const fmt = (n) => '$' + money(n).toFixed(2);
+
+  const save = () => {
+    if (!String(number).trim()) { onSave && onSave(null, 'Invoice # is required'); return; }
+    const clean = lines
+      .filter(l => String(l.name).trim() || Number(l.unitPrice))
+      .map(l => ({
+        name: String(l.name).trim(),
+        desc: String(l.desc || '').trim(),
+        qty: Number(l.qty) > 0 ? Number(l.qty) : 1,
+        unitPrice: money(Number(l.unitPrice)),
+        category: l.category === 'material' ? 'material' : 'labor',
+        taxable: !!l.taxable,
+        agreement: l.agreement || tabName,
+      }));
+    if (!clean.length) { onSave && onSave(null, 'Add at least one line item'); return; }
+    onSave && onSave({ number: String(number).trim(), date, lineItems: clean });
+  };
+
+  const inputStyle = {
+    boxSizing: 'border-box', height: 28, padding: '0 8px',
+    border: '1px solid var(--border-1)', borderRadius: 6,
+    background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 13,
+  };
+  const th = (label, align, w) => (
+    <th style={{ textAlign: align || 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: w }}>{label}</th>
+  );
+  const totalRow = (label, val, strong) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, padding: '3px 0',
+      fontWeight: strong ? 700 : 400, fontSize: strong ? 15 : 13, color: 'var(--text-1)' }}>
+      <span style={{ color: strong ? 'var(--text-1)' : 'var(--text-2)' }}>{label}</span>
+      <span>{val}</span>
+    </div>
+  );
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000, background: 'var(--bg-canvas)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <datalist id="invoice-item-names">
+        {catalog.map((it, i) => <option key={i} value={it.name} />)}
+      </datalist>
+
+      <div style={{ flexShrink: 0, padding: '14px 22px', borderBottom: '1px solid var(--border-1)',
+        display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+          Invoice
+        </div>
+        <div style={{ color: 'var(--text-2)', fontSize: 13 }}>
+          WO {(order && order.id) || ''} · {pm || 'no PM'}{order && order.address ? ' · ' + order.address : ''}
+        </div>
+        <div style={{ flex: 1 }} />
+        <button onClick={onClose} style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+          border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
+          fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Cancel</button>
+        <button onClick={save} style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+          border: 'none', background: 'var(--accent)', color: 'var(--accent-fg)',
+          fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Save invoice</button>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 22px 22px' }}>
+        <div style={{ display: 'flex', gap: 18, marginBottom: 16 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-3)' }}>
+            Invoice #
+            <input value={number} onChange={(e) => setNumber(e.target.value)} placeholder="e.g. 1042"
+              style={{ ...inputStyle, height: 32, width: 180 }} />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-3)' }}>
+            Date
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+              style={{ ...inputStyle, height: 32, width: 180 }} />
+          </label>
+        </div>
+
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              {th('Item', 'left', '34%')}
+              {th('Description', 'left', '26%')}
+              {th('Category', 'left', 110)}
+              {th('Qty', 'right', 60)}
+              {th('Unit price', 'right', 110)}
+              {th('Tax', 'center', 50)}
+              <th style={{ width: 36 }} />
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((l, i) => (
+              <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
+                <td style={{ padding: '4px 6px' }}>
+                  <input list="invoice-item-names" value={l.name} onChange={(e) => pickName(i, e.target.value)}
+                    placeholder="Item name" style={{ ...inputStyle, width: '100%' }} />
+                </td>
+                <td style={{ padding: '4px 6px' }}>
+                  <input value={l.desc} onChange={(e) => setLine(i, { desc: e.target.value })}
+                    style={{ ...inputStyle, width: '100%' }} />
+                </td>
+                <td style={{ padding: '4px 6px' }}>
+                  <select value={l.category} onChange={(e) => setLine(i, { category: e.target.value })}
+                    style={{ ...inputStyle, width: '100%' }}>
+                    <option value="labor">Labor</option>
+                    <option value="material">Material</option>
+                  </select>
+                </td>
+                <td style={{ padding: '4px 6px' }}>
+                  <input type="number" min="1" step="1" value={l.qty}
+                    onChange={(e) => setLine(i, { qty: e.target.value === '' ? '' : parseInt(e.target.value, 10) || 1 })}
+                    style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
+                </td>
+                <td style={{ padding: '4px 6px' }}>
+                  <input type="number" step="0.01" value={l.unitPrice}
+                    onChange={(e) => setLine(i, { unitPrice: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0 })}
+                    style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
+                </td>
+                <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                  <input type="checkbox" checked={!!l.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} />
+                </td>
+                <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                  <button onClick={() => removeLine(i)} title="Remove" disabled={lines.length <= 1} style={{
+                    border: 'none', background: 'transparent', color: 'var(--text-3)',
+                    cursor: lines.length <= 1 ? 'default' : 'pointer', fontSize: 15, lineHeight: 1,
+                    opacity: lines.length <= 1 ? 0.4 : 1 }}>×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <button onClick={addLine} style={{ marginTop: 10, height: 30, padding: '0 12px', borderRadius: 7,
+          cursor: 'pointer', border: '1px solid var(--border-1)', background: 'var(--bg-surface)',
+          color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>+ Add line</button>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}>
+          <div style={{ width: 300, borderTop: '1px solid var(--border-1)', paddingTop: 10 }}>
+            {isMSR && (
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 6 }}>
+                MSR: taxable prices are tax-inclusive; tax divided back out at {TAX_RATE}.
+              </div>
+            )}
+            {totalRow('Taxable subtotal', fmt(totals.taxableSubtotal))}
+            {totalRow('Tax (7.25%)', fmt(totals.tax))}
+            {totals.nonTaxableSubtotal > 0 && totalRow('Non-taxable', fmt(totals.nonTaxableSubtotal))}
+            {totalRow('Grand total', fmt(totals.grandTotal), true)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [selectedWO, setSelectedWO] = React.useState(null);
   const [recentWOs, setRecentWOs] = React.useState([]);
@@ -4816,12 +5286,10 @@ function App() {
     updateOrder(id, cur => ({
       ...cur,
       tab: 'sent',
-      syncStatus: 'pending',
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'sent to billing queue', detail: '' }],
     }));
-    await syncWOToWorkbook(o);
-  }, [orders, updateOrder, toast, syncWOToWorkbook]);
+  }, [orders, updateOrder, toast]);
 
   const markInvoiced = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
@@ -4829,12 +5297,10 @@ function App() {
     updateOrder(id, cur => ({
       ...cur,
       tab: 'invoiced',
-      syncStatus: 'pending',
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'marked invoiced', detail: '' }],
     }));
-    await syncWOToWorkbook(o);
-  }, [orders, updateOrder, syncWOToWorkbook]);
+  }, [orders, updateOrder]);
 
   const markPaid = React.useCallback((id) => {
     updateOrder(id, cur => ({
@@ -5312,6 +5778,10 @@ function App() {
             onToolExport={exportViewCsv}
             onToolPreflight={runPreflight}
           />
+          {currentView === 'library' ? (
+            <ServiceLibrary toast={toast} />
+          ) : (
+          <React.Fragment>
           <ListPane
             view={currentView}
             data={viewData}
@@ -5348,6 +5818,8 @@ function App() {
             onReorderInbox={reorderInbox}
           />
           {rightPane}
+          </React.Fragment>
+          )}
         </div>
 
         <Modal open={modal === 'add'} onClose={() => setModal(null)} title="Add work order" width={620}>

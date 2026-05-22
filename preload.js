@@ -33,6 +33,16 @@ contextBridge.exposeInMainWorld('workbook', {
   preflight: (overridePath) => ipcRenderer.invoke('preflight-check',  overridePath || ''),
 });
 
+// Service-item library bridge — xlsx seed / import / export (persistence stays
+// in window.storage under key 'service_library').
+contextBridge.exposeInMainWorld('library', {
+  chooseFile:       ()           => ipcRenderer.invoke('library-choose-file'),
+  seedGeneral:      (path)       => ipcRenderer.invoke('library-seed-general', path || ''),
+  seedAmh:          (path)       => ipcRenderer.invoke('library-seed-amh', path || ''),
+  importRoundtrip:  (path)       => ipcRenderer.invoke('library-import-roundtrip', path || ''),
+  export:           (tabs)       => ipcRenderer.invoke('library-export', tabs),
+});
+
 // Focus-search bridge — main process pushes when global hotkey fires
 contextBridge.exposeInMainWorld('focusSearchBridge', {
   on: (cb) => ipcRenderer.on('focus-search', () => cb())
