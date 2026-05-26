@@ -1125,8 +1125,13 @@ function useWorkOrders() {
 
       const portalWo = String(inc.woId || '').trim();
       let id;
-      if (portalWo && byId.has(portalWo))               id = portalWo;
-      else if (portalWo)                                id = portalWo;
+      // stableId = the incoming row carries a real portal WO#. Such rows must NOT
+      // be address/phone-deduped: a genuinely new WO# at a known address is a
+      // distinct order, not a duplicate. (inc.id is only a local WO-NNN sequence
+      // from the extension, so it does NOT count as stable.)
+      let stableId = false;
+      if (portalWo && byId.has(portalWo))               { id = portalWo; stableId = true; }
+      else if (portalWo)                                { id = portalWo; stableId = true; }
       else if (inc.id && byId.has(inc.id))              id = inc.id;
       else {
         const dup = findDuplicate(inc);
@@ -1154,9 +1159,12 @@ function useWorkOrders() {
           history: [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }],
         });
       } else {
-        // New row by portal woId or explicit id — still dedup by address/phone/propertyId.
-        const dup = findDuplicate(inc);
-        if (dup) { dupSkipped++; continue; }
+        // New row. Address/phone/propertyId dedup only for rows WITHOUT a stable
+        // portal WO# — a real new WO# at a known address must still import.
+        if (!stableId) {
+          const dup = findDuplicate(inc);
+          if (dup) { dupSkipped++; continue; }
+        }
         const wo = {
           id,
           pm:            inc.pm || '',
