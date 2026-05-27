@@ -163,15 +163,19 @@ const DEFAULT_PMS   = [
 const DEFAULT_TYPES = ['HVAC', 'Plumbing', 'Electrical', 'Other'];
 const DEFAULT_TECHS = ['Daniel', 'Andrew', 'Devyn'];
 
+// `complete: true` marks a phase as technician-completed work that no longer
+// needs scheduling. WOs in a complete phase are excluded from the Itinerary.
 const DEFAULT_PHASES = [
-  { id: 'intake',   name: 'Intake',      fg: 'var(--p-intake)',   bg: 'var(--p-intake-bg)',   statuses: ['Open'] },
-  { id: 'await',    name: 'Awaiting PM', fg: 'var(--p-await)',    bg: 'var(--p-await-bg)',    statuses: ['Bid Submitted'] },
-  { id: 'approved', name: 'Approved',    fg: 'var(--p-approved)', bg: 'var(--p-approved-bg)', statuses: ['Bid Approved - Return', 'Bid Approved - Complete'] },
-  { id: 'progress', name: 'In progress', fg: 'var(--p-progress)', bg: 'var(--p-progress-bg)', statuses: ['Parts Pending'] },
-  { id: 'wrap',     name: 'Wrapping up', fg: 'var(--p-wrap)',     bg: 'var(--p-wrap-bg)',     statuses: ['Pending-Complete'] },
-  { id: 'done',     name: 'Done',        fg: 'var(--p-done)',     bg: 'var(--p-done-bg)',     statuses: ['Closed'] },
-  { id: 'billing',  name: 'Billing',     fg: 'var(--p-billing)',  bg: 'var(--p-billing-bg)',  statuses: [] /* tab-derived (Sent/Invoiced) */ },
+  { id: 'intake',   name: 'Intake',      fg: 'var(--p-intake)',   bg: 'var(--p-intake-bg)',   statuses: ['Open'], complete: false },
+  { id: 'await',    name: 'Awaiting PM', fg: 'var(--p-await)',    bg: 'var(--p-await-bg)',    statuses: ['Bid Submitted'], complete: false },
+  { id: 'approved', name: 'Approved',    fg: 'var(--p-approved)', bg: 'var(--p-approved-bg)', statuses: ['Bid Approved - Return', 'Bid Approved - Complete'], complete: false },
+  { id: 'progress', name: 'In progress', fg: 'var(--p-progress)', bg: 'var(--p-progress-bg)', statuses: ['Parts Pending'], complete: false },
+  { id: 'wrap',     name: 'Wrapping up', fg: 'var(--p-wrap)',     bg: 'var(--p-wrap-bg)',     statuses: ['Pending-Complete'], complete: true },
+  { id: 'done',     name: 'Done',        fg: 'var(--p-done)',     bg: 'var(--p-done-bg)',     statuses: ['Closed'], complete: true },
+  { id: 'billing',  name: 'Billing',     fg: 'var(--p-billing)',  bg: 'var(--p-billing-bg)',  statuses: [] /* tab-derived (Sent/Invoiced) */, complete: true },
 ];
+// Backfill `complete` on stored phases that predate the flag (match by id).
+const PHASE_COMPLETE_DEFAULT = { wrap: true, done: true, billing: true };
 
 // Density scale tokens. Read in App via `settings.density`, applied to
 // list-row padding and primary line font-size. Values picked so compact
@@ -628,6 +632,9 @@ function toDisplayRow(o) {
     ageLevel: ageLevelForDays(ageDays),
     status: o.status || 'Open',
     tab: o.tab || 'active',
+    scheduled: !!(o.schedule && o.schedule.date),
+    schedDate: o.schedule ? o.schedule.date : null,
+    schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
     lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
   };
@@ -810,6 +817,7 @@ function toDetailData(o) {
       .map(h => fmtHistTime(h.ts) + ' — ' + (h.action || '') + (h.detail ? ': ' + h.detail : '')),
     nextAction,
     tab: o.tab || 'active',
+    schedule: o.schedule || null,
     raw: o,
   };
 }
@@ -897,6 +905,8 @@ function useWorkOrders() {
         if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
+        parsed.phases = parsed.phases.map(p => p.complete === undefined
+          ? { ...p, complete: !!PHASE_COMPLETE_DEFAULT[p.id] } : p);
         if (!parsed.statusColors || typeof parsed.statusColors !== 'object') parsed.statusColors = {};
         parsed.statusColors = { ...DEFAULT_STATUS_COLORS, ...parsed.statusColors };
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
@@ -1952,7 +1962,7 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search work orders..."
+            placeholder="Search WO #, address, city, tech..."
             style={{
               flex: 1, border: 'none', outline: 'none',
               background: 'transparent', color: 'var(--text-1)',
@@ -2160,6 +2170,13 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('pm'); }}>{'Set PM ›'}</MenuItem>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('type'); }}>{'Set type ›'}</MenuItem>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('tech'); }}>{'Set tech ›'}</MenuItem>
+                {!ctxBulk && (<>
+                  <MenuDivider />
+                  {ctxRow?.scheduled && (
+                    <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'jumpToSchedule'); closeCtx(); }}>Jump to schedule</MenuItem>
+                  )}
+                  <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'openScheduleForm'); closeCtx(); }}>{ctxRow?.scheduled ? 'Reschedule…' : 'Add to schedule'}</MenuItem>
+                </>)}
                 <MenuDivider />
                 <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleEmergency'); closeCtx(); }}>{isEmergency ? 'Clear emergency flag' : 'Mark emergency'}</MenuItem>
                 <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'toggleWarranty'); closeCtx(); }}>{isWarranty ? 'Clear warranty flag' : 'Mark warranty'}</MenuItem>
@@ -2174,6 +2191,9 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 <MenuDivider />
               </>)}
               <MenuItem onClick={() => { onSelectWO(ctxMenu.woId); closeCtx(); }}>View details</MenuItem>
+              {!ctxBulk && window.scraper && window.scraper.captureWO && (ctxRow?.pm === 'AMH' || ctxRow?.pm === 'MSR') && (
+                <MenuItem onClick={() => { onWoAction && onWoAction(ctxMenu.woId, 'capture'); closeCtx(); }}>Capture from portal</MenuItem>
+              )}
               {ctxMenu.tab !== 'trash' && (
                 <MenuItem onClick={(e) => { e.stopPropagation(); setCtxSub('inbox'); }}>{ctxBulk ? ('Add to inbox (' + selectedIds.size + ') ›') : 'Add to inbox ›'}</MenuItem>
               )}
@@ -2283,6 +2303,11 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
           <PMChip pm={row.pm} />
           <TypeIcon kind={row.type} />
           {row.tech && <span>{row.tech}</span>}
+          {row.scheduled && (
+            <span title="Scheduled" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>
+              ◷ {fmtSchedule(row.schedDate, row.schedStart)}
+            </span>
+          )}
           <span style={{ marginLeft: 'auto', flexShrink: 0, fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)', fontSize: 13 }}>{row.wo}</span>
         </div>
       </div>
@@ -2314,9 +2339,12 @@ const TT_WOS = {
   },
 };
 
-function DetailOverflow({ data, onAction, statuses }) {
+function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCapture, capturing, onCapture }) {
   const [open, setOpen] = React.useState(false);
   const [statusOpen, setStatusOpen] = React.useState(false);
+  const doEdit    = (e) => { e.stopPropagation(); setOpen(false); onEdit && onEdit(data.wo); };
+  const doInvoice = (e) => { e.stopPropagation(); setOpen(false); onEditInvoice && onEditInvoice(data.wo); };
+  const doCap     = (e) => { e.stopPropagation(); setOpen(false); onCapture && onCapture(); };
   React.useEffect(() => {
     if (!open) return;
     const close = () => { setOpen(false); setStatusOpen(false); };
@@ -2366,6 +2394,10 @@ function DetailOverflow({ data, onAction, statuses }) {
               <MenuDivider />
               <MenuItem danger onClick={act('hardDelete')}>Delete permanently…</MenuItem>
             </>) : (<>
+              <MenuItem onClick={doEdit}>Edit details…</MenuItem>
+              {onEditInvoice && <MenuItem onClick={doInvoice}>Edit invoice…</MenuItem>}
+              {canCapture && <MenuItem onClick={doCap}>{capturing ? 'Capturing…' : 'Capture from portal'}</MenuItem>}
+              <MenuDivider />
               {tab === 'active' && (<>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setStatusOpen(true); }}>Change status…</MenuItem>
                 <MenuItem onClick={act('duplicate')}>Duplicate</MenuItem>
@@ -2415,7 +2447,15 @@ function openMaps(addr) {
 
 function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onEditInvoice, onAction, statuses }) {
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
+  const [capturing, setCapturing] = React.useState(false);
   const statusRef = React.useRef(null);
+
+  const canCapture = !!(window.scraper && window.scraper.captureWO) && (data?.pm === 'AMH' || data?.pm === 'MSR');
+  const doCapture = () => {
+    if (capturing) return;
+    setCapturing(true);
+    Promise.resolve(onAction && onAction('capture')).finally(() => setCapturing(false));
+  };
 
   React.useEffect(() => {
     if (!statusMenuOpen) return;
@@ -2459,11 +2499,24 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onAddNo
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>{data.wo}</div>
           {data.flags?.map(f => <FlagGlyph key={f} kind={f} />)}
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <ActionBtn onClick={() => onEdit && onEdit(data.wo)}>Edit</ActionBtn>
-            {onEditInvoice && <ActionBtn onClick={() => onEditInvoice(data.wo)}>Invoice</ActionBtn>}
-            {data.nextAction && <ActionBtn primary onClick={handlePrimary}>{data.nextAction} {'→'}</ActionBtn>}
-            <DetailOverflow data={data} onAction={onAction} statuses={statuses} />
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            {data.nextAction && (
+              <ActionBtn primary onClick={handlePrimary}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+                  {data.nextAction}<span aria-hidden="true">→</span>
+                </span>
+              </ActionBtn>
+            )}
+            <DetailOverflow
+              data={data}
+              onAction={onAction}
+              statuses={statuses}
+              onEdit={onEdit}
+              onEditInvoice={onEditInvoice}
+              canCapture={canCapture}
+              capturing={capturing}
+              onCapture={doCapture}
+            />
           </div>
         </div>
         <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.005em', marginTop: 2 }}>
@@ -2524,6 +2577,9 @@ function DetailPane({ data, onSendToInvoice, onMarkInvoiced, onMarkPaid, onAddNo
           <Field label="Bid" value={data.bid} />
           <Field label="Phone" value={data.phone} />
           <Field label="Flags" value={data.flags?.length ? data.flags.map(f => f[0].toUpperCase() + f.slice(1)).join(', ') : '—'} />
+          <Field label="Scheduled" value={data.schedule
+            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)' }}>◷ {fmtSchedule(data.schedule.date, data.schedule.start)}</span>
+            : '—'} />
         </div>
       </div>
 
@@ -3098,10 +3154,13 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
   const moveDown = (idx) => setPhases(swapAt(phases, idx, idx + 1));
   const addPhase = () => {
     const id = 'ph_' + Date.now().toString(36);
-    setPhases([...phases, { id, name: 'New phase', fg: '#6b7280', bg: 'var(--bg-surface-2)', statuses: [] }]);
+    setPhases([...phases, { id, name: 'New phase', fg: '#6b7280', bg: 'var(--bg-surface-2)', statuses: [], complete: false }]);
   };
   const setPhaseColor = (targetId, hex) => {
     setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, fg: hex } : p));
+  };
+  const togglePhaseComplete = (targetId) => {
+    setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, complete: !p.complete } : p));
   };
   const deletePhase = (targetId) => {
     if (!window.confirm('Delete this phase?')) return;
@@ -3116,11 +3175,12 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
         const uid = p.id || p.name;
         return (
           <div key={uid} style={{
-            display: 'flex', alignItems: 'center', gap: 8,
+            display: 'flex', flexDirection: 'column', gap: 6,
             padding: '8px 10px', marginBottom: 6,
             border: '1px solid var(--border-1)', borderRadius: 6,
             background: 'var(--bg-surface)', minWidth: 0,
           }}>
+           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
             <ReorderBtns
               onUp={() => moveUp(idx)} onDown={() => moveDown(idx)}
               disableUp={idx === 0} disableDown={idx === phases.length - 1}
@@ -3147,22 +3207,33 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
                 />
               : <span
                   onDoubleClick={() => startRename(p)}
-                  title="Double-click to rename"
-                  style={{ fontSize: 14, fontWeight: 600, minWidth: 130, flexShrink: 0, cursor: 'text' }}
+                  title="Double-click or use ✎ to rename"
+                  style={{ fontSize: 14, fontWeight: 600, minWidth: 90, flexShrink: 0, cursor: 'text' }}
                 >{p.name}</span>
             }
             <span style={{
-              fontSize: 13, color: 'var(--text-2)', flex: 1, minWidth: 0,
+              fontSize: 13, color: 'var(--text-2)', flex: 1, minWidth: 60,
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
               {(p.statuses || []).length
                 ? p.statuses.join(' · ')
                 : <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>tab-derived</span>}
             </span>
+            <button onClick={() => startRename(p)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px', flexShrink: 0 }}>{'✎'}</button>
             <button
               onClick={() => deletePhase(uid)}
-              style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
+              style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px', flexShrink: 0 }}
             >{'✕'}</button>
+           </div>
+           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <label
+              title="Jobs in this phase are technician-completed and are hidden from the Itinerary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--text-2)', cursor: 'pointer', userSelect: 'none' }}
+            >
+              <input type="checkbox" checked={!!p.complete} onChange={() => togglePhaseComplete(uid)} style={{ cursor: 'pointer' }} />
+              Complete
+            </label>
+           </div>
           </div>
         );
       })}
@@ -3394,6 +3465,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
                   ))}
                 </select>
               )}
+              <button onClick={() => { setEditingIdx(idx); setEditingName(s); }} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deleteStatus(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
@@ -3525,6 +3597,7 @@ function PMsEditor({ pms, setPms, onClose }) {
                     style={{ flex: 1, fontSize: 14, cursor: 'text' }}
                   >{pm.name}</span>
               }
+              <button onClick={() => { setEditingIdx(idx); setEditingName(pm.name); }} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deletePm(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
@@ -3648,6 +3721,7 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
                     style={{ flex: 1, fontSize: 14, cursor: 'text' }}
                   >{v}</span>
               }
+              <button onClick={() => { setEditingIdx(idx); setEditingName(v); }} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deleteItem(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
@@ -4700,8 +4774,9 @@ function InvoiceEditor({ order, library, existingNumbers, onSave, onClose }) {
 // Invoices / Service Items). Ports the FullScreenLanding overlay style.
 const MODULES = [
   { id: 'work-orders',   glyph: '▤', title: 'Work Orders',  blurb: 'Track, triage, and bill jobs' },
-  { id: 'invoices',      glyph: '$', title: 'Invoices',     blurb: 'Build invoices for the billing queue' },
+  { id: 'itinerary',     glyph: '◷', title: 'Itinerary',    blurb: 'Schedule technicians day by day' },
   { id: 'service-items', glyph: '▦', title: 'Service Items', blurb: 'Edit the service-item price library' },
+  { id: 'invoices',      glyph: '$', title: 'Invoices',     blurb: 'Build invoices for the billing queue' },
 ];
 function ModuleLauncher({ current, onPick, onClose }) {
   const [mounted, setMounted] = React.useState(false);
@@ -4801,6 +4876,482 @@ function InvoicesModule({ sentOrders, invoicedOrders, onOpenInvoice }) {
   );
 }
 
+// ── Itinerary module ──────────────────────────────────────────────────────────
+// Daily, single-tech timeline. Pick a tech + day; drag active WOs from the
+// unscheduled pool onto 30-min slots (8:00 AM - 6:00 PM). Drag a scheduled
+// block to another slot to change its start time. Click a block for a popover
+// to move it to a different day/tech or unschedule. End times are intentionally
+// not modeled (job length varies). schedule lives on the WO as {date,start};
+// tech is order.tech (kept in sync by setSchedule).
+const ITIN_START_MIN = 8 * 60;   // 8:00 AM
+const ITIN_END_MIN   = 18 * 60;  // 6:00 PM
+const ITIN_STEP_MIN  = 30;
+function itinSlots() {
+  const out = [];
+  for (let m = ITIN_START_MIN; m < ITIN_END_MIN; m += ITIN_STEP_MIN) {
+    out.push(String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'));
+  }
+  return out;
+}
+function itinFmtTime(hhmm) {
+  const [h, m] = String(hhmm || '').split(':').map(Number);
+  if (Number.isNaN(h)) return hhmm || '';
+  const ap = h < 12 ? 'AM' : 'PM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return h12 + ':' + String(m).padStart(2, '0') + ' ' + ap;
+}
+function itinTodayStr() {
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+function itinShiftDay(dateStr, delta) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(y, mo - 1, d + delta, 12);
+  const p = (n) => String(n).padStart(2, '0');
+  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+}
+function itinDayLabel(dateStr) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(y, mo - 1, d, 12);
+  return dt.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+}
+// MM/DD (American) from 'YYYY-MM-DD'.
+function itinDayMonth(dateStr) {
+  const [y, mo, d] = String(dateStr || '').split('-').map(Number);
+  if (!d) return '';
+  return String(mo).padStart(2, '0') + '/' + String(d).padStart(2, '0');
+}
+// "MM/DD h:mm AM" for a {date,start} schedule, or '' if unscheduled.
+function fmtSchedule(dateStr, start) {
+  if (!dateStr) return '';
+  return itinDayMonth(dateStr) + ' ' + itinFmtTime(start);
+}
+// Snap an arbitrary 'HH:MM' to the nearest valid timeline slot string.
+function itinSnapSlot(start) {
+  const all = itinSlots();
+  if (all.includes(start)) return start;
+  const [h, m] = String(start || '').split(':').map(Number);
+  if (Number.isNaN(h)) return all[0];
+  let mins = h * 60 + (m || 0);
+  mins = Math.max(ITIN_START_MIN, Math.min(ITIN_END_MIN - ITIN_STEP_MIN, mins));
+  const snapped = Math.round(mins / ITIN_STEP_MIN) * ITIN_STEP_MIN;
+  return String(Math.floor(snapped / 60)).padStart(2, '0') + ':' + String(snapped % 60).padStart(2, '0');
+}
+
+function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, onSetSchedule, onOpenWO }) {
+  const [tech, setTech] = React.useState(techs[0] || '');
+  const [date, setDate] = React.useState(itinTodayStr());
+  const [dragId, setDragId] = React.useState(null);
+  const [overSlot, setOverSlot] = React.useState(null);
+  const [popId, setPopId] = React.useState(null);
+  const [poolQuery, setPoolQuery] = React.useState('');
+  const [cityFilter, setCityFilter] = React.useState('');
+  const [highlightId, setHighlightId] = React.useState(null);
+  const [suggestFor, setSuggestFor] = React.useState(null); // scheduled WO id whose nearby list is open
+  const highlightRef = React.useRef(null);
+
+  React.useEffect(() => { if (techs.length && tech !== 'ALL' && !techs.includes(tech)) setTech(techs[0]); }, [techs, tech]);
+
+  // React to a focus request from the WO context menu (jump/add to schedule).
+  React.useEffect(() => {
+    if (!focus) return;
+    if (focus.tech && techs.includes(focus.tech)) setTech(focus.tech);
+    if (focus.date) setDate(focus.date);
+    if (focus.highlightId != null) setHighlightId(focus.highlightId);
+  }, [focus && focus.ts]);
+
+  // Scroll the highlighted card into view once it renders.
+  React.useEffect(() => {
+    if (highlightId != null && highlightRef.current) {
+      highlightRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [highlightId, date, tech]);
+
+  const slots = React.useMemo(() => itinSlots(), []);
+  const isAll = tech === 'ALL';
+  const colorOf = (o) => statusColor(o.status, statusColors);
+  // A WO in a phase flagged complete is technician-done and not schedulable.
+  const isComplete = (o) => {
+    const name = phaseForOrder(o, phases);
+    const p = (phases || []).find(x => x.name === name);
+    return !!(p && p.complete);
+  };
+  const cityOf = (o) => splitAddress(o).city || '';
+
+  // Schedulable universe = active, not technician-complete.
+  const schedulable = React.useMemo(() => activeOrders.filter(o => !isComplete(o)), [activeOrders, phases]);
+
+  // Scheduled blocks for this day (all techs when isAll), keyed by snapped slot.
+  // Uses activeOrders (NOT the complete-filtered pool) so a scheduled WO always
+  // shows on the timeline even if its status later moved to a complete phase.
+  const dayScheduled = React.useMemo(
+    () => activeOrders.filter(o => o.schedule && o.schedule.date === date && (isAll || o.tech === tech)),
+    [activeOrders, date, tech, isAll]
+  );
+  const scheduledBySlot = React.useMemo(() => {
+    const map = {};
+    for (const o of dayScheduled) {
+      const slot = itinSnapSlot(o.schedule.start);
+      (map[slot] = map[slot] || []).push(o);
+    }
+    return map;
+  }, [dayScheduled]);
+  const scheduledCount = dayScheduled.length;
+
+  // Status -> rank from workflow order (phases, in order), for status sorting.
+  const statusRank = React.useMemo(() => {
+    const m = {}; let i = 0;
+    (phases || []).forEach(p => (p.statuses || []).forEach(s => { if (!(s in m)) m[s] = i++; }));
+    return m;
+  }, [phases]);
+  const byWo = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
+  // Unscheduled pool (all unscheduled schedulable WOs), sorted by workflow status order.
+  const unscheduled = React.useMemo(
+    () => schedulable.filter(o => !o.schedule).sort((a, b) => {
+      const ra = statusRank[a.status] ?? Infinity, rb = statusRank[b.status] ?? Infinity;
+      if (ra !== rb) return ra - rb;
+      return byWo(a, b);
+    }),
+    [schedulable, statusRank]
+  );
+  const cityOptions = React.useMemo(() => {
+    const set = new Set();
+    unscheduled.forEach(o => { const c = cityOf(o); if (c) set.add(c); });
+    return Array.from(set).sort();
+  }, [unscheduled]);
+  const pool = React.useMemo(() => {
+    const q = poolQuery.trim().toLowerCase();
+    return unscheduled.filter(o => {
+      if (cityFilter && cityOf(o) !== cityFilter) return false;
+      if (!q) return true;
+      const { addr, city } = splitAddress(o);
+      return String(o.id).toLowerCase().includes(q)
+        || (addr || '').toLowerCase().includes(q)
+        || (city || '').toLowerCase().includes(q);
+    });
+  }, [unscheduled, poolQuery, cityFilter]);
+
+  const popOrder = popId != null ? activeOrders.find(o => o.id === popId) : null;
+  const nextFreeSlot = () => slots.find(s => !scheduledBySlot[s]) || slots[slots.length - 1];
+
+  const dropOnSlot = (slot) => {
+    setOverSlot(null);
+    const id = dragId;
+    setDragId(null);
+    if (id == null || isAll) return; // ALL is read-only overview: no target tech
+    onSetSchedule(id, { date, start: slot }, tech);
+  };
+
+  const woCard = (o, opts = {}) => {
+    const { addr, city } = splitAddress(o);
+    const isHi = o.id === highlightId;
+    const c = colorOf(o);
+    return (
+      <div
+        key={o.id}
+        ref={isHi ? highlightRef : undefined}
+        draggable
+        onDragStart={(e) => { setDragId(o.id); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', String(o.id)); } catch {} }}
+        onDragEnd={() => { setDragId(null); setOverSlot(null); }}
+        onClick={opts.onClick}
+        title={(o.status || 'Open') + (opts.title ? ' — ' + opts.title : '')}
+        style={{
+          border: '1px solid var(--border-1)', borderLeft: '4px solid ' + c,
+          borderRadius: 8, background: 'var(--bg-surface)', padding: '6px 8px',
+          cursor: opts.onClick ? 'pointer' : 'grab', fontSize: 12, opacity: dragId === o.id ? 0.4 : 1,
+          display: 'flex', flexDirection: 'column', gap: 2,
+          boxShadow: isHi ? '0 0 0 2px var(--accent)' : 'none',
+        }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
+          {o.emergency && <span style={{ color: 'var(--danger, #d9534f)', fontWeight: 700 }}>!</span>}
+          <TypeIcon kind={typeLetter(o.type)} />
+          {opts.tag && <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)' }}>{opts.tag}</span>}
+          {o.pm && <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontWeight: 600 }}>{String(o.pm).toUpperCase()}</span>}
+        </div>
+        <div style={{ color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {addr || '(no address)'}{city ? ', ' + city : ''}
+        </div>
+        {opts.footer}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ flexShrink: 0, padding: '14px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
+        <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+          Itinerary
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+          Drag work orders onto the timeline to schedule. Drag a block to change its time; click it to move days/tech or unschedule.
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+          <select value={tech} onChange={(e) => setTech(e.target.value)} style={{
+            padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+            background: 'var(--bg-surface)', color: 'var(--text-1)', fontSize: 13,
+          }}>
+            <option value="ALL">All techs (overview)</option>
+            {techs.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button onClick={() => setDate(itinShiftDay(date, -1))} style={navBtnStyle}>‹</button>
+            <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} style={{
+              padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+              background: 'var(--bg-surface)', color: 'var(--text-1)', fontSize: 13,
+            }} />
+            <button onClick={() => setDate(itinShiftDay(date, 1))} style={navBtnStyle}>›</button>
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--text-2)', marginLeft: 'auto' }}>
+            {itinDayLabel(date)} · {scheduledCount} job{scheduledCount === 1 ? '' : 's'}
+          </div>
+        </div>
+      </div>
+
+      {/* Body: pool + timeline */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+        {/* Unscheduled pool */}
+        <div style={{ width: 280, flexShrink: 0, borderRight: '1px solid var(--border-1)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div style={{ flexShrink: 0, padding: '10px 12px 6px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-3)' }}>Unscheduled · {pool.length}</div>
+            <input
+              value={poolQuery}
+              onChange={(e) => setPoolQuery(e.target.value)}
+              placeholder="Search WO #, address, city..."
+              style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+                background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, fontFamily: 'inherit' }}
+            />
+            <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} style={{
+              width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+              background: 'var(--bg-surface)', color: 'var(--text-1)', fontSize: 13,
+            }}>
+              <option value="">All cities</option>
+              {cityOptions.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div
+            onDragOver={(e) => { if (dragId != null) e.preventDefault(); }}
+            onDrop={() => { if (dragId != null) onSetSchedule(dragId, null); setDragId(null); setOverSlot(null); }}
+            style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 12px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {pool.length === 0
+              ? <div style={{ color: 'var(--text-3)', fontSize: 12, padding: '8px 2px' }}>No unscheduled work orders.</div>
+              : pool.map(o => woCard(o, { title: 'Drag onto a time slot to schedule' }))}
+          </div>
+        </div>
+
+        {/* Timeline */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '6px 0' }}>
+          {slots.map(slot => {
+            const blocks = scheduledBySlot[slot] || [];
+            const isOver = overSlot === slot && dragId != null;
+            return (
+              <div key={slot}
+                onDragOver={(e) => { if (dragId != null) { e.preventDefault(); setOverSlot(slot); } }}
+                onDragLeave={() => setOverSlot(s => s === slot ? null : s)}
+                onDrop={() => dropOnSlot(slot)}
+                style={{
+                  display: 'flex', alignItems: 'stretch', borderTop: '1px solid var(--border-1)',
+                  background: isOver ? 'var(--bg-row-sel)' : 'transparent', minHeight: 44,
+                }}>
+                <div style={{ width: 78, flexShrink: 0, padding: '6px 8px', fontSize: 11, color: 'var(--text-3)',
+                  textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                  {itinFmtTime(slot)}
+                </div>
+                <div style={{ flex: 1, padding: '4px 10px 4px 6px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {blocks.map(o => {
+                    const myCity = cityOf(o);
+                    const nearby = myCity ? unscheduled.filter(u => cityOf(u) === myCity) : [];
+                    return woCard(o, {
+                      onClick: () => setPopId(o.id),
+                      title: 'Click for options',
+                      tag: isAll ? (o.tech || '—') : null,
+                      footer: nearby.length > 0 && (
+                        <div
+                          onClick={(e) => { e.stopPropagation(); setSuggestFor(suggestFor === o.id ? null : o.id); }}
+                          title={'Unscheduled WOs in ' + myCity + ': ' + nearby.map(n => n.id).join(', ')}
+                          style={{ marginTop: 2, fontSize: 11, color: 'var(--accent)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          ⌖ {nearby.length} nearby in {myCity}
+                        </div>
+                      ),
+                    });
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ display: 'flex', borderTop: '1px solid var(--border-1)' }}>
+            <div style={{ width: 78, flexShrink: 0, padding: '6px 8px', fontSize: 11, color: 'var(--text-3)', textAlign: 'right' }}>
+              {itinFmtTime('18:00')}
+            </div>
+            <div style={{ flex: 1 }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Nearby-suggestions popover (same-city routing aid) */}
+      {suggestFor != null && (() => {
+        const anchor = activeOrders.find(o => o.id === suggestFor);
+        const aCity = anchor ? cityOf(anchor) : '';
+        const nearby = aCity ? unscheduled.filter(u => cityOf(u) === aCity) : [];
+        return (
+          <div onClick={() => setSuggestFor(null)} style={{
+            position: 'fixed', inset: 0, zIndex: 320, background: 'rgba(0,0,0,0.35)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <div onClick={(e) => e.stopPropagation()} style={{
+              width: 340, maxHeight: '70vh', overflowY: 'auto', background: 'var(--bg-surface)',
+              border: '1px solid var(--border-1)', borderRadius: 12, padding: 16,
+              display: 'flex', flexDirection: 'column', gap: 10,
+            }}>
+              {(() => {
+                const aTech = anchor ? anchor.tech : tech;
+                const occupied = new Set(dayScheduled.filter(x => x.tech === aTech).map(x => itinSnapSlot(x.schedule.start)));
+                const freeSlot = slots.find(s => !occupied.has(s)) || slots[slots.length - 1];
+                return (<>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>Nearby unscheduled — {aCity}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-3)' }}>Same city as {suggestFor}. Schedule one to {aTech || '—'} at the next open slot ({itinFmtTime(freeSlot)}).</div>
+                  {nearby.length === 0
+                    ? <div style={{ fontSize: 12, color: 'var(--text-3)' }}>None left.</div>
+                    : nearby.map(o => woCard(o, {
+                        footer: aTech ? (
+                          <button onClick={(e) => { e.stopPropagation(); onSetSchedule(o.id, { date, start: freeSlot }, aTech); setSuggestFor(null); }}
+                            style={{ ...navBtnStyle, marginTop: 4, alignSelf: 'flex-start' }}>Schedule next slot</button>
+                        ) : null,
+                      }))}
+                </>);
+              })()}
+              <button onClick={() => setSuggestFor(null)} style={{ ...navBtnStyle, alignSelf: 'flex-end' }}>Close</button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Block popover (centered card) */}
+      {popOrder && (
+        <div onClick={() => setPopId(null)} style={{
+          position: 'fixed', inset: 0, zIndex: 320, background: 'rgba(0,0,0,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: 320, background: 'var(--bg-surface)', border: '1px solid var(--border-1)',
+            borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 12,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>{popOrder.id}</div>
+            <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+              {(() => { const { addr, city } = splitAddress(popOrder); return (addr || '(no address)') + (city ? ', ' + city : ''); })()}
+            </div>
+            <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Day
+              <input type="date" value={popOrder.schedule ? popOrder.schedule.date : date}
+                onChange={(e) => { if (e.target.value) onSetSchedule(popOrder.id, { date: e.target.value, start: popOrder.schedule ? popOrder.schedule.start : slots[0] }, popOrder.tech); }}
+                style={{ display: 'block', marginTop: 4, width: '100%', padding: '6px 8px', borderRadius: 8,
+                  border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)' }} />
+            </label>
+            <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Start time
+              <select value={popOrder.schedule ? popOrder.schedule.start : slots[0]}
+                onChange={(e) => onSetSchedule(popOrder.id, { date: popOrder.schedule ? popOrder.schedule.date : date, start: e.target.value }, popOrder.tech)}
+                style={{ display: 'block', marginTop: 4, width: '100%', padding: '6px 8px', borderRadius: 8,
+                  border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)' }}>
+                {slots.map(s => <option key={s} value={s}>{itinFmtTime(s)}</option>)}
+              </select>
+            </label>
+            <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Technician
+              <select value={popOrder.tech || ''}
+                onChange={(e) => onSetSchedule(popOrder.id, popOrder.schedule || { date, start: slots[0] }, e.target.value)}
+                style={{ display: 'block', marginTop: 4, width: '100%', padding: '6px 8px', borderRadius: 8,
+                  border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)' }}>
+                {techs.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              {onOpenWO && <button onClick={() => { onOpenWO(popOrder.id); setPopId(null); }} style={navBtnStyle}>Open WO</button>}
+              <button onClick={() => { onSetSchedule(popOrder.id, null); setPopId(null); }}
+                style={{ ...navBtnStyle, color: 'var(--danger, #d9534f)' }}>Unschedule</button>
+              <button onClick={() => setPopId(null)} style={{ ...navBtnStyle, marginLeft: 'auto' }}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+const navBtnStyle = {
+  padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border-1)',
+  background: 'var(--bg-surface)', color: 'var(--text-1)', fontSize: 13, cursor: 'pointer',
+};
+
+// Scheduling form launched from the WO context menu. Assign a technician + a
+// timeframe (day + 30-min start). Prefills from any existing schedule.
+function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose }) {
+  const slots = React.useMemo(() => itinSlots(), []);
+  const [tech, setTech] = React.useState(order.tech || techs[0] || '');
+  const [date, setDate] = React.useState((order.schedule && order.schedule.date) || itinTodayStr());
+  const [start, setStart] = React.useState((order.schedule && order.schedule.start) || slots[0]);
+  const { addr, city } = splitAddress(order);
+  const fld = {
+    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 14,
+  };
+  const lbl = { fontSize: 12, color: 'var(--text-3)' };
+  return (
+    <Modal open onClose={onClose} title={'Schedule ' + order.id} width={420}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-2)' }}>{addr || '(no address)'}{city ? ', ' + city : ''}</div>
+        <label style={lbl}>Technician
+          <select value={tech} onChange={(e) => setTech(e.target.value)} style={fld}>
+            {!techs.includes(tech) && tech === '' && <option value="">(none)</option>}
+            {techs.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label style={lbl}>Day
+          <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} style={fld} />
+        </label>
+        <label style={lbl}>Start time
+          <select value={start} onChange={(e) => setStart(e.target.value)} style={fld}>
+            {slots.map(s => <option key={s} value={s}>{itinFmtTime(s)}</option>)}
+          </select>
+        </label>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          {order.schedule && <ActionBtn onClick={onUnschedule}>Unschedule</ActionBtn>}
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+          <ActionBtn primary onClick={() => onSubmit(tech, { date, start })}>Save</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Shown when sending a WO to invoice with no bid recorded. User may enter the
+// bid now, or skip and send anyway (enter it later in the invoice editor).
+function BidPromptModal({ order, onEnter, onSkip, onClose }) {
+  const [amount, setAmount] = React.useState('');
+  const { addr, city } = splitAddress(order);
+  const fld = {
+    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 14,
+  };
+  return (
+    <Modal open onClose={onClose} title={'No bid on ' + order.id} width={420}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
+          {addr || '(no address)'}{city ? ', ' + city : ''} has no bid amount. Enter it now or skip and add it later.
+        </div>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Bid amount
+          <input autoFocus value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="$0.00"
+            onKeyDown={(e) => { if (e.key === 'Enter' && amount.trim()) onEnter(amount.trim()); }} style={fld} />
+        </label>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+          <ActionBtn onClick={onSkip}>Skip & send</ActionBtn>
+          <ActionBtn primary disabled={!amount.trim()} onClick={() => amount.trim() && onEnter(amount.trim())}>Save bid & send</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function App() {
   const [selectedWO, setSelectedWO] = React.useState(null);
   const [recentWOs, setRecentWOs] = React.useState([]);
@@ -4811,6 +5362,13 @@ function App() {
   const [currentView, setCurrentView] = React.useState('active');
   // Slice 3: top-level module + launcher overlay + invoice-editor overlay.
   const [currentModule, setCurrentModule] = React.useState('work-orders');
+  // Itinerary focus request from the WO context menu (jump/add to schedule).
+  // { tech, date, highlightId, ts } — ts forces the module to re-apply.
+  const [itinFocus, setItinFocus] = React.useState(null);
+  // WO id whose scheduling form (assign tech + timeframe) is open, or null.
+  const [scheduleTarget, setScheduleTarget] = React.useState(null);
+  // WO id awaiting a bid-entry decision before sending to invoice, or null.
+  const [bidPrompt, setBidPrompt] = React.useState(null);
   const [launcherOpen, setLauncherOpen] = React.useState(false);
   const [invoiceEditorWO, setInvoiceEditorWO] = React.useState(null);
   const [editorLibrary, setEditorLibrary] = React.useState({ General: [], AMH: [] });
@@ -5211,20 +5769,23 @@ function App() {
   );
   const detailData = toDetailData(selectedRecord);
 
-  const sendToInvoice = React.useCallback(async (id) => {
-    const o = orders.find(x => x.id === id);
-    if (!o) return;
-    if (!o.bidAmount || !String(o.bidAmount).trim()) {
-      toast('Bid amount is required before invoicing', 'err');
-      return;
-    }
+  const doSendToInvoice = React.useCallback((id) => {
     updateOrder(id, cur => ({
       ...cur,
       tab: 'sent',
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'sent to billing queue', detail: '' }],
     }));
-  }, [orders, updateOrder, toast]);
+  }, [updateOrder]);
+
+  // Sending with no bid no longer hard-blocks: prompt to enter a bid now or
+  // skip and enter it later. (BidPromptModal handles the choice.)
+  const sendToInvoice = React.useCallback((id) => {
+    const o = orders.find(x => x.id === id);
+    if (!o) return;
+    if (!o.bidAmount || !String(o.bidAmount).trim()) { setBidPrompt(id); return; }
+    doSendToInvoice(id);
+  }, [orders, doSendToInvoice]);
 
   const markInvoiced = React.useCallback(async (id) => {
     const o = orders.find(x => x.id === id);
@@ -5282,6 +5843,24 @@ function App() {
       setInvoiceEditorWO(null);
     }
   }, [invoiceEditorWO, orders]);
+
+  // Itinerary module. schedule = { date:'YYYY-MM-DD', start:'HH:MM' } stored on
+  // the WO. Pass schedule=null to unschedule. tech (when given) is synced into
+  // order.tech so the list view + itinerary stay one source of truth.
+  const setSchedule = React.useCallback((id, schedule, tech) => {
+    updateOrder(id, o => {
+      const next = { ...o };
+      if (schedule === null) delete next.schedule;
+      else next.schedule = schedule;
+      if (tech) next.tech = tech;
+      const detail = schedule
+        ? (schedule.date + ' ' + schedule.start + ((tech || o.tech) ? ' · ' + (tech || o.tech) : ''))
+        : '';
+      next.history = [...(Array.isArray(o.history) ? o.history : []),
+        { ts: Date.now(), action: schedule === null ? 'unscheduled' : 'scheduled', detail }];
+      return next;
+    });
+  }, [updateOrder]);
 
   // Sidebar WO-view selection always returns to the Work Orders module.
   const selectView = React.useCallback((v) => {
@@ -5497,6 +6076,41 @@ function App() {
     });
   }, [updateOrder]);
 
+  // In-app portal capture: drives a BrowserWindow (main process) through the
+  // WO's tabs and merges the scraped fields into THIS record. Re-capture
+  // updates in place (updateOrder), never spawning a duplicate. Returns a
+  // promise so callers can show progress. Shared by context menu + detail pane.
+  const captureOrder = React.useCallback((id) => {
+    const src = orders.find(o => o.id === id);
+    if (!src) return Promise.resolve();
+    const pm = String(src.pm || '').toUpperCase();
+    if (pm !== 'AMH' && pm !== 'MSR') { toast('Capture supports AMH and MSR work orders only'); return Promise.resolve(); }
+    if (!window.scraper || !window.scraper.captureWO) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
+    toast('Capturing ' + id + ' from ' + pm + '…');
+    return window.scraper.captureWO(src).then(res => {
+      if (!res || !res.ok) { toast('Capture failed: ' + ((res && res.error) || 'unknown error')); return; }
+      const s = res.wo || {};
+      updateOrder(id, cur => {
+        const patch = { ...cur };
+        const set = (k, v) => { if (v !== undefined && v !== null && v !== '') patch[k] = v; };
+        // Status + priority are left to the user's workflow — re-capture must
+        // not drag a manually-advanced WO back to the portal's status.
+        set('address', s.address);
+        set('city', s.city);
+        if (s.phone) patch.phone = formatPhone(s.phone);
+        set('type', s.type);
+        set('propertyId', s.propertyId);
+        set('portalLink', s.portalLink);
+        set('bidAmount', s.bidAmount);
+        if (Array.isArray(s.bidItems) && s.bidItems.length) patch.bidItems = s.bidItems;
+        if (s.notes) patch.notes = s.notes;
+        patch.history = [...(cur.history || []), { ts: Date.now(), action: 'captured from portal', detail: s.woId ? 'WO# ' + s.woId : '' }];
+        return patch;
+      });
+      toast('Captured ' + id);
+    }).catch(e => toast('Capture error: ' + e.message));
+  }, [orders, updateOrder, toast]);
+
   // Explicit-id action handler shared by context menu and detail pane.
   const woAction = React.useCallback((id, kind, payload) => {
     if (!id) return;
@@ -5563,9 +6177,23 @@ function App() {
           history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
         }));
         break;
+      case 'capture':
+        captureOrder(id);
+        break;
+      case 'jumpToSchedule': {
+        const o = orders.find(x => x.id === id);
+        if (o && o.schedule) {
+          setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now() });
+          setCurrentModule('itinerary');
+        } else { toast('Not scheduled yet'); }
+        break;
+      }
+      case 'openScheduleForm':
+        setScheduleTarget(id);
+        break;
       default: break;
     }
-  }, [updateOrder, toast]);
+  }, [updateOrder, captureOrder, toast, orders]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -5618,9 +6246,11 @@ function App() {
         if (newId) { setSelectedWO(newId); pushRecent(newId); toast('Duplicated → ' + newId); }
         break;
       }
+      case 'capture':
+        return captureOrder(id);
       default: break;
     }
-  }, [selectedWO, woAction, orders, updateOrder, deleteOrderHard, addOrder, toast]);
+  }, [selectedWO, woAction, captureOrder, orders, updateOrder, deleteOrderHard, addOrder, toast]);
 
   const themeVars = theme === 'light' ? TT_LIGHT : TT_DARK;
   // Apply theme tokens at :root so Modal/Toast (rendered outside the themed container)
@@ -5730,6 +6360,16 @@ function App() {
               invoicedOrders={invoicedOrders}
               onOpenInvoice={openInvoiceEditor}
             />
+          ) : currentModule === 'itinerary' ? (
+            <ItineraryModule
+              activeOrders={activeOrders}
+              techs={techs}
+              phases={phases}
+              statusColors={statusColors}
+              focus={itinFocus}
+              onSetSchedule={setSchedule}
+              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); setSelectedWO(id); pushRecent(id); }}
+            />
           ) : (
           <React.Fragment>
           <ListPane
@@ -5808,6 +6448,36 @@ function App() {
         {launcherOpen && (
           <ModuleLauncher current={currentModule} onPick={pickModule} onClose={() => setLauncherOpen(false)} />
         )}
+        {scheduleTarget != null && (() => {
+          const o = orders.find(x => x.id === scheduleTarget);
+          if (!o) return null;
+          return (
+            <ScheduleModal
+              order={o}
+              techs={techs}
+              onSubmit={(tech, sched) => { setSchedule(scheduleTarget, sched, tech); setScheduleTarget(null); toast('Scheduled ' + scheduleTarget); }}
+              onUnschedule={() => { setSchedule(scheduleTarget, null); setScheduleTarget(null); toast('Unscheduled ' + scheduleTarget); }}
+              onClose={() => setScheduleTarget(null)}
+            />
+          );
+        })()}
+        {bidPrompt != null && (() => {
+          const o = orders.find(x => x.id === bidPrompt);
+          if (!o) return null;
+          return (
+            <BidPromptModal
+              order={o}
+              onEnter={(amount) => {
+                updateOrder(bidPrompt, cur => ({ ...cur, bidAmount: amount }));
+                doSendToInvoice(bidPrompt);
+                setBidPrompt(null);
+                toast('Bid saved · sent to invoice');
+              }}
+              onSkip={() => { doSendToInvoice(bidPrompt); setBidPrompt(null); toast('Sent to invoice (no bid)'); }}
+              onClose={() => setBidPrompt(null)}
+            />
+          );
+        })()}
         {invoiceEditorWO != null && (() => {
           const wo = orders.find(o => o.id === invoiceEditorWO);
           if (!wo) return null;
