@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('electronExport', {
   saveCsv: (content) => ipcRenderer.invoke('export-csv', content)
 });
 
+// change11: explicit one-click backup of wo-data.json.
+contextBridge.exposeInMainWorld('backup', {
+  saveNow: () => ipcRenderer.invoke('backup-data-now'),
+  openFolder: () => ipcRenderer.invoke('open-backups-folder'),
+});
+
 // Auto-updater bridge — renderer listens for update events
 contextBridge.exposeInMainWorld('updater', {
   onStatus: (cb) => ipcRenderer.on('update-status', (_e, data) => cb(data)),
@@ -63,7 +69,7 @@ contextBridge.exposeInMainWorld('creds', {
 
 // Scraper bridge — trigger in-app portal scraping
 contextBridge.exposeInMainWorld('scraper', {
-  scrapeWO: (woData) => ipcRenderer.invoke('scrape-wo-bids', woData),
+  captureWO: (woData) => ipcRenderer.invoke('capture-wo', woData),
 });
 
 // Tray bridge -- main process pushes click events; renderer pushes state.

@@ -3,7 +3,7 @@ const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
 const { autoUpdater } = require('electron-updater');
-const { scrapeWO }   = require('./scraper');
+const { captureWO }  = require('./scraper');
 const libraryIO      = require('./library_io');
 
 // Single-instance guard. A second launch focuses the existing window
@@ -400,6 +400,37 @@ ipcMain.handle('export-csv', async (_e, csv) => {
   return true;
 });
 
+// change11: explicit on-demand backup of the live wo-data.json file. Distinct
+// from the auto-rotated copies in backups/ (which keep the last 10 writes).
+// User picks a path; the live file is copied there. No transformation.
+ipcMain.handle('backup-data-now', async () => {
+  try {
+    if (!fs.existsSync(dataPath)) return { ok: false, error: 'No data file found yet' };
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Back up work order data',
+      defaultPath: 'wo-data-backup-' + stamp + '.json',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    fs.copyFileSync(dataPath, filePath);
+    return { ok: true, path: filePath };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
+
+// change11: open the auto-backup folder in the OS file browser.
+ipcMain.handle('open-backups-folder', async () => {
+  try {
+    fs.mkdirSync(backupDir, { recursive: true });
+    shell.openPath(backupDir);
+    return { ok: true, path: backupDir };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
+
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.
@@ -492,8 +523,8 @@ ipcMain.handle('creds-clear', (_e, pm) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// ── IPC: Scrape WO bids ───────────────────────────────────────────────────────
-ipcMain.handle('scrape-wo-bids', async (_e, woData) => {
+// ── IPC: Capture WO (full in-app BrowserWindow scrape) ────────────────────────
+ipcMain.handle('capture-wo', async (_e, woData) => {
   async function getCredential(pm) {
     try {
       if (!safeStorage.isEncryptionAvailable()) return null;
@@ -504,5 +535,5 @@ ipcMain.handle('scrape-wo-bids', async (_e, woData) => {
       return JSON.parse(payload);
     } catch (e) { return null; }
   }
-  return scrapeWO(woData, getCredential);
+  return captureWO(woData, getCredential);
 });
