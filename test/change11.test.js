@@ -85,12 +85,15 @@ function itinTodayStr() {
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
-const COMPLETE_STATUSES = new Set(['Pending-Complete', 'Closed']);
-const isCompletionStatus = (s) => {
+// v4.0.1: narrowed heuristic. Was "any 'job complete' substring" which
+// mis-caught "Job Complete - Enter Bid" (still active workflow). Now requires
+// BOTH "bid submitted" AND "complete" — i.e. tech-done AND bid is in.
+function isCompletionStatus(s) {
   if (!s) return false;
+  if (s === 'Pending-Complete' || s === 'Closed') return true;
   const sl = String(s).toLowerCase();
-  return COMPLETE_STATUSES.has(s) || sl.includes('job complete');
-};
+  return sl.includes('bid submitted') && sl.includes('complete');
+}
 
 function migrateSettingsForChange11(stored) {
   const out = {};
@@ -464,8 +467,8 @@ test('user data: status "Bid Submitted - Job Complete" detected as completion vi
   assert.strictEqual(isCompletionStatus('Bid Submitted - Job Complete'), true);
 });
 
-test('user data: status "Job Complete - Enter Bid" detected as completion', () => {
-  assert.strictEqual(isCompletionStatus('Job Complete - Enter Bid'), true);
+test('v4.0.1: status "Job Complete - Enter Bid" NOT completion (still active workflow)', () => {
+  assert.strictEqual(isCompletionStatus('Job Complete - Enter Bid'), false);
 });
 
 test('user data: status "Parts Pending" NOT a completion', () => {

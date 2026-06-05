@@ -209,7 +209,7 @@ function densityFor(value) {
 
 const MIGRATION_VERSION = '3.0';
 // Display-only app version (keep in sync with package.json on release).
-const APP_VERSION = '4.0.0';
+const APP_VERSION = '4.0.1';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.
@@ -232,6 +232,21 @@ const DEFAULT_STATUS_COLORS = {
 // or delete would break the tab-flip + restore logic, so the StatusesEditor
 // blocks both actions for them. Color is still editable.
 const LOCKED_STATUSES = new Set(['Cancelled', 'Complete - Pending Approval']);
+
+// change11 v4.0.1: heuristic for "tech-done, bid submitted" — fires the
+// auto-flip from Active → Complete. Earlier versions matched any string
+// containing "job complete", which incorrectly caught "Job Complete - Enter
+// Bid" (still active workflow — bid not yet submitted). New rule:
+//   - exact 'Pending-Complete' or 'Closed' (legacy defaults), OR
+//   - status contains BOTH "bid submitted" AND "complete" — i.e. bid is in
+//     AND tech work is done. Catches "Bid Submitted - Complete" and
+//     "Bid Submitted - Job Complete". Excludes "Job Complete - Enter Bid".
+function isCompletionStatusName(s) {
+  if (!s) return false;
+  if (s === 'Pending-Complete' || s === 'Closed') return true;
+  const sl = String(s).toLowerCase();
+  return sl.includes('bid submitted') && sl.includes('complete');
+}
 
 // Custom-theme picker scope. Settings → Appearance exposes color pickers for
 // these CSS variables only. Phase colors live in Workflow; borders / age
@@ -1067,8 +1082,7 @@ function useWorkOrders() {
     // change11: auto-flip new WOs that already carry a completion status into
     // tab='complete' with hardcoded Pending Approval. Mirrors the import path.
     const recStatus = record.status || 'Open';
-    const recSl = String(recStatus).toLowerCase();
-    const recIsCompletion = recStatus === 'Pending-Complete' || recStatus === 'Closed' || recSl.includes('job complete');
+    const recIsCompletion = isCompletionStatusName(recStatus);
     const o = {
       ...record,
       id,
@@ -1282,8 +1296,7 @@ function useWorkOrders() {
         // Complete tab with status hardcoded and prevStatus saved — matches
         // the auto-flip behavior on manual status changes.
         const incStatus = inc.status || 'Open';
-        const incSl = String(incStatus).toLowerCase();
-        const importIsCompletion = incStatus === 'Pending-Complete' || incStatus === 'Closed' || incSl.includes('job complete');
+        const importIsCompletion = isCompletionStatusName(incStatus);
         const wo = {
           id,
           pm:            inc.pm || '',
@@ -1792,7 +1805,10 @@ function WOContextMenu({
 
   // Build submenu item list lazily.
   const buildSub = (key) => {
-    if (key === 'status') return (statuses || DEFAULT_STATUSES).map(s => ({
+    // v4.0.1: hide LOCKED_STATUSES from the Set status submenu — they are
+    // managed automatically by Mark Complete / Send to Trash, so exposing
+    // them as a manual choice is misleading.
+    if (key === 'status') return (statuses || DEFAULT_STATUSES).filter(s => !LOCKED_STATUSES.has(s)).map(s => ({
       label: s, onClick: () => {
         if (bulk) onBulkSetStatus && onBulkSetStatus(s);
         else onWoAction && onWoAction(woId, 'setStatus', s);
@@ -2952,7 +2968,7 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
             </>)}
           </>) : (<>
             <MenuCaption>Set status</MenuCaption>
-            {(statuses || DEFAULT_STATUSES).map(s => (
+            {(statuses || DEFAULT_STATUSES).filter(s => !LOCKED_STATUSES.has(s)).map(s => (
               <MenuItem key={s} onClick={act('setStatus', s)}>{s}</MenuItem>
             ))}
             <MenuDivider />
@@ -3099,7 +3115,7 @@ function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, onAddNote
                     padding: '4px 0', zIndex: 60,
                   }}>
                     <MenuCaption>Set status</MenuCaption>
-                    {(statuses || DEFAULT_STATUSES).map(s => (
+                    {(statuses || DEFAULT_STATUSES).filter(s => !LOCKED_STATUSES.has(s)).map(s => (
                       <MenuItem key={s} onClick={(e) => {
                         e.stopPropagation();
                         setStatusMenuOpen(false);
@@ -8652,7 +8668,7 @@ function App() {
   //  for any older datasets that DO have them.
   React.useEffect(() => {
     if (loading || !settings) return;
-    if (settings.change11Reconciled_v5 === '1') return;
+    if (settings.change11Reconciled_v6 === '1') return;
     const storedPhases = (data && Array.isArray(data.phases)) ? data.phases : DEFAULT_PHASES;
     const LEGACY_COMPLETE_IDS = new Set(['wrap', 'done', 'billing']);
     const completePhaseNames = new Set();
@@ -8661,19 +8677,15 @@ function App() {
       if (p.complete === true) completePhaseNames.add(p.name);
       if (p.id && LEGACY_COMPLETE_IDS.has(p.id)) completePhaseNames.add(p.name);
     }
-    const COMPLETE_STATUSES = new Set(['Pending-Complete', 'Closed']);
-    // Status name heuristic: any status whose string contains "job complete"
-    // (case-insensitive) signals tech-done. Catches "Job Complete - Enter Bid",
-    // "Bid Submitted - Job Complete", and similar user-customized variants.
-    const isCompletionStatus = (s) => {
-      if (!s) return false;
-      const sl = String(s).toLowerCase();
-      return COMPLETE_STATUSES.has(s) || sl.includes('job complete');
-    };
+    // v4.0.1: uses central narrower helper (bid submitted + complete, not
+    // just "job complete"). Earlier reconciler version mis-flipped statuses
+    // like "Job Complete - Enter Bid" that still belong on Active.
+    const isCompletionStatus = isCompletionStatusName;
     let flipped = 0;
     let promotedFromInvoiced = 0;
     let hardcodedComplete = 0;
     let hardcodedCancelled = 0;
+    let revertedFromComplete = 0;
     const nextOrders = (orders || []).map(o => {
       const t = (o.tab || 'active');
       // Pass 0: deleted/trash WOs — ensure status='Cancelled' AND no lingering
@@ -8707,8 +8719,38 @@ function App() {
           { ts: Date.now(), action: 'auto-flipped to Sent (change11 v4)', detail: 'was tab=' + t }];
         return next;
       }
-      // Pass 2: already on Complete tab but status not hardcoded yet — fix it.
+      // Pass 2: Complete tab handling.
+      //
+      // v6 narrowed isCompletionStatusName so "Job Complete - Enter Bid" no
+      // longer triggers the auto-flip. Earlier passes mis-flipped WOs with
+      // that status (and similar). Detect + revert here:
+      //   - tab='complete' AND prevStatus exists
+      //   - prevStatus is NOT a completion status under the new rule
+      //   - history shows the most recent complete-related action was an
+      //     auto-flip (not a user-driven 'marked complete')
+      // If all true, revert to active + restore prevStatus.
+      //
+      // Otherwise: fix any WO on Complete whose status isn't hardcoded.
       if (t === 'complete') {
+        const hist = Array.isArray(o.history) ? o.history : [];
+        let lastAutoIdx = -1, lastManualIdx = -1;
+        for (let i = 0; i < hist.length; i++) {
+          const a = String(hist[i].action || '').toLowerCase();
+          if (a.includes('auto-flipped to complete')) lastAutoIdx = i;
+          else if (a.includes('marked complete')) lastManualIdx = i;
+        }
+        const wasAutoFlipped = lastAutoIdx > lastManualIdx;
+        if (o.prevStatus && wasAutoFlipped && !isCompletionStatusName(o.prevStatus)) {
+          revertedFromComplete++;
+          const next = {
+            ...o, tab: 'active',
+            status: o.prevStatus,
+          };
+          delete next.prevStatus;
+          next.history = [...hist,
+            { ts: Date.now(), action: 'reconciled complete (change11 v6)', detail: 'reverted auto-flip; status: Complete - Pending Approval → ' + o.prevStatus }];
+          return next;
+        }
         if (o.status !== 'Complete - Pending Approval') {
           hardcodedComplete++;
           return {
@@ -8742,7 +8784,7 @@ function App() {
     });
     // Pass 4: clear expired schedules in the SAME write so we never race with
     // the standalone auto-unschedule effect. The standalone effect is gated on
-    // change11Reconciled_v5 being set, so it stays out of the way until this
+    // change11Reconciled_v6 being set, so it stays out of the way until this
     // pass completes.
     const today = itinTodayStr();
     let expiredCleared = 0;
@@ -8761,17 +8803,18 @@ function App() {
     const phasesChanged   = JSON.stringify(patch.phases)   !== JSON.stringify(storedPhases);
     const statusesChanged = JSON.stringify(patch.statuses) !== JSON.stringify((data && data.statuses) || []);
     const colorsChanged   = patch.statusColors && JSON.stringify(patch.statusColors) !== JSON.stringify((data && data.statusColors) || {});
-    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (expiredCleared > 0);
+    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (expiredCleared > 0) || (revertedFromComplete > 0);
     const wrote = {};
     if (touched) wrote.orders = finalOrders;
     if (phasesChanged) wrote.phases = patch.phases;
     if (statusesChanged) wrote.statuses = patch.statuses;
     if (colorsChanged) wrote.statusColors = patch.statusColors;
-    wrote.settings = { ...settings, change11Reconciled_v5: '1' };
+    wrote.settings = { ...settings, change11Reconciled_v6: '1' };
     updateData(wrote);
     if (toast && touched) {
       const parts = [];
       if (flipped) parts.push(flipped + ' moved to Complete');
+      if (revertedFromComplete) parts.push(revertedFromComplete + ' restored to Active (narrower completion rule)');
       if (promotedFromInvoiced) parts.push(promotedFromInvoiced + ' moved to Sent');
       if (hardcodedComplete) parts.push(hardcodedComplete + ' Complete status set');
       if (hardcodedCancelled) parts.push(hardcodedCancelled + ' Cancelled status set');
@@ -8788,7 +8831,7 @@ function App() {
   // Idempotent: writes only when something was cleared, so it terminates.
   React.useEffect(() => {
     if (loading || !Array.isArray(orders)) return;
-    if (!(settings && settings.change11Reconciled_v5 === '1')) return;
+    if (!(settings && settings.change11Reconciled_v6 === '1')) return;
     const today = itinTodayStr();
     let cleared = 0;
     const next = orders.map(o => {
@@ -8807,7 +8850,7 @@ function App() {
       if (toast) toast('Cleared ' + cleared + ' expired schedule' + (cleared === 1 ? '' : 's'));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, orders, settings && settings.change11Reconciled_v5]);
+  }, [loading, orders, settings && settings.change11Reconciled_v6]);
 
   const viewSorts = (settings && settings.viewSorts) || {};
   const currentSort = viewSorts[currentView] || { key: 'created', dir: 'desc' };
@@ -9366,8 +9409,7 @@ function App() {
   const bulkSetStatus = React.useCallback((status) => {
     const ts = Date.now();
     const ids = selectedIds;
-    const sl = String(status || '').toLowerCase();
-    const isCompletion = status === 'Pending-Complete' || status === 'Closed' || sl.includes('job complete');
+    const isCompletion = isCompletionStatusName(status);
     batchUpdate(
       o => ids.has(o.id),
       cur => {
@@ -9925,8 +9967,7 @@ function App() {
         // status into prevStatus and HARDCODE status to 'Complete - Pending
         // Approval' so the Complete tab reads uniformly. Reopen restores it.
         updateOrder(id, cur => {
-          const sl = String(payload || '').toLowerCase();
-          const isCompletion = payload === 'Pending-Complete' || payload === 'Closed' || sl.includes('job complete');
+          const isCompletion = isCompletionStatusName(payload);
           if ((cur.tab || 'active') === 'active' && isCompletion) {
             const next = {
               ...cur,
