@@ -209,7 +209,7 @@ function densityFor(value) {
 
 const MIGRATION_VERSION = '3.0';
 // Display-only app version (keep in sync with package.json on release).
-const APP_VERSION = '4.0.1';
+const APP_VERSION = '4.0.2';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.
@@ -232,6 +232,24 @@ const DEFAULT_STATUS_COLORS = {
 // or delete would break the tab-flip + restore logic, so the StatusesEditor
 // blocks both actions for them. Color is still editable.
 const LOCKED_STATUSES = new Set(['Cancelled', 'Complete - Pending Approval']);
+
+// Slice 4 (#9): system tags bind a BEHAVIOR to a user-named status, stored in
+// settings.statusTags = { [statusName]: tag }. The handler is hardcoded; which
+// status triggers it is user-configurable (Settings > Workflow > Manage
+// statuses). Only `schedule` is imperative (opens the Schedule modal on a
+// single-WO status change); the rest are pure render rules (map outline / map
+// presence / itinerary filtering) read live from the WO's current status.
+//   schedule -> open Schedule modal when set on one WO
+//   onsite   -> map marker outline = status color, wins over the overdue border
+//   visited  -> drop the WO off the Itinerary day list (schedule data kept)
+//   offmap   -> hide the map marker (field work done, bid entry only)
+const SYSTEM_TAGS = ['schedule', 'onsite', 'visited', 'offmap'];
+const SYSTEM_TAG_LABELS = {
+  schedule: 'Schedule (open modal)',
+  onsite:   'On site (map highlight)',
+  visited:  'Visited (clear itinerary)',
+  offmap:   'Off map (hide marker)',
+};
 
 // change11 v4.0.1: heuristic for "tech-done, bid submitted" — fires the
 // auto-flip from Active → Complete. Earlier versions matched any string
@@ -365,6 +383,16 @@ function TypeIcon({ kind }) {
 }
 
 function FlagGlyph({ kind }) {
+  // Slice 4 (#9): returnPending (Option A flag) renders a distinct return-arrow
+  // badge — "visited, bid not entered; needs a return before re-booking".
+  if (kind === 'returnPending') {
+    return (
+      <span title="Return - bid not entered" style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 13, height: 14, flexShrink: 0, color: '#f59e0b', fontSize: 13, fontWeight: 700, lineHeight: 1,
+      }}>↩</span>
+    );
+  }
   const color = kind === 'emergency' ? 'var(--flag-emergency)' : 'var(--flag-warranty)';
   return (
     <span title={kind === 'emergency' ? 'Emergency' : 'Warranty'} style={{
@@ -431,9 +459,9 @@ function FilterDropdown({ label, value, options, onChange }) {
     if (!open) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
-    setTimeout(() => document.addEventListener('click', onDoc), 0);
+    const t = setTimeout(() => document.addEventListener('click', onDoc), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [open]);
   const active = !!value;
   return (
@@ -485,9 +513,9 @@ function SortDropdown({ sort, onChange }) {
     if (!open) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setOpen(false); };
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
-    setTimeout(() => document.addEventListener('click', onDoc), 0);
+    const t = setTimeout(() => document.addEventListener('click', onDoc), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [open]);
   const cleared = !sort.key;
   const label = cleared ? 'Phase order' : (SORT_DEFS.find(s => s.key === sort.key) || SORT_DEFS[0]).label;
@@ -702,6 +730,7 @@ function toDisplayRow(o) {
   const flags = [];
   if (o.emergency) flags.push('emergency');
   if (o.warranty)  flags.push('warranty');
+  if (o.returnPending) flags.push('returnPending');
   const ageDays = ageDaysFor(o);
   return {
     wo: o.id,
@@ -862,6 +891,7 @@ function toDetailData(o) {
   const flags = [];
   if (o.emergency) flags.push('emergency');
   if (o.warranty)  flags.push('warranty');
+  if (o.returnPending) flags.push('returnPending');
   const tab = o.tab || 'active';
   let nextAction = null;
   if (!o.deleted) {
@@ -915,6 +945,20 @@ function toDetailData(o) {
 
 // Defaults match the seven categories listed in Settings → Alerts.
 // These become persisted/configurable in a later pass.
+// Slice 2 (#3): overdue-schedule indicator. A scheduled WO whose start time is
+// more than thresholdMinutes in the past gets its schedule text and map marker
+// border recolored. OVERDUE_CFG is a render-time snapshot assigned by App each
+// render (no React.memo anywhere, so every consumer re-renders on settings
+// change); the Maps marker effect additionally takes overdueCfg/overdueTick as
+// props because markers are built inside a useEffect, not during render.
+const DEFAULT_OVERDUE_CFG = { thresholdMinutes: 60, textColor: '#ef4444', borderColor: '#ef4444' };
+let OVERDUE_CFG = DEFAULT_OVERDUE_CFG;
+function isOverdueSched(date, start) {
+  if (!date) return false;
+  const t = new Date(date + 'T' + (start || '00:00') + ':00').getTime();
+  return isFinite(t) && Date.now() - t > OVERDUE_CFG.thresholdMinutes * 60000;
+}
+
 const DEFAULT_ALERT_THRESHOLDS = {
   emergencyUnscheduled:        1,
   stale:                       14,
@@ -1458,6 +1502,48 @@ function NamePromptModal({ state, onClose }) {
   );
 }
 
+// App-wide inline rename field. Fixes the chronic "uneditable field" bug: a
+// conditionally-rendered input could receive a spurious blur right after mount
+// (React-18 focus timing), which fired onBlur -> commit -> close before the user
+// typed a character, so the field looked uneditable. Owning the value locally
+// keeps the cursor stable across parent re-renders; we focus+select on mount and
+// SWALLOW a blur that lands on nothing within the mount race window (refocus
+// instead of closing). Commit on Enter or a genuine blur; cancel on Escape.
+// Used by every inline editor (phases, statuses, PMs, types, techs, ...).
+function InlineEdit({ value, onCommit, onCancel, style, title }) {
+  const ref = React.useRef(null);
+  const mountedAt = React.useRef(0);
+  const done = React.useRef(false);
+  const [v, setV] = React.useState(value == null ? '' : String(value));
+  React.useEffect(() => {
+    mountedAt.current = Date.now();
+    const el = ref.current;
+    if (el) { el.focus(); el.select(); }
+  }, []);
+  const commit = () => { if (done.current) return; done.current = true; onCommit(v); };
+  const cancel = () => { if (done.current) return; done.current = true; (onCancel || (() => onCommit(value)))(); };
+  return (
+    <input
+      ref={ref}
+      value={v}
+      title={title}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={(e) => {
+        if (!e.relatedTarget && Date.now() - mountedAt.current < 250) {
+          if (ref.current) ref.current.focus();
+          return;
+        }
+        commit();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+      }}
+      style={style}
+    />
+  );
+}
+
 const fieldInputStyle = {
   width: '100%',
   padding: '7px 9px',
@@ -1501,6 +1587,7 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
     bidAmount:    initial?.bidAmount || '',
     emergency:    !!initial?.emergency,
     warranty:     !!initial?.warranty,
+    returnPending: !!initial?.returnPending,
   }));
 
   const set = (k) => (e) => {
@@ -1650,6 +1737,10 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
             <label style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}>
               <input type="checkbox" checked={form.warranty} onChange={set('warranty')} />
               Warranty
+            </label>
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer' }} title="Visited, bid not entered; needs a return before re-booking">
+              <input type="checkbox" checked={form.returnPending} onChange={set('returnPending')} />
+              Return pending
             </label>
           </div>
         </FormField>
@@ -2043,10 +2134,10 @@ function WOContextMenu({
 // (HeaderChips). Sidebar now hosts only the LIST-style elements that need
 // persistent vertical space: Saved views (presets) and Inboxes. Rendered only
 // on the Work Orders module; non-WO modules collapse the column to 0 (see App).
-function Sidebar({ activeView, onSelectView, presets, inboxes, onRenamePreset, onDeletePreset, onRenameInbox, onDeleteInbox, onAddInbox, onOpenLauncher }) {
-  const [modsHover, setModsHover] = React.useState(false);
+function Sidebar({ activeView, onSelectView, presets, inboxes, onRenamePreset, onDeletePreset, onRenameInbox, onDeleteInbox, onAddInbox }) {
   return (
     <aside style={{
+      width: 200, flexShrink: 0, boxSizing: 'border-box',
       borderRight: '1px solid var(--border-1)',
       background: 'var(--bg-surface)',
       padding: '12px 12px',
@@ -2102,34 +2193,92 @@ function Sidebar({ activeView, onSelectView, presets, inboxes, onRenamePreset, o
           No inboxes. Click + to create one.
         </div>
       )}
-      <div style={{ flex: 1, minHeight: 12 }} />
-      {onOpenLauncher && (
-        <button
-          onClick={onOpenLauncher}
-          onMouseEnter={() => setModsHover(true)}
-          onMouseLeave={() => setModsHover(false)}
-          title="Open module launcher"
-          style={{
-            flexShrink: 0,
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '10px 14px',
-            border: '1.5px solid var(--accent)',
-            borderRadius: 8,
-            background: modsHover
-              ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
-              : 'color-mix(in srgb, var(--accent) 12%, transparent)',
-            color: 'var(--text-1)',
-            fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
-            cursor: 'pointer',
-            transition: 'background 120ms ease',
-          }}
-        >
-          <span aria-hidden="true" style={{ fontSize: 18, lineHeight: 1, color: 'var(--accent)' }}>{'⊞'}</span>
-          <span>Modules</span>
-          <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontSize: 12, fontWeight: 400 }}>Launcher</span>
-        </button>
-      )}
+      <SidebarLauncherButton />
     </aside>
+  );
+}
+
+// Module Launcher button shared across every module sidebar. Uses
+// HeaderActionsContext.onOpenLauncher and floats to the bottom of the
+// containing flex-column sidebar via marginTop: 'auto'.
+function SidebarLauncherButton() {
+  const a = React.useContext(HeaderActionsContext);
+  const [hover, setHover] = React.useState(false);
+  if (!a || !a.onOpenLauncher) return null;
+  return (
+    <button
+      onClick={a.onOpenLauncher}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Open module launcher"
+      style={{
+        marginTop: 'auto',
+        marginBottom: 12,
+        alignSelf: 'center',
+        flexShrink: 0,
+        boxSizing: 'border-box',
+        width: 176, height: 40,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+        padding: '0 14px',
+        border: '1.5px solid var(--accent)',
+        borderRadius: 8,
+        background: hover
+          ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
+          : 'color-mix(in srgb, var(--accent) 12%, transparent)',
+        color: 'var(--text-1)',
+        fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
+        cursor: 'pointer',
+        transition: 'background 120ms ease',
+      }}
+    >
+      <span aria-hidden="true" style={{ fontSize: 18, lineHeight: 1, color: 'var(--accent)' }}>{'⊞'}</span>
+      <span>Modules</span>
+    </button>
+  );
+}
+
+// Shared collapse state for a sidebar section. Persists in sessionStorage
+// keyed by sectionKey so collapses survive view switches within a session
+// but reset on app reload. Returns [open, toggle].
+function useCollapsedSection(sectionKey, defaultOpen = true) {
+  const storageKey = 'sb_collapse:' + sectionKey;
+  const [open, setOpen] = React.useState(() => {
+    try {
+      const v = sessionStorage.getItem(storageKey);
+      return v === null ? defaultOpen : v === '1';
+    } catch (_) { return defaultOpen; }
+  });
+  const toggle = React.useCallback(() => setOpen(o => {
+    const next = !o;
+    try { sessionStorage.setItem(storageKey, next ? '1' : '0'); } catch (_) {}
+    return next;
+  }), [storageKey]);
+  return [open, toggle];
+}
+
+// Collapsible section header for sidebar lists. `extras` slot lets the
+// header host inline controls (e.g. an add button) that must not toggle
+// the section — those controls call e.stopPropagation in their own
+// onClick. For sections whose body spans multiple sibling DOM blocks,
+// use useCollapsedSection directly instead.
+function CollapsibleSection({ title, sectionKey, defaultOpen = true, headerStyle, extras, children }) {
+  const [open, toggle] = useCollapsedSection(sectionKey, defaultOpen);
+  return (
+    <React.Fragment>
+      <div onClick={toggle} style={{
+        cursor: 'pointer', userSelect: 'none',
+        display: 'flex', alignItems: 'center', gap: 4,
+        ...(headerStyle || {}),
+      }}>
+        <span style={{
+          fontSize: 9, color: 'var(--text-3)', width: 10, display: 'inline-block',
+          transform: open ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 120ms',
+        }}>{'▾'}</span>
+        <span style={{ flex: 1 }}>{title}</span>
+        {extras}
+      </div>
+      {open && children}
+    </React.Fragment>
   );
 }
 
@@ -2145,9 +2294,9 @@ function PresetSBRow({ preset, selected, onClick, onRename, onDelete }) {
     if (!menu) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setMenu(false); };
     const onKey = (e) => { if (e.key === 'Escape') setMenu(false); };
-    setTimeout(() => document.addEventListener('click', onDoc), 0);
+    const t = setTimeout(() => document.addEventListener('click', onDoc), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [menu]);
   return (
     <div ref={wrapRef}
@@ -2198,9 +2347,9 @@ function InboxSBRow({ inbox, selected, onClick, onRename, onDelete }) {
     if (!menu) return;
     const onDoc = (e) => { if (!wrapRef.current?.contains(e.target)) setMenu(false); };
     const onKey = (e) => { if (e.key === 'Escape') setMenu(false); };
-    setTimeout(() => document.addEventListener('click', onDoc), 0);
+    const t = setTimeout(() => document.addEventListener('click', onDoc), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey); };
   }, [menu]);
   return (
     <div ref={wrapRef}
@@ -2320,12 +2469,17 @@ function WorkOrdersHeader({ query, setQuery, view, onSelectView, isPresetView, i
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   return (
-    <div style={{ flexShrink: 0, padding: '10px 18px', borderBottom: '1px solid var(--border-1)' }}>
+    <div style={{ flexShrink: 0, padding: '14px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <ModuleNavChevrons side="home" />
         <ModuleNavChevrons side="left" />
-        <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
-          Work Orders
+        <div>
+          <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+            Work Orders
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>
+            Track and manage work orders
+          </div>
         </div>
         {!(isPresetView || isInboxView) && (
           <div style={{ display: 'flex', gap: 4, marginLeft: 8, flexWrap: 'wrap' }}>
@@ -2370,6 +2524,7 @@ function WorkOrdersHeader({ query, setQuery, view, onSelectView, isPresetView, i
             ? <span onClick={() => setQuery('')} style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-3)' }}>{'✕'}</span>
             : <span style={{ fontSize: 11, color: 'var(--text-3)' }}>/</span>}
         </div>
+        <div style={{ flex: 1 }} />
         {headerRight}
         <HeaderChips />
         <ModuleNavChevrons side="right" />
@@ -2625,6 +2780,9 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
           </div>
         ) : sortedGroups.map((g, gi) => {
           const isOpen = !collapsed[g.phase];
+          // Slice 4 (#9): per-phase status display. hidden = header only;
+          // single = plain status label; pills (default) = current StatusPill.
+          const displayMode = (phases || []).find(p => p.name === g.phase)?.displayMode || 'pills';
           return (
             <React.Fragment key={g.phase}>
               <PhaseHeader
@@ -2635,12 +2793,13 @@ function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, densi
                 first={gi === 0}
                 onToggle={() => toggle(g.phase)}
               />
-              {isOpen && g.rows.map((r, ri) => {
+              {isOpen && displayMode !== 'hidden' && g.rows.map((r, ri) => {
                 const rowEl = (
                   <ListRow
                     key={r.wo}
                     row={r}
                     view={view}
+                    statusMode={displayMode}
                     hideAge={resolved.hideAge}
                     density={density}
                     selected={selectedWO === r.wo}
@@ -2738,7 +2897,7 @@ function PhaseHeader({ phase, count, dot, open, first, onToggle }) {
   );
 }
 
-function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck, onContextMenu }) {
+function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck, onContextMenu, statusMode = 'pills' }) {
   const ageHidden = hideAge || row.age == null;
   const ageBg = ageHidden ? 'transparent' :
     row.ageLevel === 1 ? 'var(--age-1)' :
@@ -2790,15 +2949,19 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
         {/* Meta row: status · PM · type · tech | WO# right-aligned.
             change11: Status pill hidden in sent (Invoices module shows it). */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {view !== 'sent' && <>
+          {view !== 'sent' && statusMode !== 'single' && <>
             <StatusPill status={row.status} size="sm" />
+            <Dot />
+          </>}
+          {view !== 'sent' && statusMode === 'single' && <>
+            <span style={{ fontWeight: 600 }}>{row.status}</span>
             <Dot />
           </>}
           <PMChip pm={row.pm} />
           <TypeIcon kind={row.type} />
           {row.tech && <span>{row.tech}</span>}
           {row.scheduled && (
-            <span title="Scheduled" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>
+            <span title="Scheduled" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: isOverdueSched(row.schedDate, row.schedStart) ? OVERDUE_CFG.textColor : 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>
               ◷ {fmtSchedule(row.schedDate, row.schedStart)}
             </span>
           )}
@@ -2895,9 +3058,9 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
     if (!open) return;
     const close = () => { setOpen(false); setStatusOpen(false); };
     const onKey = (e) => { if (e.key === 'Escape') close(); };
-    setTimeout(() => document.addEventListener('click', close), 0);
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
   }, [open]);
 
   const act = (kind, payload) => (e) => {
@@ -3057,9 +3220,9 @@ function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, onAddNote
     if (!statusMenuOpen) return;
     const close = () => setStatusMenuOpen(false);
     const onKey = (e) => { if (e.key === 'Escape') close(); };
-    setTimeout(() => document.addEventListener('click', close), 0);
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
   }, [statusMenuOpen]);
 
   if (!data) {
@@ -3177,7 +3340,7 @@ function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, onAddNote
           <Field label="Phone" value={<PhoneField data={data} />} />
           <Field label="Flags" value={data.flags?.length ? data.flags.map(f => f[0].toUpperCase() + f.slice(1)).join(', ') : '—'} />
           <Field label="Scheduled" value={data.schedule
-            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)' }}>◷ {fmtSchedule(data.schedule.date, data.schedule.start)}</span>
+            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: isOverdueSched(data.schedule.date, data.schedule.start) ? OVERDUE_CFG.textColor : 'var(--accent)' }}>◷ {fmtSchedule(data.schedule.date, data.schedule.start)}</span>
             : '—'} />
         </div>
       </div>
@@ -3659,6 +3822,8 @@ function AlertCard({ kind, wo, addr, blurb, onClick }) {
 const TT_SECTIONS = [
   { id: 'appearance',  label: 'Appearance' },
   { id: 'workflow',    label: 'Workflow' },
+  { id: 'trades',      label: 'Tech Job Types' },
+  { id: 'library',     label: 'Service Library' },
   { id: 'credentials', label: 'Credentials' },
   { id: 'apikeys',     label: 'API Keys' },
   { id: 'maps',        label: 'Maps' },
@@ -3709,7 +3874,7 @@ function stateMatches(a, b) {
   return !!(ca && cb && ca === cb);
 }
 
-function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
+function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
   const [section, setSection] = React.useState(initialSection || 'appearance');
   return (
     <section style={{
@@ -3759,11 +3924,13 @@ function SettingsDrawer({ onClose, theme, setTheme, density, setDensity, alertTh
 
       <div style={{ padding: '28px 32px', overflow: 'auto', minHeight: 0 }}>
         {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
-        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
+        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
+        {section === 'trades'     && <TradesSection types={types} mapTypeColors={mapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} />}
+        {section === 'library'    && <LibraryToolsSection subCats={librarySubCats} setSubCats={setLibrarySubCats} toast={toast} />}
         {section === 'credentials' && <CredentialsSection />}
         {section === 'apikeys'    && <ApiKeysSection locationIqKey={locationIqKey} setLocationIqKey={setLocationIqKey} />}
         {section === 'maps'       && <MapsSection mapsHomeState={mapsHomeState} mapsHomeZip={mapsHomeZip} mapsHomeAddress={mapsHomeAddress} mapsHomeCity={mapsHomeCity} saveHome={saveHome} onClearGeocache={onClearGeocache} geocacheCount={geocacheCount} mapMarkerColors={mapMarkerColors} setMapMarkerColors={setMapMarkerColors} mapTypeColors={mapTypeColors} setMapTypeColors={setMapTypeColors} types={types} />}
-        {section === 'alerts'     && <AlertsSection thresholds={alertThresholds} setThresholds={setAlertThresholds} />}
+        {section === 'alerts'     && <AlertsSection thresholds={alertThresholds} setThresholds={setAlertThresholds} overdueCfg={overdueCfg} setOverdueCfg={setOverdueCfg} />}
         {section === 'tray'       && <TraySection trayEnabled={trayEnabled} setTrayEnabled={setTrayEnabled} trayBadgeSource={trayBadgeSource} setTrayBadgeSource={setTrayBadgeSource} />}
         {section === 'about'      && <AboutSection onResetSettings={onResetSettings} onRestoreBackup={onRestoreBackup} updateState={updateState} onCheckUpdate={onCheckUpdate} onInstallUpdate={onInstallUpdate} />}
       </div>
@@ -4122,28 +4289,19 @@ function swapAt(arr, i, j) {
   return next;
 }
 
-function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, pms, setPms, types, setTypes, techs, setTechs }) {
+function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, pms, setPms, types, setTypes, techs, setTechs }) {
   const [statusesOpen, setStatusesOpen] = React.useState(false);
   const [pmsOpen, setPmsOpen] = React.useState(false);
   const [typesOpen, setTypesOpen] = React.useState(false);
   const [techsOpen, setTechsOpen] = React.useState(false);
   const [editingId, setEditingId] = React.useState(null);
-  const [editingName, setEditingName] = React.useState('');
-  const renameInputRef = React.useRef(null);
-  // Explicit focus on rename entry. autoFocus has React-18 timing quirks where
-  // focus is lost during the same commit and the onBlur handler fires, closing
-  // the editor before the user can type — the field looks uneditable.
-  React.useEffect(() => {
-    if (editingId !== null && renameInputRef.current) {
-      renameInputRef.current.focus();
-      renameInputRef.current.select();
-    }
-  }, [editingId]);
-
-  const startRename = (p) => { setEditingId(p.id || p.name); setEditingName(p.name); };
-  const commitRename = (targetId) => {
-    if (editingName.trim()) {
-      setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, name: editingName.trim() } : p));
+  // Inline editing now uses the shared <InlineEdit> (owns value + focus + the
+  // race-safe blur). editingId only marks which row is open.
+  const startRename = (p) => setEditingId(p.id || p.name);
+  const commitRename = (targetId, val) => {
+    const name = (val || '').trim();
+    if (name) {
+      setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, name } : p));
     }
     setEditingId(null);
   };
@@ -4153,9 +4311,16 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
     const id = 'ph_' + Date.now().toString(36);
     // change11: complete flag dropped from phase shape.
     setPhases([...phases, { id, name: 'New phase', fg: '#6b7280', bg: 'var(--bg-surface-2)', statuses: [] }]);
+    // Drop straight into the name editor on the new row so naming a phase does
+    // not require hunting for the rename affordance.
+    setEditingId(id);
   };
   const setPhaseColor = (targetId, hex) => {
     setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, fg: hex } : p));
+  };
+  // Slice 4 (#9): per-phase status display mode (pills | single | hidden).
+  const setDisplayMode = (targetId, mode) => {
+    setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, displayMode: mode } : p));
   };
   // change11: togglePhaseComplete deprecated.
   const deletePhase = (targetId) => {
@@ -4176,7 +4341,7 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
             border: '1px solid var(--border-1)', borderRadius: 6,
             background: 'var(--bg-surface)', minWidth: 0,
           }}>
-           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' }}>
             <ReorderBtns
               onUp={() => moveUp(idx)} onDown={() => moveDown(idx)}
               disableUp={idx === 0} disableDown={idx === phases.length - 1}
@@ -4189,12 +4354,10 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
               style={{ width: 22, height: 22, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent', flexShrink: 0 }}
             />
             {editingId === uid
-              ? <input
-                  ref={renameInputRef}
-                  value={editingName}
-                  onChange={e => setEditingName(e.target.value)}
-                  onBlur={() => commitRename(uid)}
-                  onKeyDown={e => { if (e.key === 'Enter') commitRename(uid); if (e.key === 'Escape') setEditingId(null); }}
+              ? <InlineEdit
+                  value={p.name}
+                  onCommit={(val) => commitRename(uid, val)}
+                  onCancel={() => setEditingId(null)}
                   style={{
                     fontSize: 14, fontWeight: 600, minWidth: 100, maxWidth: 160,
                     background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
@@ -4215,6 +4378,17 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
                 ? p.statuses.join(' · ')
                 : <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>tab-derived</span>}
             </span>
+            <select
+              value={p.displayMode || 'pills'}
+              onChange={e => setDisplayMode(uid, e.target.value)}
+              title="Status display in the WO list"
+              style={{ padding: '3px 6px', fontSize: 12, border: '1px solid var(--border-2)', borderRadius: 4,
+                background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit', cursor: 'pointer', maxWidth: 90, flexShrink: 0 }}
+            >
+              <option value="pills">Pills</option>
+              <option value="single">Single</option>
+              <option value="hidden">Hidden</option>
+            </select>
             <button onClick={() => startRename(p)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px', flexShrink: 0 }}>{'✎'}</button>
             <button
               onClick={() => deletePhase(uid)}
@@ -4237,6 +4411,8 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
           setStatuses={setStatuses}
           statusColors={statusColors}
           setStatusColors={setStatusColors}
+          statusTags={statusTags}
+          setStatusTags={setStatusTags}
           phases={phases}
           setPhases={setPhases}
           onClose={() => setStatusesOpen(false)}
@@ -4269,22 +4445,11 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
   );
 }
 
-function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, phases, setPhases, onClose }) {
+function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, phases, setPhases, onClose }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
-  const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
   const [insertAbove, setInsertAbove] = React.useState(''); // '' = append
-  const editInputRef = React.useRef(null);
-
-  // Explicit focus on edit-mode entry. autoFocus has React-18 timing quirks
-  // where focus can be lost during the same commit, triggering immediate
-  // onBlur and dismissing the input before the user can type.
-  React.useEffect(() => {
-    if (editingIdx !== null && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
-    }
-  }, [editingIdx]);
+  // Inline editing via the shared <InlineEdit>; editingIdx marks the open row.
 
   // Returns the phase id/name that owns this status, or '' if none.
   const phaseOf = (statusName) => {
@@ -4313,8 +4478,8 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
     }));
   };
 
-  const commitRename = (idx) => {
-    const trimmed = editingName.trim();
+  const commitRename = (idx, val) => {
+    const trimmed = (val || '').trim();
     if (LOCKED_STATUSES.has(statuses[idx])) { setEditingIdx(null); return; } // hardcoded; cannot rename
     if (trimmed && trimmed !== statuses[idx]) {
       const oldName = statuses[idx];
@@ -4324,6 +4489,13 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
       const sc = { ...statusColors };
       if (sc[oldName] !== undefined) { sc[trimmed] = sc[oldName]; delete sc[oldName]; }
       setStatusColors(sc);
+      // Slice 4 (#9): move the system-tag entry with the rename.
+      if (statusTags && setStatusTags && statusTags[oldName] !== undefined) {
+        const st = { ...statusTags };
+        st[trimmed] = st[oldName];
+        delete st[oldName];
+        setStatusTags(st);
+      }
       // Propagate rename into phases.statuses[]
       if (phases && setPhases) {
         setPhases(phases.map(p => ({
@@ -4343,6 +4515,12 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
     const sc = { ...statusColors };
     delete sc[name];
     setStatusColors(sc);
+    // Slice 4 (#9): drop the system-tag entry too.
+    if (statusTags && setStatusTags && statusTags[name] !== undefined) {
+      const st = { ...statusTags };
+      delete st[name];
+      setStatusTags(st);
+    }
     // Remove from phases.statuses[]
     if (phases && setPhases) {
       setPhases(phases.map(p => ({
@@ -4431,7 +4609,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
             const locked = LOCKED_STATUSES.has(s);
             return (
             <div key={s} style={{
-              display: 'flex', alignItems: 'center', gap: 10,
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
               padding: '8px 0', borderBottom: '1px solid var(--border-1)',
               opacity: locked ? 0.85 : 1,
             }}>
@@ -4447,12 +4625,10 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
                 title="Status color"
               />
               {editingIdx === idx && !locked
-                ? <input
-                    ref={editInputRef}
-                    value={editingName}
-                    onChange={e => setEditingName(e.target.value)}
-                    onBlur={() => commitRename(idx)}
-                    onKeyDown={e => { if (e.key === 'Enter') commitRename(idx); if (e.key === 'Escape') setEditingIdx(null); }}
+                ? <InlineEdit
+                    value={s}
+                    onCommit={(val) => commitRename(idx, val)}
+                    onCancel={() => setEditingIdx(null)}
                     style={{
                       flex: 1, fontSize: 14,
                       background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
@@ -4460,7 +4636,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
                     }}
                   />
                 : <span
-                    onDoubleClick={locked ? undefined : () => { setEditingIdx(idx); setEditingName(s); }}
+                    onDoubleClick={locked ? undefined : () => setEditingIdx(idx)}
                     title={locked ? 'Hardcoded by change11 — cannot rename' : 'Double-click to rename'}
                     style={{ flex: 1, fontSize: 14, cursor: locked ? 'default' : 'text', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                   >
@@ -4488,8 +4664,26 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
                   ))}
                 </select>
               )}
+              {setStatusTags && (
+                <select
+                  value={(statusTags && statusTags[s]) || ''}
+                  onChange={e => {
+                    const st = { ...(statusTags || {}) };
+                    if (e.target.value) st[s] = e.target.value; else delete st[s];
+                    setStatusTags(st);
+                  }}
+                  style={selectStyle}
+                  title="System tag (behavior hook)"
+                  disabled={locked}
+                >
+                  <option value="">-- no hook --</option>
+                  {SYSTEM_TAGS.map(t => (
+                    <option key={t} value={t}>{SYSTEM_TAG_LABELS[t]}</option>
+                  ))}
+                </select>
+              )}
               <button
-                onClick={locked ? undefined : () => { setEditingIdx(idx); setEditingName(s); }}
+                onClick={locked ? undefined : () => setEditingIdx(idx)}
                 disabled={locked}
                 title={locked ? 'Locked' : 'Rename'}
                 style={{ ...miniBtnStyle, padding: '0 7px', opacity: locked ? 0.3 : 1, cursor: locked ? 'default' : 'pointer' }}
@@ -4535,20 +4729,11 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
 
 function PMsEditor({ pms, setPms, onClose }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
-  const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
   const [newColor, setNewColor] = React.useState('#1a73e8');
-  const editInputRef = React.useRef(null);
 
-  React.useEffect(() => {
-    if (editingIdx !== null && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
-    }
-  }, [editingIdx]);
-
-  const commitRename = (idx) => {
-    const trimmed = editingName.trim();
+  const commitRename = (idx, val) => {
+    const trimmed = (val || '').trim();
     if (trimmed) {
       const next = pms.map((p, i) => i === idx ? { ...p, name: trimmed } : p);
       setPms(next);
@@ -4619,12 +4804,10 @@ function PMsEditor({ pms, setPms, onClose }) {
                 title="PM color"
               />
               {editingIdx === idx
-                ? <input
-                    ref={editInputRef}
-                    value={editingName}
-                    onChange={e => setEditingName(e.target.value)}
-                    onBlur={() => commitRename(idx)}
-                    onKeyDown={e => { if (e.key === 'Enter') commitRename(idx); if (e.key === 'Escape') setEditingIdx(null); }}
+                ? <InlineEdit
+                    value={pm.name}
+                    onCommit={(val) => commitRename(idx, val)}
+                    onCancel={() => setEditingIdx(null)}
                     style={{
                       flex: 1, fontSize: 14,
                       background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
@@ -4632,12 +4815,12 @@ function PMsEditor({ pms, setPms, onClose }) {
                     }}
                   />
                 : <span
-                    onDoubleClick={() => { setEditingIdx(idx); setEditingName(pm.name); }}
+                    onDoubleClick={() => setEditingIdx(idx)}
                     title="Double-click to rename"
                     style={{ flex: 1, fontSize: 14, cursor: 'text' }}
                   >{pm.name}</span>
               }
-              <button onClick={() => { setEditingIdx(idx); setEditingName(pm.name); }} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
+              <button onClick={() => setEditingIdx(idx)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deletePm(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
@@ -4671,21 +4854,12 @@ function PMsEditor({ pms, setPms, onClose }) {
   );
 }
 
-function SimpleListEditor({ title, items, setItems, onClose }) {
+function SimpleListEditor({ title, items, setItems, onClose, singular }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
-  const [editingName, setEditingName] = React.useState('');
   const [newName, setNewName] = React.useState('');
-  const editInputRef = React.useRef(null);
 
-  React.useEffect(() => {
-    if (editingIdx !== null && editInputRef.current) {
-      editInputRef.current.focus();
-      editInputRef.current.select();
-    }
-  }, [editingIdx]);
-
-  const commitRename = (idx) => {
-    const trimmed = editingName.trim();
+  const commitRename = (idx, val) => {
+    const trimmed = (val || '').trim();
     if (trimmed) setItems(items.map((v, i) => i === idx ? trimmed : v));
     setEditingIdx(null);
   };
@@ -4743,12 +4917,10 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
                 disableUp={idx === 0} disableDown={idx === items.length - 1}
               />
               {editingIdx === idx
-                ? <input
-                    ref={editInputRef}
-                    value={editingName}
-                    onChange={e => setEditingName(e.target.value)}
-                    onBlur={() => commitRename(idx)}
-                    onKeyDown={e => { if (e.key === 'Enter') commitRename(idx); if (e.key === 'Escape') setEditingIdx(null); }}
+                ? <InlineEdit
+                    value={v}
+                    onCommit={(val) => commitRename(idx, val)}
+                    onCancel={() => setEditingIdx(null)}
                     style={{
                       flex: 1, fontSize: 14,
                       background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
@@ -4756,12 +4928,12 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
                     }}
                   />
                 : <span
-                    onDoubleClick={() => { setEditingIdx(idx); setEditingName(v); }}
+                    onDoubleClick={() => setEditingIdx(idx)}
                     title="Double-click to rename"
                     style={{ flex: 1, fontSize: 14, cursor: 'text' }}
                   >{v}</span>
               }
-              <button onClick={() => { setEditingIdx(idx); setEditingName(v); }} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
+              <button onClick={() => setEditingIdx(idx)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deleteItem(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
@@ -4773,7 +4945,7 @@ function SimpleListEditor({ title, items, setItems, onClose }) {
               value={newName}
               onChange={e => setNewName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') addItem(); }}
-              placeholder={'New ' + title.toLowerCase().replace(/s$/, '')}
+              placeholder={'New ' + (singular || title.toLowerCase().replace(/s$/, ''))}
               style={{
                 flex: 1, padding: '7px 10px',
                 border: '1px solid var(--border-2)', borderRadius: 6,
@@ -5242,11 +5414,54 @@ const SORT_DEFS = [
   { key: 'lastNote', label: 'Last Note' },
 ];
 
-function AlertsSection({ thresholds, setThresholds }) {
+function AlertsSection({ thresholds, setThresholds, overdueCfg, setOverdueCfg }) {
   const t = { ...DEFAULT_ALERT_THRESHOLDS, ...(thresholds || {}) };
+  const oc = { ...DEFAULT_OVERDUE_CFG, ...(overdueCfg || {}) };
+  const colorRow = (label, key) => (
+    <SettingRow key={key} label={label}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <input
+          type="color" value={normalizeHex(oc[key])}
+          onChange={(e) => setOverdueCfg({ ...oc, [key]: e.target.value })}
+          style={{ width: 28, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }}
+        />
+        {oc[key] !== DEFAULT_OVERDUE_CFG[key] && (
+          <button onClick={() => setOverdueCfg({ ...oc, [key]: DEFAULT_OVERDUE_CFG[key] })} style={{
+            height: 24, padding: '0 8px', border: '1px solid var(--border-2)',
+            background: 'var(--bg-surface)', color: 'var(--text-3)',
+            borderRadius: 4, fontFamily: 'inherit', fontSize: 11, cursor: 'pointer',
+          }}>Reset</button>
+        )}
+      </div>
+    </SettingRow>
+  );
   return (
     <div>
       <SettingTitle sub="Tune when each alert fires in the Needs Attention surface.">Alerts</SettingTitle>
+      {/* Slice 2 (#3): overdue-schedule indicator config. */}
+      <div style={{ marginBottom: 4, fontSize: 14, fontWeight: 600 }}>Overdue schedule</div>
+      <SettingRow label="Overdue after" hint="Scheduled WO past its start time by this many minutes gets recolored (list, detail, itinerary, map marker border).">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input
+            type="number" min={0} value={oc.thresholdMinutes}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              setOverdueCfg({ ...oc, thresholdMinutes: isNaN(n) ? 0 : n });
+            }}
+            style={{
+              width: 80, padding: '6px 10px',
+              border: '1px solid var(--border-2)', borderRadius: 6,
+              background: 'var(--bg-surface)',
+              color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+              textAlign: 'right',
+            }}
+          />
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>minutes</span>
+        </div>
+      </SettingRow>
+      {colorRow('Overdue text color', 'textColor')}
+      {colorRow('Overdue marker border color', 'borderColor')}
+      <div style={{ margin: '18px 0 4px', fontSize: 14, fontWeight: 600 }}>Needs Attention</div>
       {ALERT_DEFS.map(def => (
         <SettingRow key={def.key} label={def.label} hint={def.hint}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -5270,6 +5485,81 @@ function AlertsSection({ thresholds, setThresholds }) {
           </div>
         </SettingRow>
       ))}
+    </div>
+  );
+}
+
+// Slice 3 (#8): Tech Job Types. NO separate trade list — the trades ARE the
+// existing work-order types (settings.types, edited in Workflow; colored in
+// Maps via mapTypeColors). The only new state is techJobTypes: per tech, per
+// type, a { selected, weight } cell (weight disabled unless selected). Routing
+// (slice 5) reads techJobTypes[tech][wo.type].
+const TRADE_WEIGHTS = ['low', 'med', 'high'];
+function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, techs }) {
+  const list = (types || []).filter(Boolean);
+  // Same color resolution the map markers use: explicit override, else the
+  // letter default for the three built-ins, else a neutral gray.
+  const tc = { HVAC: TYPE_COLORS.H, Plumbing: TYPE_COLORS.P, Electrical: TYPE_COLORS.E, ...(mapTypeColors || {}) };
+  const colorOf = (name) => tc[name] || '#6b7280';
+  // Patch one tech/type cell. Selecting for the first time defaults weight med.
+  const setCell = (tech, type, patch) => {
+    const techMap = (techJobTypes && techJobTypes[tech]) || {};
+    const cur = techMap[type] || {};
+    const nextCell = { ...cur, ...patch };
+    if (nextCell.selected && !nextCell.weight) nextCell.weight = 'med';
+    setTechJobTypes({ ...techJobTypes, [tech]: { ...techMap, [type]: nextCell } });
+  };
+  const cellStyle = { padding: '4px 8px', textAlign: 'center', borderBottom: '1px solid var(--border-1)' };
+  return (
+    <div>
+      <SettingTitle sub="Which work-order types each tech handles, with a preference weight. Types are managed in Workflow; colors in Maps. Used by routing to rank suggested work.">Tech Job Types</SettingTitle>
+      {list.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--text-3)' }}>No types configured (Settings &gt; Workflow &gt; Manage types).</div>
+      ) : (techs || []).length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--text-3)' }}>No techs configured (Settings &gt; Workflow &gt; Manage techs).</div>
+      ) : (
+        <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-3)', fontWeight: 600, borderBottom: '1px solid var(--border-1)' }}>Tech</th>
+              {list.map(type => (
+                <th key={type} style={{ padding: '4px 8px', color: 'var(--text-2)', fontWeight: 600, borderBottom: '1px solid var(--border-1)', minWidth: 110 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 2, background: colorOf(type) }} />{type}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(techs || []).map(tech => (
+              <tr key={tech}>
+                <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-1)', fontWeight: 500 }}>{tech}</td>
+                {list.map(type => {
+                  const cell = (techJobTypes && techJobTypes[tech] && techJobTypes[tech][type]) || {};
+                  return (
+                    <td key={type} style={cellStyle}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                        <input type="checkbox" checked={!!cell.selected}
+                          onChange={(e) => setCell(tech, type, { selected: e.target.checked })} />
+                        <select value={cell.weight || 'med'} disabled={!cell.selected}
+                          onChange={(e) => setCell(tech, type, { weight: e.target.value })}
+                          style={{ background: 'var(--bg-surface-2)', color: cell.selected ? 'var(--text-1)' : 'var(--text-3)',
+                            border: '1px solid var(--border-2)', borderRadius: 6, padding: '1px 4px',
+                            fontFamily: 'inherit', fontSize: 12, opacity: cell.selected ? 1 : 0.5 }}>
+                          {TRADE_WEIGHTS.map(w => <option key={w} value={w}>{w}</option>)}
+                        </select>
+                      </div>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -6121,58 +6411,22 @@ function computeInvoiceTotals(invoice, pm) {
 // Live-verify handle for the MSR 1.0725 round-trip (console: __invoiceCalc(...)).
 if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals; }
 
-function ServiceLibrary({ toast }) {
-  const [lib, setLib] = React.useState(null); // null = loading
-  const [tab, setTab] = React.useState('General');
-  const [q, setQ] = React.useState('');
+// Slice 2 (#6): seed/import/export actions over the service_library file.
+// Extracted so both the (Settings) Service Library tab and any other caller
+// share one implementation (rule B3 - no reimplementation). lib + persist are
+// owned by the caller; this hook only runs the window.library bridge calls.
+function useLibraryTools(lib, persist, toast) {
   const [busy, setBusy] = React.useState(false);
-
-  React.useEffect(() => {
-    let live = true;
-    (async () => {
-      try {
-        const r = window.storage && await window.storage.get('service_library');
-        const v = r && r.value;
-        if (live) setLib(v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary());
-      } catch { if (live) setLib(emptyLibrary()); }
-    })();
-    return () => { live = false; };
-  }, []);
-
-  const persist = React.useCallback((next) => {
-    setLib(next);
-    if (window.storage && window.storage.set) window.storage.set('service_library', next).catch(() => {});
-  }, []);
-
   const needLib = React.useCallback(() => {
     if (!window.library) { toast('Library tools unavailable - fully restart the app (not just reload)', 'err'); return false; }
     return true;
   }, [toast]);
-
-  const items = (lib && lib[tab]) || [];
-  const filtered = React.useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const rows = items.map((it, i) => ({ it, i }));
-    if (!needle) return rows;
-    return rows.filter(({ it }) =>
-      (it.name || '').toLowerCase().includes(needle) || (it.desc || '').toLowerCase().includes(needle));
-  }, [items, q]);
-
-  const setItems = React.useCallback((nextItems) => {
-    persist({ ...(lib || emptyLibrary()), [tab]: nextItems });
-  }, [lib, tab, persist]);
-
-  const updateItem = (idx, patch) => setItems(items.map((it, i) => i === idx ? { ...it, ...patch } : it));
-  const deleteItem = (idx) => setItems(items.filter((_, i) => i !== idx));
-  const addItem = () => setItems([{ name: '', desc: '', price: 0, taxable: tab !== 'AMH' }, ...items]);
-
   const replaceTab = (tabName, newItems, label) => {
     const cur = (lib && lib[tabName]) || [];
     if (cur.length && !window.confirm(`Replace all ${cur.length} ${tabName} items with ${newItems.length} from ${label}?`)) return false;
     persist({ ...(lib || emptyLibrary()), [tabName]: newItems });
     return true;
   };
-
   const seedGeneral = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -6183,7 +6437,6 @@ function ServiceLibrary({ toast }) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-
   const seedAmh = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -6199,7 +6452,6 @@ function ServiceLibrary({ toast }) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-
   const importBackup = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -6216,7 +6468,6 @@ function ServiceLibrary({ toast }) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-
   const exportBackup = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -6227,14 +6478,224 @@ function ServiceLibrary({ toast }) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
+  return { busy, seedGeneral, seedAmh, importBackup, exportBackup };
+}
+
+// Loads + persists the service_library file. Shared by ServiceLibrary (module)
+// and LibraryToolsSection (settings) so both read/write the same store.
+function useServiceLibraryStore() {
+  const [lib, setLib] = React.useState(null); // null = loading
+  React.useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const r = window.storage && await window.storage.get('service_library');
+        const v = r && r.value;
+        if (live) setLib(v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary());
+      } catch { if (live) setLib(emptyLibrary()); }
+    })();
+    return () => { live = false; };
+  }, []);
+  const persist = React.useCallback((next) => {
+    setLib(next);
+    if (window.storage && window.storage.set) window.storage.set('service_library', next).catch(() => {});
+  }, []);
+  return [lib, persist];
+}
+
+// Settings > Service Library: data tools (seed/import/export) + sub-category
+// management, moved off the module header to declutter it.
+function LibraryToolsSection({ subCats, setSubCats, toast }) {
+  const [lib, persist] = useServiceLibraryStore();
+  const { busy, seedGeneral, seedAmh, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
+  const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  const counts = LIBRARY_TABS.map(t => t + ': ' + (((lib && lib[t]) || []).length)).join(' · ');
+  const tool = (label, onClick, primary) => (
+    <button onClick={onClick} disabled={busy || lib === null} style={{
+      height: 34, padding: '0 14px', borderRadius: 7, cursor: (busy || lib === null) ? 'default' : 'pointer',
+      border: primary ? 'none' : '1px solid var(--border-2)',
+      background: primary ? 'var(--accent)' : 'var(--bg-surface)',
+      color: primary ? 'var(--accent-fg)' : 'var(--text-1)',
+      fontFamily: 'inherit', fontSize: 13, fontWeight: 600, opacity: (busy || lib === null) ? 0.6 : 1,
+    }}>{label}</button>
+  );
+  return (
+    <div>
+      <SettingTitle sub="Seed, back up, and organize the Service Library catalogs.">Service Library</SettingTitle>
+      <SettingRow label="Seed catalogs" hint="Replace a catalog's items from the source workbook.">
+        <div style={{ display: 'flex', gap: 8 }}>
+          {tool('Seed General', seedGeneral)}
+          {tool('Seed AMH', seedAmh)}
+        </div>
+      </SettingRow>
+      <SettingRow label="Backup" hint={'Round-trip xlsx. ' + (lib === null ? '' : counts)}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {tool('Import...', importBackup)}
+          {tool('Export...', exportBackup, true)}
+        </div>
+      </SettingRow>
+      <SettingRow label="Sub-categories" hint="Internal grouping for service items. Never exported to CSV/xlsx.">
+        {tool('Manage (' + (subCats || []).length + ')...', () => setSubCatsOpen(true))}
+      </SettingRow>
+      {subCatsOpen && (
+        <SimpleListEditor
+          title="Library sub-categories"
+          singular="sub-category"
+          items={subCats}
+          setItems={setSubCats}
+          onClose={() => setSubCatsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Slice 2 (#6): Add Service Item modal — replaces the old insert-blank-row
+// behavior. Catalog defaults to the tab the user was viewing; sub-category is
+// internal-only (exportLibrary whitelists fields, so it never reaches xlsx).
+function AddServiceItemModal({ defaultCatalog, subCats, onAdd, onClose }) {
+  const [name, setName] = React.useState('');
+  const [desc, setDesc] = React.useState('');
+  const [price, setPrice] = React.useState('');
+  const [taxable, setTaxable] = React.useState(true);
+  const [catalog, setCatalog] = React.useState(defaultCatalog || LIBRARY_TABS[0]);
+  // subCat '__new' = user is typing a brand-new sub-category in newSub.
+  const [subCat, setSubCat] = React.useState('');
+  const [newSub, setNewSub] = React.useState('');
+  const inputRef = React.useRef(null);
+  // Explicit focus (autoFocus inside a freshly-mounted Modal can be cleared in
+  // the same React-18 commit, leaving the field unresponsive).
+  React.useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+  const fld = {
+    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 14, boxSizing: 'border-box',
+  };
+  const submit = () => {
+    if (!name.trim()) return;
+    const sub = subCat === '__new' ? newSub.trim() : subCat;
+    onAdd({
+      name: name.trim(), desc: desc.trim(),
+      price: price === '' ? 0 : parseFloat(price) || 0,
+      // AMH prices are tax-inclusive; the catalog never carries a taxable flag
+      // (its table column is hidden too).
+      taxable: catalog === 'AMH' ? false : taxable,
+      catalog, subCategory: sub || null,
+    });
+  };
+  const onEnter = (e) => { if (e.key === 'Enter') submit(); };
+  return (
+    <Modal open onClose={onClose} title="Add service item" width={420}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Name
+          <input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onEnter} style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Description
+          <input value={desc} onChange={(e) => setDesc(e.target.value)} onKeyDown={onEnter} style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Price
+          <input value={price} onChange={(e) => setPrice(e.target.value)} type="number" step="0.01" placeholder="0.00"
+            onKeyDown={onEnter} style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Catalog
+          <select value={catalog} onChange={(e) => setCatalog(e.target.value)} style={fld}>
+            {LIBRARY_TABS.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        {catalog !== 'AMH' && (
+          <label style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} />
+            Taxable
+          </label>
+        )}
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Sub-category
+          <select value={subCat} onChange={(e) => setSubCat(e.target.value)} style={fld}>
+            <option value="">None</option>
+            {(subCats || []).map(s => <option key={s} value={s}>{s}</option>)}
+            <option value="__new">+ New sub-category...</option>
+          </select>
+          {subCat === '__new' && (
+            <input value={newSub} onChange={(e) => setNewSub(e.target.value)} onKeyDown={onEnter}
+              placeholder="New sub-category name" style={fld} />
+          )}
+        </label>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+          <ActionBtn primary disabled={!name.trim()} onClick={submit}>Add item</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ServiceLibrary({ toast, subCats, setSubCats }) {
+  const [lib, persist] = useServiceLibraryStore();
+  const [tab, setTab] = React.useState('General');
+  const [q, setQ] = React.useState('');
+  const [adding, setAdding] = React.useState(false);
+  const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+
+  const items = (lib && lib[tab]) || [];
+  const filtered = React.useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const rows = items.map((it, i) => ({ it, i }));
+    if (!needle) return rows;
+    return rows.filter(({ it }) =>
+      (it.name || '').toLowerCase().includes(needle) || (it.desc || '').toLowerCase().includes(needle));
+  }, [items, q]);
+
+  // Slice 2 (#6): sub-category display. Column shows when sub-categories are
+  // configured or any item carries one; rows group under header rows
+  // (uncategorized first, then settings order, then unknown alphabetical).
+  const showSubCol = (subCats && subCats.length > 0) || items.some(it => it && it.subCategory);
+  const subOptions = React.useMemo(() => {
+    const set = new Set(subCats || []);
+    for (const it of items) if (it && it.subCategory) set.add(it.subCategory);
+    return [...(subCats || []), ...[...set].filter(s => !(subCats || []).includes(s)).sort()];
+  }, [subCats, items]);
+  const colCount = 3 + (showSubCol ? 1 : 0) + (tab !== 'AMH' ? 1 : 0) + 1;
+  const grouped = React.useMemo(() => {
+    if (!filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
+    const order = [''].concat(subCats || []);
+    const buckets = new Map();
+    for (const r of filtered) {
+      const key = (r.it && r.it.subCategory) || '';
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(r);
+    }
+    const known = order.filter(k => buckets.has(k));
+    const unknown = [...buckets.keys()].filter(k => !order.includes(k)).sort();
+    return [...known, ...unknown].map(k => ({ sub: k || null, rows: buckets.get(k) }));
+  }, [filtered, subCats]);
+
+  const setItems = React.useCallback((nextItems) => {
+    persist({ ...(lib || emptyLibrary()), [tab]: nextItems });
+  }, [lib, tab, persist]);
+
+  const updateItem = (idx, patch) => setItems(items.map((it, i) => i === idx ? { ...it, ...patch } : it));
+  const deleteItem = (idx) => setItems(items.filter((_, i) => i !== idx));
+  // Slice 2 (#6): "+ Add item" opens a modal instead of inserting a blank row.
+  // A sub-category typed fresh in the modal is appended to the settings list
+  // so it shows up in every dropdown from then on.
+  const addFromModal = ({ name, desc, price, taxable, catalog, subCategory }) => {
+    const item = { name, desc, price, taxable };
+    if (subCategory) item.subCategory = subCategory;
+    if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
+      setSubCats([...(subCats || []), subCategory]);
+    }
+    persist({ ...(lib || emptyLibrary()), [catalog]: [item, ...((lib && lib[catalog]) || [])] });
+    setAdding(false);
+    if (catalog !== tab) setTab(catalog);
+    toast('Added to ' + catalog + (subCategory ? ' · ' + subCategory : ''));
+  };
 
   const btn = (label, onClick, primary) => (
-    <button onClick={onClick} disabled={busy} style={{
-      height: 32, padding: '0 12px', borderRadius: 7, cursor: busy ? 'default' : 'pointer',
+    <button onClick={onClick} style={{
+      height: 32, padding: '0 12px', borderRadius: 7, cursor: 'pointer',
       border: primary ? 'none' : '1px solid var(--border-1)',
       background: primary ? 'var(--accent)' : 'var(--bg-surface)',
       color: primary ? 'var(--accent-fg)' : 'var(--text-1)',
-      fontFamily: 'inherit', fontSize: 13, fontWeight: 600, opacity: busy ? 0.6 : 1,
+      fontFamily: 'inherit', fontSize: 13, fontWeight: 600,
     }}>{label}</button>
   );
 
@@ -6262,10 +6723,7 @@ function ServiceLibrary({ toast }) {
             Service Library
           </div>
           <div style={{ flex: 1 }} />
-          {btn('Seed General', seedGeneral)}
-          {btn('Seed AMH', seedAmh)}
-          {btn('Import backup', importBackup)}
-          {btn('Export backup', exportBackup, true)}
+          {btn('Sub-categories', () => setSubCatsOpen(true))}
           <HeaderChips />
           <ModuleNavChevrons side="right" />
         </div>
@@ -6278,7 +6736,7 @@ function ServiceLibrary({ toast }) {
               color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
             }}
           />
-          {btn('+ Add item', addItem)}
+          {btn('+ Add item', () => setAdding(true))}
         </div>
       </div>
 
@@ -6305,6 +6763,7 @@ function ServiceLibrary({ toast }) {
               <span style={{ color: 'var(--text-3)' }}>{((lib && lib[t]) || []).length}</span>
             </button>
           ))}
+          <SidebarLauncherButton />
         </aside>
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
@@ -6312,7 +6771,7 @@ function ServiceLibrary({ toast }) {
           <div style={{ padding: 24, color: 'var(--text-3)' }}>Loading...</div>
         ) : filtered.length === 0 ? (
           <div style={{ padding: 24, color: 'var(--text-3)' }}>
-            {items.length === 0 ? `No items in ${tab}. Use "Seed ${tab === 'AMH' ? 'AMH' : 'General'}" or "+ Add item".` : 'No matches.'}
+            {items.length === 0 ? `No items in ${tab}. Use "+ Add item", or seed/import from Settings > Service Library.` : 'No matches.'}
           </div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -6321,16 +6780,37 @@ function ServiceLibrary({ toast }) {
                 <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '44%' }}>Item Name</th>
                 <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '30%' }}>Description</th>
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Price</th>
+                {showSubCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 130 }}>Sub-category</th>}
                 {tab !== 'AMH' && <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Taxable</th>}
                 <th style={{ width: 36 }} />
               </tr>
             </thead>
             <tbody>
-              {filtered.map(({ it, i }) => (
+              {grouped.map(g => (
+                <React.Fragment key={g.sub || '__none'}>
+                  {g.sub && (
+                    <tr>
+                      <td colSpan={colCount} style={{ padding: '12px 6px 4px', fontSize: 11, fontWeight: 700, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{g.sub}</td>
+                    </tr>
+                  )}
+                  {g.rows.map(({ it, i }) => (
                 <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.name, (v) => updateItem(i, { name: v }))}</td>
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.desc, (v) => updateItem(i, { desc: v }))}</td>
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.price, (v) => updateItem(i, { price: v === '' ? 0 : parseFloat(v) || 0 }), { type: 'number', step: '0.01' })}</td>
+                  {showSubCol && (
+                  <td style={{ padding: '4px 6px' }}>
+                    <select value={it.subCategory || ''} onChange={(e) => updateItem(i, { subCategory: e.target.value || undefined })} style={{
+                      width: '100%', boxSizing: 'border-box', height: 28, padding: '0 4px',
+                      border: '1px solid var(--border-1)', borderRadius: 6,
+                      background: 'var(--bg-canvas)', color: 'var(--text-1)',
+                      fontFamily: 'inherit', fontSize: 12,
+                    }}>
+                      <option value="">—</option>
+                      {subOptions.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </td>
+                  )}
                   {tab !== 'AMH' && (
                   <td style={{ padding: '4px 6px', textAlign: 'center' }}>
                     <input type="checkbox" checked={!!it.taxable} onChange={(e) => updateItem(i, { taxable: e.target.checked })} />
@@ -6343,12 +6823,31 @@ function ServiceLibrary({ toast }) {
                     }}>×</button>
                   </td>
                 </tr>
+                  ))}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
         )}
         </div>
       </div>
+      {adding && (
+        <AddServiceItemModal
+          defaultCatalog={tab}
+          subCats={subCats}
+          onAdd={addFromModal}
+          onClose={() => setAdding(false)}
+        />
+      )}
+      {subCatsOpen && (
+        <SimpleListEditor
+          title="Library sub-categories"
+          singular="sub-category"
+          items={subCats}
+          setItems={setSubCats}
+          onClose={() => setSubCatsOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -6659,14 +7158,12 @@ const HeaderActionsContext = React.createContext({
 });
 function HeaderChips() {
   const a = React.useContext(HeaderActionsContext);
-  const { currentModule } = React.useContext(ModuleNavContext);
   const [menuOpen, setMenuOpen] = React.useState(false);
-  const [modsHover, setModsHover] = React.useState(false);
   React.useEffect(() => {
     if (!menuOpen) return;
     const close = () => setMenuOpen(false);
-    setTimeout(() => document.addEventListener('click', close), 0);
-    return () => document.removeEventListener('click', close);
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
+    return () => { clearTimeout(t); document.removeEventListener('click', close); };
   }, [menuOpen]);
   const chipBtn = {
     height: 28, padding: '0 10px', borderRadius: 8,
@@ -6680,35 +7177,8 @@ function HeaderChips() {
     color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 14,
     cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1,
   };
-  // Non-WO modules have no sidebar (slice 3.4 Path A), so the Modules
-  // launcher button reappears at the far left of the header chip cluster.
-  // WO module hides it (sidebar version covers it instead).
-  const showModulesBtn = currentModule !== 'work-orders';
-  const modulesBtn = {
-    height: 28, padding: '0 10px', borderRadius: 8,
-    border: '1.5px solid var(--accent)',
-    background: modsHover
-      ? 'color-mix(in srgb, var(--accent) 22%, transparent)'
-      : 'color-mix(in srgb, var(--accent) 12%, transparent)',
-    color: 'var(--text-1)',
-    fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
-    cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, lineHeight: 1,
-    transition: 'background 120ms ease',
-  };
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      {showModulesBtn && (
-        <button
-          onClick={a.onOpenLauncher}
-          onMouseEnter={() => setModsHover(true)}
-          onMouseLeave={() => setModsHover(false)}
-          style={modulesBtn}
-          title="Open module launcher"
-        >
-          <span style={{ fontSize: 14, lineHeight: 1, color: 'var(--accent)' }}>{'⊞'}</span>
-          Modules
-        </button>
-      )}
       <button onClick={a.onAddWO} style={{
         ...chipBtn,
         background: 'var(--accent)', color: 'var(--accent-fg)', borderColor: 'var(--accent)', fontWeight: 600,
@@ -6792,7 +7262,7 @@ function ModuleNavChevrons({ side = 'left' }) {
 // settings.geocache so cold loads after the first session are instant; the
 // queue worker only hits Nominatim for new or previously-failed addresses.
 // Accuracy is "good enough to eyeball" - techs route on their phones.
-function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors }) {
+function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors }) {
   const [query, setQuery] = React.useState('');
   // change10 queue item #4: multi-stop driving directions. Ordered list of WO
   // ids the user has staged for a route. "Open in Google Maps" passes them as
@@ -6938,6 +7408,9 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
     for (const o of list) {
       const g = geocache && geocache[o.id];
       if (!g || g.error || g.lat == null) continue;
+      // Slice 4 (#9): `offmap`-tagged status (field work done, bid entry only)
+      // drops the marker. All other active WOs stay, incl. unscheduled.
+      if (statusTags[o.status] === 'offmap') continue;
       const { addr, city } = splitAddress(o);
       const isSel = o.id === selected;
       const suspect = !!g.suspect;
@@ -6958,11 +7431,34 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
           + '<br/>Right-click the marker to re-geocode or dismiss the flag.'
           + '</div>'
         : '';
+      // Phones: every unique number across o.phone + all contacts, digits-
+      // normalized for dedup, rendered number-only (no names) one per line.
+      const phoneNums = [];
+      const seenPhone = new Set();
+      const addPhone = (raw) => {
+        if (!raw) return;
+        const norm = String(raw).replace(/\D/g, '');
+        if (!norm || seenPhone.has(norm)) return;
+        seenPhone.add(norm);
+        phoneNums.push(formatPhone(raw));
+      };
+      addPhone(o.phone);
+      (Array.isArray(o.contacts) ? o.contacts : []).forEach(c => c && addPhone(c.phone));
+      const schedHtml = (o.schedule && o.schedule.date)
+        ? '<div style="color:#facc15;margin-top:2px">◷ ' + fmtSchedule(o.schedule.date, o.schedule.start) + '</div>'
+        : '';
+      const phoneHtml = phoneNums.length
+        ? '<div style="border-top:1px solid #555;margin-top:4px;padding-top:4px">'
+          + phoneNums.map(p => '<div>' + p + '</div>').join('')
+          + '</div>'
+        : '';
       const html = (
         '<div style="font-size:12px;line-height:1.4">'
           + '<div style="font-weight:600">' + String(o.id) + '</div>'
           + '<div>' + (addr || '') + (city ? '<br/>' + city : '') + '</div>'
           + (o.tech ? '<div style="color:#888;margin-top:2px">Tech: ' + o.tech + '</div>' : '')
+          + schedHtml
+          + phoneHtml
           + resolvedHtml
           + warnHtml
         + '</div>'
@@ -6978,24 +7474,62 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
       // on the fill; scheduled WOs swap the stroke to a thick bright gold so
       // they stand out against any type color without losing category info.
       const isScheduled = !!(o.schedule && o.schedule.date);
-      const strokeColor = isScheduled ? '#facc15' : '#fff';     // gold vs white
-      const strokeWidth = isScheduled ? 3 : 1.5;
-      const centerR     = isScheduled ? 5 : 4;
-      const centerFill  = isScheduled ? '#facc15' : '#fff';
+      // Slice 2 (#3): past schedule + threshold swaps the gold border to the
+      // configurable overdue color.
+      const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
+      // Slice 4 (#9): marker OUTLINE denotes the WO's status (reuses the pill
+      // colors in statusColors). Precedence: onsite-tag wins (tech is live on
+      // site -> beats the overdue border), then overdue, then the status color,
+      // then the legacy scheduled-gold / white fallback.
+      const tag = statusTags[o.status];
+      const statusOutline = statusColors && statusColors[o.status];
+      const strokeColor =
+        tag === 'onsite'   ? (statusOutline || '#3b82f6')
+        : isOverdue        ? overdueCfg.borderColor
+        : (statusOutline || (isScheduled ? '#facc15' : '#fff'));
+      const emphasize = tag === 'onsite' || isScheduled;
+      const strokeWidth = emphasize ? 3 : 1.5;
+      const centerR     = emphasize ? 5 : 4;
+      const centerFill  = strokeColor;
       const icon = L.divIcon({
         className: '',
-        html: '<svg viewBox="0 0 24 36" width="22" height="33" style="display:block">'
+        // viewBox padded 2px on every side ("-2 -2 28 40") so the stroke (up to
+        // 3px wide, i.e. 1.5px outside the path edge) is not clipped at the
+        // crown/sides. Anchor recomputed for the padded box: tip (path 12,36)
+        // maps to px (12, 32) at 24x34.
+        html: '<svg viewBox="-2 -2 28 40" width="24" height="34" style="display:block;overflow:visible">'
           + '<path d="M12 0C5.4 0 0 5.4 0 12c0 8.5 12 24 12 24s12-15.5 12-24c0-6.6-5.4-12-12-12z" '
           + 'fill="' + fillColor + '" stroke="' + strokeColor + '" stroke-width="' + strokeWidth + '"/>'
           + '<circle cx="12" cy="12" r="' + centerR + '" fill="' + centerFill + '"/>'
           + '</svg>',
-        iconSize: [22, 33], iconAnchor: [11, 33],
-        popupAnchor: [0, -28],
+        iconSize: [24, 34], iconAnchor: [12, 32],
+        popupAnchor: [0, -30],
       });
       const marker = L.marker([g.lat, g.lon], { icon, opacity: isSel ? 1 : 0.9 })
         .addTo(markersLayerRef.current);
       marker.bindPopup(html);
-      marker.on('click', () => setSelected(o.id));
+      // Hover preview uses the SAME popup bubble (no separate tooltip).
+      // _hoverOpen marks a popup opened by hover; mouseout closes only
+      // those. Click clears the flag so the popup turns sticky.
+      marker.on('mouseover', () => {
+        // While any popup is click-sticky (open and not hover-opened),
+        // hover on other markers must not steal it -- Leaflet auto-closes
+        // the existing popup when another openPopup() fires.
+        const stickyOpen = Object.values(markerByIdRef.current)
+          .some((m) => m !== marker && m.isPopupOpen() && !m._hoverOpen);
+        if (stickyOpen) return;
+        if (!marker.isPopupOpen()) { marker._hoverOpen = true; marker.openPopup(); }
+      });
+      marker.on('mouseout', () => {
+        if (marker._hoverOpen) { marker._hoverOpen = false; marker.closePopup(); }
+      });
+      marker.on('click', () => {
+        marker._hoverOpen = false;
+        setSelected(o.id);
+        // Leaflet's default click handler toggles (closes) a popup that the
+        // hover already opened; force it back open so click = sticky.
+        marker.openPopup();
+      });
       marker.on('contextmenu', (ev) => {
         const oe = ev && ev.originalEvent;
         if (oe) { oe.preventDefault(); oe.stopPropagation(); }
@@ -7033,7 +7567,7 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
       // Otherwise: popup was previously dismissed by the user. Leave it
       // closed until they pick a different WO.
     }
-  }, [list, geocache, selected]);
+  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors]);
 
   // Pan to the selected WO when selection changes. Does NOT touch the
   // popup - that is handled by the render-markers effect above so a
@@ -7235,6 +7769,7 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
               </div>
             );
           })()}
+          <SidebarLauncherButton />
         </aside>
         <div style={{ minWidth: 0, position: 'relative' }}>
           <div
@@ -7386,7 +7921,7 @@ function ModuleLauncher({ current, onPick, onClose }) {
 // ── Invoices module (slice 3) ─────────────────────────────────────────────────
 // change11: Billing-queue view shows tab='sent' WOs only. Row click opens the
 // invoice editor for that WO. Shows recorded invoice # + grand total when present.
-function InvoicesModule({ sentOrders, selectedId, onOpenInvoice }) {
+function InvoicesModule({ sentOrders, selectedId, onOpenInvoice, onWoAction }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [query, setQuery] = React.useState('');
   // change11: status filter dropped (only 'sent' exists now). Aging filter
@@ -7528,6 +8063,7 @@ function InvoicesModule({ sentOrders, selectedId, onOpenInvoice }) {
               </button>
             ))}
           </div>
+          <SidebarLauncherButton />
         </aside>
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
           <div style={{ marginBottom: 8, fontSize: 13, color: 'var(--text-3)', fontWeight: 600 }}>
@@ -7544,6 +8080,7 @@ function InvoicesModule({ sentOrders, selectedId, onOpenInvoice }) {
                   <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>PM</th>
                   <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Invoice #</th>
                   <th style={{ textAlign: 'right', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Total</th>
+                  <th style={{ width: 96 }} />
                 </tr>
               </thead>
               <tbody>
@@ -7574,6 +8111,21 @@ function InvoicesModule({ sentOrders, selectedId, onOpenInvoice }) {
                         {inv && inv.number ? inv.number : 'not invoiced'}
                       </td>
                       <td style={{ padding: '8px 6px', textAlign: 'right' }}>{totalCell}</td>
+                      <td style={{ padding: '8px 6px', textAlign: 'right' }}>
+                        {/* Reuse the staged `reopen` (sent -> Complete). From the
+                            Complete tab the existing "Reopen -> Active" finishes
+                            the revert. stopPropagation so the row's open-invoice
+                            click does not also fire. */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onWoAction && onWoAction(o.id, 'reopen'); }}
+                          title="Move back to the Complete tab (then Reopen → Active there if needed)"
+                          style={{
+                            height: 24, padding: '0 8px', borderRadius: 6, cursor: 'pointer',
+                            border: '1px solid var(--border-2)', background: 'var(--bg-surface)',
+                            color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
+                          }}
+                        >Reopen</button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -7648,7 +8200,9 @@ function itinSnapSlot(start) {
   return String(Math.floor(snapped / 60)).padStart(2, '0') + ':' + String(snapped % 60).padStart(2, '0');
 }
 
-function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tech, setTech, onClearFocus, onSetSchedule, onOpenWO, statuses, types, pms, inboxes, onWoAction, onAddToInbox, onAddToNewInbox, onRemoveFromInbox }) {
+function ItineraryModule({ activeOrders, techs, phases, statusColors, statusTags, focus, tech, setTech, onClearFocus, onSetSchedule, onOpenWO, statuses, types, pms, inboxes, onWoAction, onAddToInbox, onAddToNewInbox, onRemoveFromInbox }) {
+  // Unscheduled section collapse (controls + pool list share one state).
+  const [poolOpen, togglePool] = useCollapsedSection('itin-unscheduled');
   // Right-click context menu state (shared component with ListPane/DetailPane).
   const [ctxMenu, setCtxMenu] = React.useState(null);
   const closeCtx = React.useCallback(() => setCtxMenu(null), []);
@@ -7724,9 +8278,12 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
   // Scheduled blocks for this day (all techs when isAll), keyed by snapped slot.
   // Uses activeOrders (NOT the complete-filtered pool) so a scheduled WO always
   // shows on the timeline even if its status later moved to a complete phase.
+  // Slice 4 (#9): a `visited`-tagged status drops the WO off the day timeline
+  // (the visit is done); its schedule data is kept for history/map.
+  const tags = statusTags || {};
   const dayScheduled = React.useMemo(
-    () => activeOrders.filter(o => o.schedule && o.schedule.date === date && (isAll || o.tech === tech)),
-    [activeOrders, date, tech, isAll]
+    () => activeOrders.filter(o => o.schedule && o.schedule.date === date && (isAll || o.tech === tech) && tags[o.status] !== 'visited'),
+    [activeOrders, date, tech, isAll, tags]
   );
   const scheduledBySlot = React.useMemo(() => {
     const map = {};
@@ -7826,6 +8383,11 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
           <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
           {o.emergency && <span style={{ color: 'var(--danger, #d9534f)', fontWeight: 700 }}>!</span>}
           <TypeIcon kind={typeLetter(o.type)} />
+          {o.schedule && o.schedule.date && isOverdueSched(o.schedule.date, o.schedule.start) && (
+            <span title="Past scheduled time" style={{ color: OVERDUE_CFG.textColor, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+              ◷ {itinFmtTime(o.schedule.start)}
+            </span>
+          )}
           {opts.tag && <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)' }}>{opts.tag}</span>}
           {o.pm && <span style={{ marginLeft: 'auto' }}><PMChip pm={o.pm} /></span>}
         </div>
@@ -7861,9 +8423,11 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
         <div style={{ width: 280, flexShrink: 0, borderRight: '1px solid var(--border-1)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg-surface)' }}>
           {/* Day section */}
           <div style={{ flexShrink: 0, padding: '10px 12px', borderBottom: '1px solid var(--border-1)' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
-              Day
-            </div>
+            <CollapsibleSection
+              title="Day"
+              sectionKey="itin-day"
+              headerStyle={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}
+            >
             <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
               <button onClick={() => setDate(itinShiftDay(itinTodayStr(), -1))} style={{
                 flex: 1, height: 26, fontSize: 11, fontFamily: 'inherit', cursor: 'pointer',
@@ -7893,12 +8457,15 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
               }} />
               <button onClick={() => setDate(itinShiftDay(date, 1))} style={navBtnStyle}>›</button>
             </div>
+            </CollapsibleSection>
           </div>
           {/* Tech section */}
           <div style={{ flexShrink: 0, padding: '10px 12px', borderBottom: '1px solid var(--border-1)' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
-              Tech
-            </div>
+            <CollapsibleSection
+              title="Tech"
+              sectionKey="itin-tech"
+              headerStyle={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}
+            >
             <button onClick={() => setTech('ALL')} style={{
               width: '100%', height: 26, marginBottom: 4, fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
               border: '1px solid ' + (tech === 'ALL' ? 'var(--accent)' : 'var(--border-1)'),
@@ -7915,27 +8482,44 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
                 color: 'var(--text-1)', fontWeight: tech === t ? 600 : 400, textAlign: 'left', padding: '0 10px',
               }}>{t}</button>
             ))}
+            </CollapsibleSection>
           </div>
           {/* Unscheduled pool */}
           <div style={{ flexShrink: 0, padding: '10px 12px 6px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Unscheduled · {pool.length}
+            <div
+              onClick={togglePool}
+              style={{
+                cursor: 'pointer', userSelect: 'none',
+                display: 'flex', alignItems: 'center', gap: 4,
+                fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+              }}
+            >
+              <span style={{
+                fontSize: 9, color: 'var(--text-3)', width: 10, display: 'inline-block',
+                transform: poolOpen ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 120ms',
+              }}>{'▾'}</span>
+              <span style={{ flex: 1 }}>Unscheduled · {pool.length}</span>
             </div>
-            <input
-              value={poolQuery}
-              onChange={(e) => setPoolQuery(e.target.value)}
-              placeholder="Search WO #, address, city..."
-              style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
-                background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }}
-            />
-            <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} style={{
-              width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
-              background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, boxSizing: 'border-box',
-            }}>
-              <option value="">All cities</option>
-              {cityOptions.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+            {poolOpen && (
+              <React.Fragment>
+                <input
+                  value={poolQuery}
+                  onChange={(e) => setPoolQuery(e.target.value)}
+                  placeholder="Search WO #, address, city..."
+                  style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+                    background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }}
+                />
+                <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} style={{
+                  width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+                  background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, boxSizing: 'border-box',
+                }}>
+                  <option value="">All cities</option>
+                  {cityOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </React.Fragment>
+            )}
           </div>
+          {poolOpen && (
           <div
             onDragOver={(e) => { if (dragId != null) e.preventDefault(); }}
             onDrop={() => { if (dragId != null) onSetSchedule(dragId, null); setDragId(null); setOverSlot(null); }}
@@ -7944,6 +8528,8 @@ function ItineraryModule({ activeOrders, techs, phases, statusColors, focus, tec
               ? <div style={{ color: 'var(--text-3)', fontSize: 12, padding: '8px 2px' }}>No unscheduled work orders.</div>
               : pool.map(o => woCard(o, { title: 'Drag onto a time slot to schedule' }))}
           </div>
+          )}
+          <SidebarLauncherButton />
         </div>
 
         {/* Timeline */}
@@ -8231,7 +8817,7 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose }) {
 
 // Shown when sending a WO to invoice with no bid recorded. User may enter the
 // bid now, or skip and send anyway (enter it later in the invoice editor).
-function BidPromptModal({ order, onEnter, onSkip, onClose }) {
+function BidPromptModal({ order, onEnter, onSkip, onClose, verb = 'send' }) {
   const [amount, setAmount] = React.useState('');
   const inputRef = React.useRef(null);
   // Explicit focus (autoFocus inside a freshly-mounted Modal can be cleared in
@@ -8255,8 +8841,8 @@ function BidPromptModal({ order, onEnter, onSkip, onClose }) {
         </label>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
           <ActionBtn onClick={onClose}>Cancel</ActionBtn>
-          <ActionBtn onClick={onSkip}>Skip & send</ActionBtn>
-          <ActionBtn primary disabled={!amount.trim()} onClick={() => amount.trim() && onEnter(amount.trim())}>Save bid & send</ActionBtn>
+          <ActionBtn onClick={onSkip}>Skip & {verb}</ActionBtn>
+          <ActionBtn primary disabled={!amount.trim()} onClick={() => amount.trim() && onEnter(amount.trim())}>Save bid & {verb}</ActionBtn>
         </div>
       </div>
     </Modal>
@@ -8552,9 +9138,34 @@ function App() {
   const setDensity = React.useCallback((d) => updateSettings({ density: d }), [updateSettings]);
   const alertThresholds = (settings && settings.alertThresholds) || DEFAULT_ALERT_THRESHOLDS;
   const setAlertThresholds = React.useCallback((th) => updateSettings({ alertThresholds: th }), [updateSettings]);
+  // Slice 2 (#3): overdue-schedule config. Memoized on settings.overdue so the
+  // Maps marker effect (which takes it as a dep) does not rebuild markers on
+  // unrelated App re-renders. OVERDUE_CFG global feeds render-time consumers.
+  const overdueCfg = React.useMemo(() => ({ ...DEFAULT_OVERDUE_CFG, ...((settings && settings.overdue) || {}) }), [settings && settings.overdue]);
+  OVERDUE_CFG = overdueCfg;
+  const setOverdueCfg = React.useCallback((v) => updateSettings({ overdue: v }), [updateSettings]);
+  // Minute tick so overdue indicators flip live as the clock passes thresholds.
+  const [overdueTick, setOverdueTick] = React.useState(0);
+  React.useEffect(() => {
+    const t = setInterval(() => setOverdueTick(x => x + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
+  // Slice 2 (#6): Service Library sub-categories. Internal organization only —
+  // never written to the xlsx export (exportLibrary whitelists fields).
+  const librarySubCats = (settings && Array.isArray(settings.librarySubCats)) ? settings.librarySubCats : [];
+  const setLibrarySubCats = React.useCallback((v) => updateSettings({ librarySubCats: v }), [updateSettings]);
+  // Slice 3 (#8): Tech Job Types. The WO's existing `type` field IS the trade
+  // (no separate tradeList/tradeTag — that duplicated settings.types + wo.type +
+  // mapTypeColors). techJobTypes is the only new state: keyed by tech NAME, then
+  // by type NAME. Routing (slice 5) reads techJobTypes[tech][wo.type].{selected,weight}.
+  const techJobTypes = (settings && settings.techJobTypes && typeof settings.techJobTypes === 'object') ? settings.techJobTypes : {};
+  const setTechJobTypes = React.useCallback((v) => updateSettings({ techJobTypes: v }), [updateSettings]);
   const setPhases = React.useCallback((p) => updateData({ phases: p }), [updateData]);
   const setStatuses = React.useCallback((s) => updateData({ statuses: s }), [updateData]);
   const setStatusColors = React.useCallback((sc) => updateData({ statusColors: sc }), [updateData]);
+  // Slice 4 (#9): status -> system-tag map. See SYSTEM_TAGS.
+  const statusTags = (settings && settings.statusTags && typeof settings.statusTags === 'object') ? settings.statusTags : {};
+  const setStatusTags = React.useCallback((v) => updateSettings({ statusTags: v }), [updateSettings]);
   const moreInfoColor = (typeof data?.moreInfoColor === 'string' && data.moreInfoColor) || DEFAULT_MORE_INFO_COLOR;
   const setMoreInfoColor = React.useCallback((c) => updateData({ moreInfoColor: c }), [updateData]);
   // change10 queue #5: per-variable CSS custom-theme overrides. Stored in
@@ -8583,6 +9194,7 @@ function App() {
       theme: 'dark',
       density: 'balanced',
       alertThresholds: DEFAULT_ALERT_THRESHOLDS,
+      overdue: DEFAULT_OVERDUE_CFG,
       trayEnabled: true,
       trayBadgeSource: 'attention',
       viewSorts: {},
@@ -9552,14 +10164,14 @@ function App() {
       toast('Send to invoice is only available from the Complete tab', 'err');
       return;
     }
-    if (!o.bidAmount || !String(o.bidAmount).trim()) { setBidPrompt(id); return; }
+    if (!o.bidAmount || !String(o.bidAmount).trim()) { setBidPrompt({ id, mode: 'sent' }); return; }
     doSendToInvoice(id);
   }, [orders, doSendToInvoice, toast]);
 
   // change11: Active → Complete. Hardcoded status='Complete - Pending Approval'
   // (mirrors Trash's hardcoded Cancelled). Saves prior status into prevStatus
   // so Reopen can revert. Auto-unschedule (Complete WOs leave the itinerary).
-  const markComplete = React.useCallback((id) => {
+  const doMarkComplete = React.useCallback((id) => {
     updateOrder(id, cur => {
       const prior = cur.status || 'Open';
       const next = {
@@ -9574,6 +10186,15 @@ function App() {
       return next;
     });
   }, [updateOrder]);
+
+  // Slice 2 (#5): Mark Complete reuses the Send-to-Invoice bid prompt — if the
+  // WO has no bid amount, ask for it (or skip) before flipping to tab='complete'.
+  const markComplete = React.useCallback((id) => {
+    const o = orders.find(x => x.id === id);
+    if (!o) return;
+    if (!o.bidAmount || !String(o.bidAmount).trim()) { setBidPrompt({ id, mode: 'complete' }); return; }
+    doMarkComplete(id);
+  }, [orders, doMarkComplete]);
 
   // change11: Safety-net reverse. From sent → complete, from complete → active.
   // Used by Invoices module DetailPane and Complete-tab context menu.
@@ -9812,7 +10433,7 @@ function App() {
       pm: form.pm, type: form.type, address: form.address, city: form.city,
       phone: form.phone, tech: form.tech, status: form.status, notes: form.notes,
       dateCreated: form.dateCreated, propertyId: form.propertyId, bidAmount: form.bidAmount,
-      emergency: !!form.emergency, warranty: !!form.warranty,
+      emergency: !!form.emergency, warranty: !!form.warranty, returnPending: !!form.returnPending,
       contactName: form.contactName || '',
       contacts: Array.isArray(form.contacts) ? form.contacts : [],
       id: form.id,
@@ -9828,7 +10449,7 @@ function App() {
       pm: form.pm, type: form.type, address: form.address, city: form.city,
       phone: form.phone, tech: form.tech, status: form.status, notes: form.notes,
       dateCreated: form.dateCreated, propertyId: form.propertyId, bidAmount: form.bidAmount,
-      emergency: !!form.emergency, warranty: !!form.warranty,
+      emergency: !!form.emergency, warranty: !!form.warranty, returnPending: !!form.returnPending,
       contactName: form.contactName || '',
       contacts: Array.isArray(form.contacts) ? form.contacts : [],
       history: [...(Array.isArray(cur.history) ? cur.history : []),
@@ -9986,6 +10607,10 @@ function App() {
           return next;
         });
         toast('Status: ' + payload);
+        // Slice 4 (#9): `schedule` tag opens the Schedule modal on this single
+        // WO. Single interactive path only (bulkSetStatus never routes here),
+        // so a bulk status change cannot pop the modal N times.
+        if (statusTags[payload] === 'schedule') setScheduleTarget(id);
         break;
       case 'markComplete':
         markComplete(id);
@@ -10051,6 +10676,12 @@ function App() {
           history: [...(cur.history || []), histEntry(cur.warranty ? 'warranty: cleared' : 'warranty: set')],
         }));
         break;
+      case 'toggleReturnPending':
+        updateOrder(id, cur => ({
+          ...cur, returnPending: !cur.returnPending,
+          history: [...(cur.history || []), histEntry(cur.returnPending ? 'return pending: cleared' : 'return pending: set')],
+        }));
+        break;
       case 'capture':
         captureOrder(id);
         break;
@@ -10105,7 +10736,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings]);
+  }, [updateOrder, captureOrder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -10178,12 +10809,21 @@ function App() {
     />;
   } else if (currentView === 'settings') {
     rightPane = <SettingsDrawer
+      toast={toast}
       theme={theme}
       setTheme={setTheme}
       density={density}
       setDensity={setDensity}
       alertThresholds={alertThresholds}
       setAlertThresholds={setAlertThresholds}
+      overdueCfg={overdueCfg}
+      setOverdueCfg={setOverdueCfg}
+      librarySubCats={librarySubCats}
+      setLibrarySubCats={setLibrarySubCats}
+      techJobTypes={techJobTypes}
+      setTechJobTypes={setTechJobTypes}
+      statusTags={statusTags}
+      setStatusTags={setStatusTags}
       onClose={() => { setCurrentView('active'); setPendingSettingsSection(null); }}
       phases={phases}
       setPhases={setPhases}
@@ -10297,28 +10937,16 @@ function App() {
           background: 'var(--bg-canvas)',
           color: 'var(--text-1)',
           display: 'grid',
-          // change10 slice 3.4: sidebar column collapses to 0 on non-WO
-          // modules; on WO it stays at 200px (slimmer than the previous 220).
-          gridTemplateColumns: (currentModule === 'work-orders' ? '200px ' : '0 ') + '1fr 1.2fr',
+          // Sidebar column always 0: every module (incl. WO since the
+          // header-uniformity rework) renders its own sidebar below its
+          // full-width header, matching the Maps/Invoices/Itinerary shell.
+          gridTemplateColumns: '0 1fr 1.2fr',
           gridTemplateRows: 'minmax(0, 1fr)',
           overflow: 'hidden',
         }}>
-          {currentModule === 'work-orders' ? (
-            <Sidebar
-              activeView={currentView}
-              presets={presets}
-              inboxes={inboxes}
-              onSelectView={selectView}
-              onRenamePreset={onRenamePreset}
-              onDeletePreset={onDeletePreset}
-              onAddInbox={onAddInbox}
-              onRenameInbox={onRenameInbox}
-              onDeleteInbox={onDeleteInbox}
-              onOpenLauncher={() => setLauncherOpen(true)}
-            />
-          ) : <div />}
+          <div />
           {currentModule === 'service-items' ? (
-            <ServiceLibrary toast={toast} />
+            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} />
           ) : currentModule === 'maps' ? (
             <MapsModule
               activeOrders={mapOrders}
@@ -10336,12 +10964,17 @@ function App() {
               locationIqKey={locationIqKey}
               mapMarkerColors={settings.mapMarkerColors}
               mapTypeColors={settings.mapTypeColors}
+              overdueCfg={overdueCfg}
+              overdueTick={overdueTick}
+              statusTags={statusTags}
+              statusColors={statusColors}
             />
           ) : currentModule === 'invoices' ? (
             <InvoicesModule
               sentOrders={sentOrders}
               selectedId={selectedWO}
               onOpenInvoice={openInvoiceEditor}
+              onWoAction={woAction}
             />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
@@ -10349,6 +10982,7 @@ function App() {
               techs={techs}
               phases={phases}
               statusColors={statusColors}
+              statusTags={statusTags}
               focus={itinFocus}
               tech={itinTech}
               setTech={setItinTech}
@@ -10375,6 +11009,17 @@ function App() {
               isInboxView={!!activeInbox}
             />
             <div style={{ flex: 1, minHeight: 0, display: 'flex', minWidth: 0 }}>
+              <Sidebar
+                activeView={currentView}
+                presets={presets}
+                inboxes={inboxes}
+                onSelectView={selectView}
+                onRenamePreset={onRenamePreset}
+                onDeletePreset={onDeletePreset}
+                onAddInbox={onAddInbox}
+                onRenameInbox={onRenameInbox}
+                onDeleteInbox={onDeleteInbox}
+              />
               <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                 <ListPane
                   view={currentView}
@@ -10480,18 +11125,23 @@ function App() {
           );
         })()}
         {bidPrompt != null && (() => {
-          const o = orders.find(x => x.id === bidPrompt);
+          const o = orders.find(x => x.id === bidPrompt.id);
           if (!o) return null;
+          // Slice 2 (#5): same modal serves Send-to-Invoice and Mark Complete;
+          // mode picks the finishing action and wording.
+          const completing = bidPrompt.mode === 'complete';
+          const finish = completing ? doMarkComplete : doSendToInvoice;
           return (
             <BidPromptModal
               order={o}
+              verb={completing ? 'complete' : 'send'}
               onEnter={(amount) => {
-                updateOrder(bidPrompt, cur => ({ ...cur, bidAmount: amount }));
-                doSendToInvoice(bidPrompt);
+                updateOrder(bidPrompt.id, cur => ({ ...cur, bidAmount: amount }));
+                finish(bidPrompt.id);
                 setBidPrompt(null);
-                toast('Bid saved · sent to invoice');
+                toast(completing ? 'Bid saved · marked complete' : 'Bid saved · sent to invoice');
               }}
-              onSkip={() => { doSendToInvoice(bidPrompt); setBidPrompt(null); toast('Sent to invoice (no bid)'); }}
+              onSkip={() => { finish(bidPrompt.id); setBidPrompt(null); toast(completing ? 'Marked complete (no bid)' : 'Sent to invoice (no bid)'); }}
               onClose={() => setBidPrompt(null)}
             />
           );

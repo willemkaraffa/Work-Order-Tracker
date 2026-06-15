@@ -1,15 +1,98 @@
 ## Approach
 
-* MANDATORY - Read existing files before writing. Don't re-read unless changed.
-* MANDATORY - No emojis or em-dashes.
-* MANDATORY - Do not guess APIs, versions, flags, commit SHAs, or package names. Verify by reading code or docs before asserting.
-* MANDATORY - Work Silently during tasks. Do not make any chat dialogues until a coding task has been completed, adhering to all prior rules
-* MANDATORY - Reduce all chat output to the bare minimum wording to convey the needed information. If something can be expressed through a single word, do so.
-* ESSENTIAL - Read this file upon every new session without prompting.
-* CRITICAL - Read and obey .claude\\settings.json in this repo.
+# Claude Code Behavior Rules
 
-## Design preferences
+## 1. Think Before Coding
+- Never make assumptions about undocumented APIs or configurations.
+- Ask clarifying questions if a task's requirements are ambiguous.
 
-* UI must never clip content; content that exceeds the window must scroll or shrink to fit. Default fix: bound the offending container and give it an internal scroll region (flex `flex:1; minHeight:0; overflowY:auto`) with a pinned `flexShrink:0` footer - mirror an existing pane that already does this correctly. Electron `setZoomFactor` window-scaling was tried for the launch-landing clip and REVERTED (commit a229503): it only engages below a baseline window size, so it does nothing at the default/launch size where clips actually appear. Do not reach for global zoom before fixing the specific container's overflow.
-* When a UI element "still" appears broken after a fix, grep for the user-visible string (e.g. the button label) and confirm WHICH component actually renders it before editing. This repo has duplicate components (e.g. launch `FullScreenLanding` at index.html:3568 vs in-pane `Landing` at :2534) sharing the same labels; two fixes were wasted editing the wrong one.
+## 2. Surgical Changes
+- Modify only the minimum necessary lines of code to achieve the goal.
+- Avoid refactoring adjacent or unrelated files unless explicitly asked.
+- Match existing style, even if you would write it differently.
+- Before introducing a new field/list/state, grep for an existing field that already holds that concept and reuse it. Plan-doc pseudocode names are placeholders, not a schema mandate; a new parallel system requires a stated reason that survives scrutiny.
 
+## 3. Simplicity First
+- Do not write speculative helper functions or complex abstractions.
+- Prioritize simple, readable code over clever or DRY patterns.
+- This code should be succinct and built for LLMs to maintain, not humans; document accordingly.
+
+## 4. Goal-Driven Execution
+- Establish clear test or verification criteria before writing any code.
+- Run local tests or build steps to verify your changes actually work before completion.
+- If in the even of failed execution/live tests, review code for errors first BEFORE suggesting user input.
+
+## 5. Caveman
+- ALWAYS begin session on /caveman ultra skill
+- refresh /caveman ultra skill on detection of verbose dialogue from Claude Code
+
+CRITICAL ALWAYS
+## Generalized protocol — anti-tech-debt rules.
+
+A. Anti-patterns that breed silent bugs
+A1. State that mirrors a derived value.
+useState(x) + useEffect(() => setState(x), [x]). Means render-time value wasn't usable as-is. Rewrite: use x directly, or useMemo. State exists only when something the renderer can't compute writes to it (user input, async, refs).
+
+A2. useState(initializer) where initializer can be null/empty on first render.
+React reads initializer once. Later recomputes do nothing. If you expect tracking, use derived value, not state.
+
+A3. Render guard around a ref-attached element + layoutEffect reading that ref.
+Chicken-and-egg. Either mount unconditionally (visibility/opacity to hide) or restructure so ref-mount and effect deps move together.
+
+A4. Effect deps that don't observe the actual trigger.
+If effect must run after mount but deps fire before mount, deps are wrong. Add the post-mount signal to deps, or move logic into ref callback / useLayoutEffect keyed on mount.
+
+A5. Inline component definitions inside render.
+const Foo = () => <div/> inside parent → new function ref each render → unmount/remount → loses DOM identity, hover state, focus, animations. Either hoist or render raw JSX inline.
+
+A6. Closure-captured callbacks passed to add/removeEventListener.
+Unstable identity → cleanup mismatches → leaked listeners. Wrap in useCallback with proper deps, or use ref.
+
+A7. setTimeout inside effects without clearTimeout in cleanup.
+Race after unmount → calls into stale state / setters.
+
+B. Porting / reuse rules
+B1. Write the precondition before porting.
+Read the source pattern. Write down in one sentence what makes it work (invariant, lifecycle order, mounted state). Verify destination preserves it. If not, pattern is wrong even if it compiles.
+
+B2. Port mechanism not surface.
+Don't copy hook shape, prop names, selectors. Copy: data flow direction, what owns state, when DOM exists, who triggers what. Surface differences are fine; mechanism mismatch breaks.
+
+B3. Prefer wrapping working code over rewriting.
+Already-working solution in same repo or sibling project → call it, import it, subprocess it. Reimplementing requires stated reason that survives scrutiny.
+
+C. Diagnosis discipline
+C1. Trace the state machine before patching.
+Write the render sequence on paper: render N → effects → render N+1 → … Mark which state/ref/effect changes at each step. Bug usually visible in trace, not in line-by-line reading.
+
+C2. Two failed fixes → re-examine approach, not symptoms.
+Third fix on wrong approach compounds debt. Step back, question premise.
+
+C3. Static review flagging without test = liability.
+If you spotted a risk, mitigate or write a live test for it. "I noted but did nothing" is worse than not noting — leaves false comfort.
+
+C4. Be the alpha tester.
+Claim of fix without verifying = guess. Run the code path before reporting. If can't run, document precise trace proving correctness.
+
+D. Code smells = audit triggers
+useEffect with only one side effect: a setState call → A1
+useState(maybeNull) paired with useMemo of same value → A2
+ready: false initial flag + layoutEffect → likely A3
+Inline component (const X = (props) => <...> inside render) → A5
+addEventListener without useCallback on handler → A6
+setTimeout/setInterval in effect without cleanup → A7
+"// HACK", "// workaround", "// fix-up" comments → root cause untreated
+E. Pre-commit gate (mental)
+Before claiming done:
+
+Did I run the code path? Or trace it stepwise?
+Did the failure mode I flagged in review get tested?
+Does any new state have a useEffect → setState(derived) shadow? (A1)
+Does any new ref-attached element sit behind a render guard? (A3)
+Did I copy a hook block? If yes, did I write its invariant down?
+Any inline components? (A5)
+Cleanup functions match setup? (A6, A7)
+F. Communication discipline
+Report "verified" only when verified, not when "looks right."
+When unsure, say "static analysis only — not run." Lets user decide test cost.
+After fix: name the root cause, not the symptom. Symptom-only summaries hide debt from future reader.
