@@ -209,7 +209,7 @@ function densityFor(value) {
 
 const MIGRATION_VERSION = '3.0';
 // Display-only app version (keep in sync with package.json on release).
-const APP_VERSION = '4.0.2';
+const APP_VERSION = '4.0.3';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.
@@ -957,6 +957,58 @@ function isOverdueSched(date, start) {
   if (!date) return false;
   const t = new Date(date + 'T' + (start || '00:00') + ':00').getTime();
   return isFinite(t) && Date.now() - t > OVERDUE_CFG.thresholdMinutes * 60000;
+}
+
+// Slice 5 (#10): routing. Great-circle km between two lat/lon points (hoisted
+// from the geocoder so routing + suspect-distance share one implementation).
+function haversineKm(la1, lo1, la2, lo2) {
+  const R = 6371;
+  const toRad = (d) => d * Math.PI / 180;
+  const dLat = toRad(la2 - la1);
+  const dLon = toRad(lo2 - lo1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(la1)) * Math.cos(toRad(la2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+// Straight-line km scaled by a flat road factor (no OSRM/true ETA — locked).
+const ROAD_FACTOR = 1.3;
+function roadKm(la1, lo1, la2, lo2) { return haversineKm(la1, lo1, la2, lo2) * ROAD_FACTOR; }
+
+// Routing tunables. weights apply to the composite "Suggested" score; the map
+// turns a tech's low/med/high job-type preference into a numeric multiplier.
+const DEFAULT_ROUTING_WEIGHTS = { dist: 1, city: 0.5, unfilledCity: 0.3, type: 0.4 };
+const ROUTE_WEIGHT_MAP = { low: 0.33, med: 0.66, high: 1 };
+
+// Pure scorer. Given the anchor WO (the one being scheduled), the chosen tech,
+// the candidate pool, a geo lookup, techJobTypes + weights, returns ranked
+// arrays for the two tabs plus a skipped count (candidates with no geocode).
+//   anchorGeo = { lat, lon } | null ; geoOf(id) -> { lat, lon } | null
+//   scheduledIds = Set of WO ids already on the itinerary (excluded)
+function scoreCandidates({ anchor, anchorGeo, candidates, geoOf, tech, techJobTypes, weights, scheduledIds, cityCounts }) {
+  if (!anchorGeo) return { suggested: [], closeBy: [], skipped: 0, noAnchor: true };
+  const w = { ...DEFAULT_ROUTING_WEIGHTS, ...(weights || {}) };
+  const jt = (techJobTypes && techJobTypes[tech]) || {};
+  let skipped = 0;
+  const rows = [];
+  for (const c of candidates) {
+    if (!c || c.id === anchor.id) continue;
+    if (scheduledIds && scheduledIds.has(c.id)) continue;
+    const g = geoOf(c.id);
+    if (!g || g.lat == null) { skipped++; continue; }
+    const km = roadKm(anchorGeo.lat, anchorGeo.lon, g.lat, g.lon);
+    const sameCity = !!(c.city && anchor.city && String(c.city).toLowerCase() === String(anchor.city).toLowerCase());
+    const cityUnfilled = sameCity && cityCounts && (cityCounts[String(c.city).toLowerCase()] || 0) > 1;
+    const cell = jt[c.type];
+    const typeScore = (cell && cell.selected) ? (ROUTE_WEIGHT_MAP[cell.weight] || ROUTE_WEIGHT_MAP.med) : 0;
+    const score =
+        w.dist * (1 / Math.max(km, 0.1))
+      + w.city * (sameCity ? 1 : 0)
+      + w.unfilledCity * (cityUnfilled ? 1 : 0)
+      + w.type * typeScore;
+    rows.push({ id: c.id, km, score, selectable: !!(cell && cell.selected) });
+  }
+  const suggested = rows.filter(r => r.selectable).slice().sort((a, b) => b.score - a.score);
+  const closeBy = rows.slice().sort((a, b) => a.km - b.km);
+  return { suggested, closeBy, skipped, noAnchor: false };
 }
 
 const DEFAULT_ALERT_THRESHOLDS = {
@@ -3823,6 +3875,7 @@ const TT_SECTIONS = [
   { id: 'appearance',  label: 'Appearance' },
   { id: 'workflow',    label: 'Workflow' },
   { id: 'trades',      label: 'Tech Job Types' },
+  { id: 'routing',     label: 'Routing' },
   { id: 'library',     label: 'Service Library' },
   { id: 'credentials', label: 'Credentials' },
   { id: 'apikeys',     label: 'API Keys' },
@@ -3874,7 +3927,7 @@ function stateMatches(a, b) {
   return !!(ca && cb && ca === cb);
 }
 
-function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
+function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, techColors, setTechColors, routingWeights, setRoutingWeights, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
   const [section, setSection] = React.useState(initialSection || 'appearance');
   return (
     <section style={{
@@ -3925,7 +3978,8 @@ function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, 
       <div style={{ padding: '28px 32px', overflow: 'auto', minHeight: 0 }}>
         {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
         {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
-        {section === 'trades'     && <TradesSection types={types} mapTypeColors={mapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} />}
+        {section === 'trades'     && <TradesSection types={types} mapTypeColors={mapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} techColors={techColors} setTechColors={setTechColors} />}
+        {section === 'routing'    && <RoutingSection weights={routingWeights} setWeights={setRoutingWeights} />}
         {section === 'library'    && <LibraryToolsSection subCats={librarySubCats} setSubCats={setLibrarySubCats} toast={toast} />}
         {section === 'credentials' && <CredentialsSection />}
         {section === 'apikeys'    && <ApiKeysSection locationIqKey={locationIqKey} setLocationIqKey={setLocationIqKey} />}
@@ -5495,7 +5549,7 @@ function AlertsSection({ thresholds, setThresholds, overdueCfg, setOverdueCfg })
 // type, a { selected, weight } cell (weight disabled unless selected). Routing
 // (slice 5) reads techJobTypes[tech][wo.type].
 const TRADE_WEIGHTS = ['low', 'med', 'high'];
-function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, techs }) {
+function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, techs, techColors, setTechColors }) {
   const list = (types || []).filter(Boolean);
   // Same color resolution the map markers use: explicit override, else the
   // letter default for the three built-ins, else a neutral gray.
@@ -5535,7 +5589,17 @@ function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, te
           <tbody>
             {(techs || []).map(tech => (
               <tr key={tech}>
-                <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-1)', fontWeight: 500 }}>{tech}</td>
+                <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-1)', fontWeight: 500 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    {/* Slice 5 (#10): per-tech route color used for map polylines. */}
+                    {setTechColors && (
+                      <input type="color" value={normalizeHex((techColors && techColors[tech]) || '#6b7280')}
+                        onChange={(e) => setTechColors({ ...(techColors || {}), [tech]: e.target.value })}
+                        title="Route color" style={{ width: 20, height: 20, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+                    )}
+                    {tech}
+                  </span>
+                </td>
                 {list.map(type => {
                   const cell = (techJobTypes && techJobTypes[tech] && techJobTypes[tech][type]) || {};
                   return (
@@ -5560,6 +5624,41 @@ function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, te
         </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// Slice 5 (#10): routing weight tuning. Weights feed the "Suggested" composite
+// score in the Schedule modal. Tech route colors live in Tech Job Types.
+const ROUTING_WEIGHT_DEFS = [
+  { key: 'dist',         label: 'Distance',          hint: 'Closer WOs score higher (1 / road-km).' },
+  { key: 'city',         label: 'Same city',         hint: 'Bonus when the candidate shares the anchor WO city.' },
+  { key: 'unfilledCity', label: 'Unfilled city',     hint: 'Bonus when more unscheduled WOs remain in that city.' },
+  { key: 'type',         label: 'Job-type preference', hint: "Weight of the tech's low/med/high preference for the WO type." },
+];
+function RoutingSection({ weights, setWeights }) {
+  const w = { ...DEFAULT_ROUTING_WEIGHTS, ...(weights || {}) };
+  return (
+    <div>
+      <SettingTitle sub="Tune how the Schedule modal ranks Suggested work orders. Distance is Haversine x 1.3 (no live traffic). Route colors are set per tech in Tech Job Types.">Routing</SettingTitle>
+      {ROUTING_WEIGHT_DEFS.map(def => (
+        <SettingRow key={def.key} label={def.label} hint={def.hint}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="number" min={0} step={0.1} value={w[def.key]}
+              onChange={(e) => { const n = parseFloat(e.target.value); setWeights({ ...w, [def.key]: isNaN(n) ? 0 : n }); }}
+              style={{ width: 80, padding: '6px 10px', border: '1px solid var(--border-2)', borderRadius: 6,
+                background: 'var(--bg-surface)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13, textAlign: 'right' }}
+            />
+            {w[def.key] !== DEFAULT_ROUTING_WEIGHTS[def.key] && (
+              <button onClick={() => setWeights({ ...w, [def.key]: DEFAULT_ROUTING_WEIGHTS[def.key] })} style={{
+                height: 24, padding: '0 8px', border: '1px solid var(--border-2)', background: 'var(--bg-surface)',
+                color: 'var(--text-3)', borderRadius: 4, fontFamily: 'inherit', fontSize: 11, cursor: 'pointer',
+              }}>Reset</button>
+            )}
+          </div>
+        </SettingRow>
+      ))}
     </div>
   );
 }
@@ -7262,8 +7361,10 @@ function ModuleNavChevrons({ side = 'left' }) {
 // settings.geocache so cold loads after the first session are instant; the
 // queue worker only hits Nominatim for new or previously-failed addresses.
 // Accuracy is "good enough to eyeball" - techs route on their phones.
-function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors }) {
+function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors }) {
   const [query, setQuery] = React.useState('');
+  // Slice 5 (#10): route polylines track one day at a time. Default today.
+  const [routeDay, setRouteDay] = React.useState(itinTodayStr());
   // change10 queue item #4: multi-stop driving directions. Ordered list of WO
   // ids the user has staged for a route. "Open in Google Maps" passes them as
   // waypoints to /maps/dir; origin defaults to the home address from settings.
@@ -7540,6 +7641,28 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
       markerByIdRef.current[o.id] = marker;
       points.push([g.lat, g.lon]);
     }
+    // Slice 5 (#10): per-tech route polylines. Group the rendered, geocoded,
+    // scheduled WOs by tech, order each tech's stops by schedule date+time, and
+    // draw a straight-line polyline in the tech's color (settings.techColors).
+    // Added to the same markers layer so it clears/redraws with the markers.
+    {
+      const byTech = {};
+      for (const o of list) {
+        if (!o.tech || !(o.schedule && o.schedule.date)) continue;
+        if (o.schedule.date !== routeDay) continue; // only the selected day's route
+        const g = geocache && geocache[o.id];
+        if (!g || g.error || g.lat == null) continue;
+        (byTech[o.tech] = byTech[o.tech] || []).push(o);
+      }
+      for (const techName of Object.keys(byTech)) {
+        const stops = byTech[techName]
+          .sort((a, b) => (a.schedule.date + (a.schedule.start || '')).localeCompare(b.schedule.date + (b.schedule.start || '')))
+          .map(o => { const g = geocache[o.id]; return [g.lat, g.lon]; });
+        if (stops.length < 2) continue;
+        const color = (techColors && techColors[techName]) || '#6b7280';
+        L.polyline(stops, { color, weight: 3, opacity: 0.7, dashArray: '6 6' }).addTo(markersLayerRef.current);
+      }
+    }
     // Auto-fit only when the user has NOT configured a home view. With a
     // home set, startup centers on home and stays there until the user
     // pans or clicks "Go to home".
@@ -7567,7 +7690,7 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
       // Otherwise: popup was previously dismissed by the user. Leave it
       // closed until they pick a different WO.
     }
-  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors]);
+  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors, techColors, routeDay]);
 
   // Pan to the selected WO when selection changes. Does NOT touch the
   // popup - that is handled by the render-markers effect above so a
@@ -7597,6 +7720,15 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
             </div>
           </div>
           <div style={{ flex: 1 }} />
+          {/* Slice 5 (#10): route polylines track one day. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }} title="Route lines show only this day's scheduled stops per tech">
+            <span style={{ fontSize: 11, color: 'var(--text-3)' }}>Route day</span>
+            <button onClick={() => setRouteDay(d => itinShiftDay(d, -1))} style={{ height: 28, width: 24, border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--bg-surface)', color: 'var(--text-1)', cursor: 'pointer', fontSize: 13 }}>‹</button>
+            <input type="date" value={routeDay} onChange={(e) => e.target.value && setRouteDay(e.target.value)}
+              style={{ height: 28, padding: '0 6px', border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 12 }} />
+            <button onClick={() => setRouteDay(d => itinShiftDay(d, 1))} style={{ height: 28, width: 24, border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--bg-surface)', color: 'var(--text-1)', cursor: 'pointer', fontSize: 13 }}>›</button>
+            <button onClick={() => setRouteDay(itinTodayStr())} style={{ height: 28, padding: '0 8px', border: '1px solid ' + (routeDay === itinTodayStr() ? 'var(--accent)' : 'var(--border-1)'), borderRadius: 6, background: routeDay === itinTodayStr() ? 'var(--bg-row-sel)' : 'var(--bg-surface)', color: 'var(--text-1)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 600 }}>Today</button>
+          </div>
           <button
             onClick={() => {
               if (!mapRef.current || !defaultView || !isFinite(defaultView.lat)) return;
@@ -8775,11 +8907,12 @@ const navBtnStyle = {
 
 // Scheduling form launched from the WO context menu. Assign a technician + a
 // timeframe (day + 30-min start). Prefills from any existing schedule.
-function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose }) {
+function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick }) {
   const slots = React.useMemo(() => itinSlots(), []);
   const [tech, setTech] = React.useState(order.tech || techs[0] || '');
   const [date, setDate] = React.useState((order.schedule && order.schedule.date) || itinTodayStr());
   const [start, setStart] = React.useState((order.schedule && order.schedule.start) || slots[0]);
+  const [routeTab, setRouteTab] = React.useState('suggested'); // 'suggested' | 'closeby'
   const { addr, city } = splitAddress(order);
   const fld = {
     display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
@@ -8787,10 +8920,79 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose }) {
     fontFamily: 'inherit', fontSize: 14,
   };
   const lbl = { fontSize: 12, color: 'var(--text-3)' };
+
+  // Slice 5 (#10): nearby suggestions relative to THIS WO (the anchor). Memoized
+  // on the inputs; anchor is a single WO so only O(N) distances per recompute.
+  const byId = React.useMemo(() => new Map((activeOrders || []).map(o => [o.id, o])), [activeOrders]);
+  const routing = React.useMemo(() => {
+    if (!onPick) return null; // routing not wired
+    const gc = geocache || {};
+    const anchorGeo = gc[order.id] && gc[order.id].lat != null ? gc[order.id] : null;
+    const scheduledIds = new Set((activeOrders || []).filter(o => o.schedule && o.schedule.date).map(o => o.id));
+    const cityCounts = {};
+    for (const o of (activeOrders || [])) {
+      if (scheduledIds.has(o.id)) continue;
+      const ck = String(o.city || '').toLowerCase();
+      if (ck) cityCounts[ck] = (cityCounts[ck] || 0) + 1;
+    }
+    return scoreCandidates({
+      anchor: order, anchorGeo, candidates: activeOrders || [],
+      geoOf: (id) => (gc[id] && gc[id].lat != null ? gc[id] : null),
+      tech, techJobTypes: techJobTypes || {}, weights: routingWeights,
+      scheduledIds, cityCounts,
+    });
+  }, [onPick, order, activeOrders, geocache, tech, techJobTypes, routingWeights]);
+
+  const routeRows = routing ? (routeTab === 'suggested' ? routing.suggested : routing.closeBy) : [];
+
   return (
-    <Modal open onClose={onClose} title={'Schedule ' + order.id} width={420}>
+    <Modal open onClose={onClose} title={'Schedule ' + order.id} width={440}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ fontSize: 13, color: 'var(--text-2)' }}>{addr || '(no address)'}{city ? ', ' + city : ''}</div>
+        {routing && (
+          <div style={{ border: '1px solid var(--border-1)', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border-1)' }}>
+              {[['suggested', 'Suggested'], ['closeby', 'Close By']].map(([id, label]) => (
+                <button key={id} onClick={() => setRouteTab(id)} style={{
+                  flex: 1, height: 30, border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
+                  background: routeTab === id ? 'var(--bg-row-sel)' : 'var(--bg-surface)',
+                  color: routeTab === id ? 'var(--text-1)' : 'var(--text-3)',
+                  borderBottom: routeTab === id ? '2px solid var(--accent)' : '2px solid transparent',
+                }}>{label}</button>
+              ))}
+            </div>
+            <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+              {routing.noAnchor ? (
+                <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-3)' }}>No map location for this WO — can't suggest nearby. Re-geocode it in Maps.</div>
+              ) : routeRows.length === 0 ? (
+                <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-3)' }}>
+                  {routeTab === 'suggested' ? 'No unscheduled WOs match this tech’s job types nearby.' : 'No other unscheduled WOs with a location.'}
+                </div>
+              ) : routeRows.slice(0, 30).map(r => {
+                const o = byId.get(r.id); if (!o) return null;
+                const a = splitAddress(o);
+                return (
+                  <button key={r.id} onClick={() => onPick(r.id)} title="Open this WO to set its time" style={{
+                    display: 'flex', width: '100%', alignItems: 'baseline', gap: 8, padding: '6px 12px',
+                    border: 'none', borderTop: '1px solid var(--border-1)', background: 'transparent',
+                    color: 'var(--text-1)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, textAlign: 'left',
+                  }}>
+                    <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{o.id}</span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-2)' }}>
+                      {a.addr || '(no address)'}{a.city ? ', ' + a.city : ''}
+                    </span>
+                    <span style={{ flexShrink: 0, color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' }}>{r.km.toFixed(1)} km</span>
+                  </button>
+                );
+              })}
+            </div>
+            {!routing.noAnchor && routing.skipped > 0 && (
+              <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-3)', borderTop: '1px solid var(--border-1)' }}>
+                {routing.skipped} skipped (no location)
+              </div>
+            )}
+          </div>
+        )}
         <label style={lbl}>Technician
           <select value={tech} onChange={(e) => setTech(e.target.value)} style={fld}>
             {!techs.includes(tech) && tech === '' && <option value="">(none)</option>}
@@ -9160,6 +9362,11 @@ function App() {
   // by type NAME. Routing (slice 5) reads techJobTypes[tech][wo.type].{selected,weight}.
   const techJobTypes = (settings && settings.techJobTypes && typeof settings.techJobTypes === 'object') ? settings.techJobTypes : {};
   const setTechJobTypes = React.useCallback((v) => updateSettings({ techJobTypes: v }), [updateSettings]);
+  // Slice 5 (#10): per-tech route color + tunable routing weights.
+  const techColors = (settings && settings.techColors && typeof settings.techColors === 'object') ? settings.techColors : {};
+  const setTechColors = React.useCallback((v) => updateSettings({ techColors: v }), [updateSettings]);
+  const routingWeights = React.useMemo(() => ({ ...DEFAULT_ROUTING_WEIGHTS, ...((settings && settings.routingWeights) || {}) }), [settings && settings.routingWeights]);
+  const setRoutingWeights = React.useCallback((v) => updateSettings({ routingWeights: v }), [updateSettings]);
   const setPhases = React.useCallback((p) => updateData({ phases: p }), [updateData]);
   const setStatuses = React.useCallback((s) => updateData({ statuses: s }), [updateData]);
   const setStatusColors = React.useCallback((sc) => updateData({ statusColors: sc }), [updateData]);
@@ -9605,14 +9812,7 @@ function App() {
     if (!list.length) { setGeocodeProgress(null); return; }
     let cancelled = false;
 
-    const haversineKm = (la1, lo1, la2, lo2) => {
-      const R = 6371;
-      const toRad = (d) => d * Math.PI / 180;
-      const dLat = toRad(la2 - la1);
-      const dLon = toRad(lo2 - lo1);
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(la1)) * Math.cos(toRad(la2)) * Math.sin(dLon / 2) ** 2;
-      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    };
+    // haversineKm hoisted to module scope (Slice 5).
 
     // Parse street / city / state / zip from a WO. Pulls trailing
     // ", ST 12345" out of the address itself so cross-state WOs do not
@@ -10822,6 +11022,10 @@ function App() {
       setLibrarySubCats={setLibrarySubCats}
       techJobTypes={techJobTypes}
       setTechJobTypes={setTechJobTypes}
+      techColors={techColors}
+      setTechColors={setTechColors}
+      routingWeights={routingWeights}
+      setRoutingWeights={setRoutingWeights}
       statusTags={statusTags}
       setStatusTags={setStatusTags}
       onClose={() => { setCurrentView('active'); setPendingSettingsSection(null); }}
@@ -10968,6 +11172,7 @@ function App() {
               overdueTick={overdueTick}
               statusTags={statusTags}
               statusColors={statusColors}
+              techColors={techColors}
             />
           ) : currentModule === 'invoices' ? (
             <InvoicesModule
@@ -11118,6 +11323,11 @@ function App() {
             <ScheduleModal
               order={o}
               techs={techs}
+              activeOrders={activeOrders}
+              geocache={geocache}
+              techJobTypes={techJobTypes}
+              routingWeights={routingWeights}
+              onPick={(id) => setScheduleTarget(id)}
               onSubmit={(tech, sched) => { setSchedule(scheduleTarget, sched, tech); setScheduleTarget(null); toast('Scheduled ' + scheduleTarget); }}
               onUnschedule={() => { setSchedule(scheduleTarget, null); setScheduleTarget(null); toast('Unscheduled ' + scheduleTarget); }}
               onClose={() => setScheduleTarget(null)}

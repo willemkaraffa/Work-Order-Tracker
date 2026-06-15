@@ -308,20 +308,43 @@ Notes: marker fill stays the work-type color; outline now carries status. return
 - Schedule modal: add Suggested + Close By tabs above existing form.
 - Map module: each tech gets color (set in Tech Settings, Slice 3 added). Draw polyline through scheduled WOs in tech color.
 
-**Files:** `index.html` (Schedule modal, Map module polyline render, Settings — routing weights), possibly `library_io.js` or new helper for haversine + scoring.
+**Files:** `index.html` (Schedule modal, Map polyline render, Settings — routing weights + tech colors), all helpers inline.
+
+**LOCKED DESIGN (2026-06-12 discussion):**
+- ANCHOR for scoring = the WO being scheduled (the modal target), NOT a "last stop". Ranking is relative to that WO's location. If it has no geocode -> "No location, can't suggest".
+- Reuse the EXISTING `haversineKm` (hoist from the geocoder useEffect ~line 9608 to module scope, rule B3). Road km = haversineKm × 1.3.
+- Candidate type filter uses `wo.type` + `settings.techJobTypes[tech][wo.type]` (Slice 3 schema). NO wo.tradeTag (that was removed).
+- New state: `settings.techColors = { [techName]: hex }` (color picker per tech in the Tech Job Types grid). `settings.routingWeights = { dist, city, unfilledCity, type }` + `ROUTE_WEIGHT_MAP = { low, med, high }` (defaults; tunable in a new Settings > Routing section).
+- Candidates without a geocache entry -> SKIPPED, with a "N skipped (no location)" footer note.
+- Click a Suggested/Close By row -> RE-ANCHOR the Schedule modal on that candidate (reuse setScheduleTarget); the existing form sets its tech/date/time MANUALLY. Lists re-rank relative to the new anchor. No auto-scheduling.
+- Polyline order = schedule date+time (the planned order), per tech, in `techColors[tech]`.
+- Performance: scoring is `useMemo` keyed on [anchorId, tech, date, activeOrders, geocache, techJobTypes, weights]. Anchor is a single WO so only O(N) anchor->candidate distances per open. No full matrix.
+
+**Build order (each step inspected, rule 6 for preview):**
+1. Hoist `haversineKm` to module scope; add `roadKm` + pure `scoreCandidates()` helper + weight defaults.
+2. `settings.techColors` + `settings.routingWeights` data + Settings UI (Routing section; tech color swatches in the Tech Job Types grid).
+3. ScheduleModal: Suggested + Close By tabs (read-only ranked lists first).
+4. Click-to-chain (schedule candidate to next open slot for current tech/date).
+5. Map: per-tech polylines through scheduled WOs in tech color.
 
 **Acceptance:**
-- Open Schedule modal for tech w/ existing scheduled WOs -> Suggested tab shows filtered + ranked unscheduled WOs.
-- Close By tab shows nearest unscheduled, no job-type filter.
-- Unschedule a WO -> reappears in Suggested/Close By immediately (live).
-- Map shows polyline per tech in tech color through scheduled WOs.
+- Schedule modal for a geocoded WO -> Suggested shows job-type-filtered + ranked unscheduled WOs (nearest/best first); Close By shows nearest, no type filter.
+- Candidate without geocode -> skipped + counted in footer.
+- Click a suggestion -> it schedules to the modal tech/date next slot and leaves the list.
+- Unschedule a WO -> reappears in the lists (live).
+- Map shows one polyline per tech (schedule-time order) in the tech color.
 
-**Risk:**
-- Geocoding gap — if WOs lack lat/lon, scoring breaks. Fallback: skip WO from list w/ warn.
-- Performance — recompute on every modal open. Cache haversine matrix if N > 200.
-- Live test required: schedule WO, verify removed from list. Unschedule, verify returns (per rule C4, user explicitly requested this test).
+**Risk:** geocode gaps (skip+warn, handled); performance fine at small N (memoized, O(N)). Live-test the schedule/unschedule round-trip (rule C4).
 
-**Prereq:** Slice 3 (Tech Job Types) shipped.
+**Prereq:** Slice 3 (Tech Job Types) shipped — DONE.
+
+**STATUS: BUILT 2026-06-15 (all 5 steps), inspected each in preview. Awaiting user whole-slice live test.**
+1. Hoisted `haversineKm` to module scope (removed geocoder dup); `roadKm` (×1.3), `DEFAULT_ROUTING_WEIGHTS`, `ROUTE_WEIGHT_MAP`, pure `scoreCandidates()`. Unit-tested: Close By by distance (no type filter), Suggested type-filtered by composite score, no-geo skipped, scheduled excluded, no-anchor empty.
+2. `settings.techColors` (color swatch per tech in Tech Job Types grid) + `settings.routingWeights` (new Settings > Routing section, 4 weight inputs + reset). Both persist.
+3+4. ScheduleModal gained Suggested/Close By tabs (memoized scoring on order/tech/orders/geocache/techJobTypes/weights). Click a row = onPick -> setScheduleTarget(id) RE-ANCHORS the modal on that WO (set time manually via the existing form); lists re-rank. "N skipped (no location)" footer. Verified: tabs, distances, type-filter, re-anchor (title changes, lists re-rank), Save schedules the re-anchored WO.
+5. Map: per-tech dashed polyline through that tech's rendered+geocoded+scheduled WOs, ordered by schedule date+time, in `techColors[tech]` (added to the markers layer, redraws with it). Verified Daniel 2-stop route #ff8800; single-stop tech draws no line.
+6. Per-day routing (user feedback): polylines track ONE day. New `routeDay` state in MapsModule (default today, session-only), day picker in the Maps header (prev/next/date/Today), grouping filtered to `o.schedule.date === routeDay`. Verified: today route = that day's stops, switch day = route swaps to the other day's stops. Markers stay all-day (unchanged) for route-finding.
+Notes: routes follow the rendered (search-filtered) marker set. Tech without a color -> neutral gray fallback. No new persisted per-WO state; routeDay is session-local.
 
 ---
 
