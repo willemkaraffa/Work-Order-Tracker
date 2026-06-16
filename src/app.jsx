@@ -14,6 +14,7 @@ import {
   Dot, PMChip, TypeIcon, FlagGlyph, StatusPill, ActionBtn, FilterChip,
   InlineEdit, SettingTitle, SettingRow, Seg, miniBtnStyle, ReorderBtns, swapAt,
 } from './primitives.jsx';
+import { formatPhone, haversineKm, roadKm } from './utils.js';
 
 
 /* ============================================================
@@ -579,13 +580,7 @@ function nextWOId(orders, customId) {
 }
 
 // Mechanism ported from legacy formatPhone().
-function formatPhone(v) {
-  if (!v) return '';
-  const d = String(v).replace(/\D/g, '');
-  if (d.length === 10) return '(' + d.slice(0,3) + ')-' + d.slice(3,6) + '-' + d.slice(6);
-  if (d.length === 11 && d[0] === '1') return '(' + d.slice(1,4) + ')-' + d.slice(4,7) + '-' + d.slice(7);
-  return v;
-}
+// formatPhone moved to ./utils.js (imported at top).
 
 function toDetailData(o) {
   if (!o) return null;
@@ -661,19 +656,7 @@ function isOverdueSched(date, start) {
   return isFinite(t) && Date.now() - t > OVERDUE_CFG.thresholdMinutes * 60000;
 }
 
-// Slice 5 (#10): routing. Great-circle km between two lat/lon points (hoisted
-// from the geocoder so routing + suspect-distance share one implementation).
-function haversineKm(la1, lo1, la2, lo2) {
-  const R = 6371;
-  const toRad = (d) => d * Math.PI / 180;
-  const dLat = toRad(la2 - la1);
-  const dLon = toRad(lo2 - lo1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(la1)) * Math.cos(toRad(la2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-// Straight-line km scaled by a flat road factor (no OSRM/true ETA — locked).
-const ROAD_FACTOR = 1.3;
-function roadKm(la1, lo1, la2, lo2) { return haversineKm(la1, lo1, la2, lo2) * ROAD_FACTOR; }
+// haversineKm + roadKm (+ ROAD_FACTOR) moved to ./utils.js (imported at top).
 
 // Routing tunables. weights apply to the composite "Suggested" score; the map
 // turns a tech's low/med/high job-type preference into a numeric multiplier.
