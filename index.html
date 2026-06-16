@@ -236,18 +236,18 @@ const LOCKED_STATUSES = new Set(['Cancelled', 'Complete - Pending Approval']);
 // Slice 4 (#9): system tags bind a BEHAVIOR to a user-named status, stored in
 // settings.statusTags = { [statusName]: tag }. The handler is hardcoded; which
 // status triggers it is user-configurable (Settings > Workflow > Manage
-// statuses). Only `schedule` is imperative (opens the Schedule modal on a
-// single-WO status change); the rest are pure render rules (map outline / map
-// presence / itinerary filtering) read live from the WO's current status.
+// statuses). `schedule` and `visited` are imperative (run in the setStatus
+// handlers, single + bulk); `onsite` and `offmap` are pure render rules (map
+// fill / presence) read live from the WO's current status.
 //   schedule -> open Schedule modal when set on one WO
-//   onsite   -> map marker outline = status color, wins over the overdue border
-//   visited  -> drop the WO off the Itinerary day list (schedule data kept)
+//   onsite   -> map marker fill = status color, wins over the overdue border
+//   visited  -> clear the WO's schedule (also drops it off the Itinerary list)
 //   offmap   -> hide the map marker (field work done, bid entry only)
 const SYSTEM_TAGS = ['schedule', 'onsite', 'visited', 'offmap'];
 const SYSTEM_TAG_LABELS = {
   schedule: 'Schedule (open modal)',
   onsite:   'On site (map highlight)',
-  visited:  'Visited (clear itinerary)',
+  visited:  'Visited (clear schedule)',
   offmap:   'Off map (hide marker)',
 };
 
@@ -300,10 +300,15 @@ function statusColor(status, statusColors) {
   return (statusColors && statusColors[status]) || DEFAULT_STATUS_COLORS[status] || '#6b7280';
 }
 
+// Border colors for the two active trades. Chosen as bold, well-separated
+// hues that read clearly as marker BORDERS over any status-pill fill and
+// avoid the known fill clashes (scheduled-gold, onsite-blue, suspect-violet).
+// E (Electrical) is legacy-only: not an active type, kept so old data still
+// renders. See memory project_hvac_plumbing_only.
 const TYPE_COLORS = {
-  P: '#3b82f6', // Plumbing - blue
-  H: '#f97316', // HVAC - orange
-  E: '#eab308', // Electrical - amber (kept as fallback for legacy data)
+  P: '#0891b2', // Plumbing - cyan
+  H: '#dc2626', // HVAC - red
+  E: '#eab308', // Electrical - amber (legacy data only)
 };
 
 // Default colors for map marker categories. User can override individually
@@ -3977,8 +3982,8 @@ function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, 
 
       <div style={{ padding: '28px 32px', overflow: 'auto', minHeight: 0 }}>
         {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
-        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} types={types} setTypes={setTypes} techs={techs} setTechs={setTechs} />}
-        {section === 'trades'     && <TradesSection types={types} mapTypeColors={mapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} techColors={techColors} setTechColors={setTechColors} />}
+        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} />}
+        {section === 'trades'     && <TradesSection types={types} setTypes={setTypes} mapTypeColors={mapTypeColors} setMapTypeColors={setMapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} setTechs={setTechs} techColors={techColors} setTechColors={setTechColors} />}
         {section === 'routing'    && <RoutingSection weights={routingWeights} setWeights={setRoutingWeights} />}
         {section === 'library'    && <LibraryToolsSection subCats={librarySubCats} setSubCats={setLibrarySubCats} toast={toast} />}
         {section === 'credentials' && <CredentialsSection />}
@@ -4343,11 +4348,9 @@ function swapAt(arr, i, j) {
   return next;
 }
 
-function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, pms, setPms, types, setTypes, techs, setTechs }) {
+function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, pms, setPms }) {
   const [statusesOpen, setStatusesOpen] = React.useState(false);
   const [pmsOpen, setPmsOpen] = React.useState(false);
-  const [typesOpen, setTypesOpen] = React.useState(false);
-  const [techsOpen, setTechsOpen] = React.useState(false);
   const [editingId, setEditingId] = React.useState(null);
   // Inline editing now uses the shared <InlineEdit> (owns value + focus + the
   // race-safe blur). editingId only marks which row is open.
@@ -4456,8 +4459,6 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
         <ActionBtn onClick={addPhase}>+ Add phase</ActionBtn>
         <ActionBtn onClick={() => setStatusesOpen(true)}>Manage statuses...</ActionBtn>
         <ActionBtn onClick={() => setPmsOpen(true)}>Manage PMs...</ActionBtn>
-        <ActionBtn onClick={() => setTypesOpen(true)}>Manage types...</ActionBtn>
-        <ActionBtn onClick={() => setTechsOpen(true)}>Manage techs...</ActionBtn>
       </div>
       {statusesOpen && (
         <StatusesEditor
@@ -4477,22 +4478,6 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
           pms={pms}
           setPms={setPms}
           onClose={() => setPmsOpen(false)}
-        />
-      )}
-      {typesOpen && (
-        <SimpleListEditor
-          title="Types"
-          items={types}
-          setItems={setTypes}
-          onClose={() => setTypesOpen(false)}
-        />
-      )}
-      {techsOpen && (
-        <SimpleListEditor
-          title="Techs"
-          items={techs}
-          setItems={setTechs}
-          onClose={() => setTechsOpen(false)}
         />
       )}
     </div>
@@ -5326,19 +5311,14 @@ function MapsSection({ mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity
       <MarkerColorsSubsection
         mapMarkerColors={mapMarkerColors}
         setMapMarkerColors={setMapMarkerColors}
-        mapTypeColors={mapTypeColors}
-        setMapTypeColors={setMapTypeColors}
-        types={types}
       />
     </div>
   );
 }
 
-function MarkerColorsSubsection({ mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, types }) {
+function MarkerColorsSubsection({ mapMarkerColors, setMapMarkerColors }) {
   const mc = { ...DEFAULT_MAP_MARKER_COLORS, ...(mapMarkerColors || {}) };
-  const tc = { HVAC: TYPE_COLORS.H, Plumbing: TYPE_COLORS.P, Electrical: TYPE_COLORS.E, ...(mapTypeColors || {}) };
   const updMarker = (key, value) => setMapMarkerColors && setMapMarkerColors({ ...mc, [key]: value });
-  const updType = (name, value) => setMapTypeColors && setMapTypeColors({ ...tc, [name]: value });
   const row = (label, color, onChange, onReset) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 0' }}>
       <input
@@ -5355,8 +5335,6 @@ function MarkerColorsSubsection({ mapMarkerColors, setMapMarkerColors, mapTypeCo
       )}
     </div>
   );
-  // Per-type entries: user's configured types plus any colors already set.
-  const typeKeys = Array.from(new Set([...(types || []), ...Object.keys(mapTypeColors || {})]));
   return (
     <div style={{
       padding: '14px 0',
@@ -5367,17 +5345,16 @@ function MarkerColorsSubsection({ mapMarkerColors, setMapMarkerColors, mapTypeCo
       <div>
         <div style={{ fontSize: 14, fontWeight: 500 }}>Marker colors</div>
         <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4, lineHeight: 1.5 }}>
-          Pin colors for the Maps module. Suspect and manual override the
-          work-type color; default is shown for WOs whose type is not listed.
+          Pin fill is the WO status color; the marker border is the job-type
+          color (set in Settings &gt; Tech Job Types). Suspect overrides the
+          fill; the fallback fills WOs with no status color.
         </div>
       </div>
       <div style={{ marginTop: 6 }}>
         {row('Suspect (geocoder unsure)', mc.suspect, v => updMarker('suspect', v),
           mc.suspect !== DEFAULT_MAP_MARKER_COLORS.suspect ? () => updMarker('suspect', DEFAULT_MAP_MARKER_COLORS.suspect) : null)}
-        {row('Unknown type (fallback)', mc.fallback, v => updMarker('fallback', v),
+        {row('Unknown status (fallback fill)', mc.fallback, v => updMarker('fallback', v),
           mc.fallback !== DEFAULT_MAP_MARKER_COLORS.fallback ? () => updMarker('fallback', DEFAULT_MAP_MARKER_COLORS.fallback) : null)}
-        <div style={{ height: 1, background: 'var(--border-1)', margin: '8px 0' }} />
-        {typeKeys.map(name => row(name, tc[name] || '#6b7280', v => updType(name, v)))}
       </div>
     </div>
   );
@@ -5544,17 +5521,43 @@ function AlertsSection({ thresholds, setThresholds, overdueCfg, setOverdueCfg })
 }
 
 // Slice 3 (#8): Tech Job Types. NO separate trade list — the trades ARE the
-// existing work-order types (settings.types, edited in Workflow; colored in
-// Maps via mapTypeColors). The only new state is techJobTypes: per tech, per
-// type, a { selected, weight } cell (weight disabled unless selected). Routing
-// (slice 5) reads techJobTypes[tech][wo.type].
+// existing work-order types (settings.types). This tab is now the single home
+// for managing types (list + colors) AND techs (list + route colors); the old
+// Workflow "Manage types/techs" modals were retired. techJobTypes is per tech,
+// per type, a { selected, weight } cell (weight disabled unless selected).
+// Routing (slice 5) reads techJobTypes[tech][wo.type].
 const TRADE_WEIGHTS = ['low', 'med', 'high'];
-function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, techs, techColors, setTechColors }) {
+function TradesSection({ types, setTypes, mapTypeColors, setMapTypeColors, techJobTypes, setTechJobTypes, techs, techColors, setTechColors }) {
   const list = (types || []).filter(Boolean);
+  const [editingTypeIdx, setEditingTypeIdx] = React.useState(null);
+  const [editingTechIdx, setEditingTechIdx] = React.useState(null);
+  const [newType, setNewType] = React.useState('');
+  const [newTech, setNewTech] = React.useState('');
   // Same color resolution the map markers use: explicit override, else the
-  // letter default for the three built-ins, else a neutral gray.
+  // letter default for the built-ins, else a neutral gray. Electrical is
+  // legacy-only (see TYPE_COLORS).
   const tc = { HVAC: TYPE_COLORS.H, Plumbing: TYPE_COLORS.P, Electrical: TYPE_COLORS.E, ...(mapTypeColors || {}) };
   const colorOf = (name) => tc[name] || '#6b7280';
+  // Type list/color management (name-based so indices never drift). Renaming or
+  // deleting leaves any orphaned color/cell keyed by the old name; harmless.
+  const updTypeColor = (name, value) => setMapTypeColors && setMapTypeColors({ ...(mapTypeColors || {}), [name]: value });
+  const renameType = (oldName, val) => {
+    const n = (val || '').trim();
+    setEditingTypeIdx(null);
+    if (n && n !== oldName && !(types || []).includes(n)) setTypes((types || []).map(t => t === oldName ? n : t));
+  };
+  const deleteType = (name) => { if (window.confirm('Remove type "' + name + '"?')) setTypes((types || []).filter(t => t !== name)); };
+  const moveType = (name, delta) => { const i = (types || []).indexOf(name); if (i >= 0) setTypes(swapAt(types, i, i + delta)); };
+  const addType = () => { const n = newType.trim(); if (!n || (types || []).includes(n)) return; setTypes([...(types || []), n]); setNewType(''); };
+  // Tech list management.
+  const renameTech = (oldName, val) => {
+    const n = (val || '').trim();
+    setEditingTechIdx(null);
+    if (n && n !== oldName && !(techs || []).includes(n)) setTechs((techs || []).map(t => t === oldName ? n : t));
+  };
+  const deleteTech = (name) => { if (window.confirm('Remove tech "' + name + '"?')) setTechs((techs || []).filter(t => t !== name)); };
+  const moveTech = (name, delta) => { const i = (techs || []).indexOf(name); if (i >= 0) setTechs(swapAt(techs, i, i + delta)); };
+  const addTech = () => { const n = newTech.trim(); if (!n || (techs || []).includes(n)) return; setTechs([...(techs || []), n]); setNewTech(''); };
   // Patch one tech/type cell. Selecting for the first time defaults weight med.
   const setCell = (tech, type, patch) => {
     const techMap = (techJobTypes && techJobTypes[tech]) || {};
@@ -5564,41 +5567,61 @@ function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, te
     setTechJobTypes({ ...techJobTypes, [tech]: { ...techMap, [type]: nextCell } });
   };
   const cellStyle = { padding: '4px 8px', textAlign: 'center', borderBottom: '1px solid var(--border-1)' };
+  const addInputStyle = { flex: 1, minWidth: 0, padding: '6px 9px', border: '1px solid var(--border-2)', borderRadius: 6, background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 12 };
   return (
     <div>
-      <SettingTitle sub="Which work-order types each tech handles, with a preference weight. Types are managed in Workflow; colors in Maps. Used by routing to rank suggested work.">Tech Job Types</SettingTitle>
+      <SettingTitle sub="Manage the job-type list and colors, the tech list and route colors, and which types each tech handles (with a preference weight). Used by routing to rank suggested work.">Tech Job Types</SettingTitle>
       {list.length === 0 ? (
-        <div style={{ fontSize: 12, color: 'var(--text-3)' }}>No types configured (Settings &gt; Workflow &gt; Manage types).</div>
-      ) : (techs || []).length === 0 ? (
-        <div style={{ fontSize: 12, color: 'var(--text-3)' }}>No techs configured (Settings &gt; Workflow &gt; Manage techs).</div>
+        <div style={{ fontSize: 12, color: 'var(--text-3)' }}>No types yet. Add one below to start.</div>
       ) : (
         <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr>
               <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--text-3)', fontWeight: 600, borderBottom: '1px solid var(--border-1)' }}>Tech</th>
-              {list.map(type => (
-                <th key={type} style={{ padding: '4px 8px', color: 'var(--text-2)', fontWeight: 600, borderBottom: '1px solid var(--border-1)', minWidth: 110 }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ width: 10, height: 10, borderRadius: 2, background: colorOf(type) }} />{type}
-                  </span>
+              {list.map((type, ti) => (
+                <th key={type} style={{ padding: '4px 8px', color: 'var(--text-2)', fontWeight: 600, borderBottom: '1px solid var(--border-1)', minWidth: 130 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <input type="color" value={normalizeHex(colorOf(type))}
+                        onChange={(e) => updTypeColor(type, e.target.value)}
+                        title="Type color (marker border)" style={{ width: 20, height: 20, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
+                      {editingTypeIdx === ti
+                        ? <InlineEdit value={type} onCommit={(v) => renameType(type, v)} onCancel={() => setEditingTypeIdx(null)}
+                            style={{ width: 80, fontSize: 13, background: 'var(--bg-canvas)', border: '1px solid var(--accent)', borderRadius: 4, padding: '2px 6px', color: 'var(--text-1)', fontFamily: 'inherit' }} />
+                        : <span onDoubleClick={() => setEditingTypeIdx(ti)} title="Double-click to rename" style={{ cursor: 'text' }}>{type}</span>}
+                    </div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      <button onClick={() => moveType(type, -1)} disabled={ti === 0} title="Move left" style={{ ...miniBtnStyle, padding: '0 6px', opacity: ti === 0 ? 0.4 : 1 }}>{'‹'}</button>
+                      <button onClick={() => moveType(type, 1)} disabled={ti === list.length - 1} title="Move right" style={{ ...miniBtnStyle, padding: '0 6px', opacity: ti === list.length - 1 ? 0.4 : 1 }}>{'›'}</button>
+                      <button onClick={() => deleteType(type)} title="Remove type" style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 6px' }}>{'✕'}</button>
+                    </div>
+                  </div>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {(techs || []).map(tech => (
+            {(techs || []).length === 0 ? (
+              <tr><td colSpan={list.length + 1} style={{ padding: '8px', color: 'var(--text-3)', fontSize: 12 }}>No techs yet. Add one below.</td></tr>
+            ) : (techs || []).map((tech, hi) => (
               <tr key={tech}>
                 <td style={{ padding: '4px 8px', borderBottom: '1px solid var(--border-1)', fontWeight: 500 }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {/* Slice 5 (#10): per-tech route color used for map polylines. */}
                     {setTechColors && (
                       <input type="color" value={normalizeHex((techColors && techColors[tech]) || '#6b7280')}
                         onChange={(e) => setTechColors({ ...(techColors || {}), [tech]: e.target.value })}
                         title="Route color" style={{ width: 20, height: 20, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }} />
                     )}
-                    {tech}
-                  </span>
+                    {editingTechIdx === hi
+                      ? <InlineEdit value={tech} onCommit={(v) => renameTech(tech, v)} onCancel={() => setEditingTechIdx(null)}
+                          style={{ flex: 1, fontSize: 13, background: 'var(--bg-canvas)', border: '1px solid var(--accent)', borderRadius: 4, padding: '2px 6px', color: 'var(--text-1)', fontFamily: 'inherit' }} />
+                      : <span onDoubleClick={() => setEditingTechIdx(hi)} title="Double-click to rename" style={{ cursor: 'text' }}>{tech}</span>}
+                    <span style={{ flex: 1 }} />
+                    <ReorderBtns onUp={() => moveTech(tech, -1)} onDown={() => moveTech(tech, 1)} disableUp={hi === 0} disableDown={hi === techs.length - 1} />
+                    <button onClick={() => deleteTech(tech)} title="Remove tech" style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 6px' }}>{'✕'}</button>
+                  </div>
                 </td>
                 {list.map(type => {
                   const cell = (techJobTypes && techJobTypes[tech] && techJobTypes[tech][type]) || {};
@@ -5624,6 +5647,18 @@ function TradesSection({ types, mapTypeColors, techJobTypes, setTechJobTypes, te
         </table>
         </div>
       )}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '1 1 220px', minWidth: 0 }}>
+          <input value={newType} onChange={e => setNewType(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addType(); }}
+            placeholder="New job type" style={addInputStyle} />
+          <ActionBtn primary onClick={addType}>Add type</ActionBtn>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flex: '1 1 220px', minWidth: 0 }}>
+          <input value={newTech} onChange={e => setNewTech(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addTech(); }}
+            placeholder="New tech" style={addInputStyle} />
+          <ActionBtn primary onClick={addTech}>Add tech</ActionBtn>
+        </div>
+      </div>
     </div>
   );
 }
@@ -7564,32 +7599,28 @@ function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selec
           + warnHtml
         + '</div>'
       );
-      // Color priority:
-      //   suspect -> suspect color (geocoder uncertain about this location)
-      //   default -> work-type color
-      // All colors overridable via settings.
-      const fillColor = suspect
-        ? markerColors.suspect
-        : (typeColors[o.type] || markerColors.fallback);
-      // Classic Leaflet-style droplet pin (SVG divIcon). Job-type color stays
-      // on the fill; scheduled WOs swap the stroke to a thick bright gold so
-      // they stand out against any type color without losing category info.
+      // Color scheme (swapped): the status pill color now FILLS the droplet
+      // body; the job-type color is the BORDER, drawn bold so categories stay
+      // easy to tell apart against any fill. suspect location overrides the
+      // fill as a warning (job-type stays visible on the border).
       const isScheduled = !!(o.schedule && o.schedule.date);
-      // Slice 2 (#3): past schedule + threshold swaps the gold border to the
-      // configurable overdue color.
+      // Slice 2 (#3): past schedule + threshold swaps gold to overdue color.
       const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
-      // Slice 4 (#9): marker OUTLINE denotes the WO's status (reuses the pill
-      // colors in statusColors). Precedence: onsite-tag wins (tech is live on
-      // site -> beats the overdue border), then overdue, then the status color,
-      // then the legacy scheduled-gold / white fallback.
+      // Slice 4 (#9): status composite (reuses the pill colors in
+      // statusColors). Precedence: onsite-tag wins (tech is live on site ->
+      // beats overdue), then overdue, then the status color, then the legacy
+      // scheduled-gold / white fallback. This now drives the FILL.
       const tag = statusTags[o.status];
-      const statusOutline = statusColors && statusColors[o.status];
-      const strokeColor =
-        tag === 'onsite'   ? (statusOutline || '#3b82f6')
+      const statusPill = statusColors && statusColors[o.status];
+      const statusComposite =
+        tag === 'onsite'   ? (statusPill || '#3b82f6')
         : isOverdue        ? overdueCfg.borderColor
-        : (statusOutline || (isScheduled ? '#facc15' : '#fff'));
+        : (statusPill || (isScheduled ? '#facc15' : '#fff'));
+      const fillColor = suspect ? markerColors.suspect : statusComposite;
+      // Job-type color on the border, bold.
+      const strokeColor = typeColors[o.type] || markerColors.fallback;
       const emphasize = tag === 'onsite' || isScheduled;
-      const strokeWidth = emphasize ? 3 : 1.5;
+      const strokeWidth = emphasize ? 4 : 3;
       const centerR     = emphasize ? 5 : 4;
       const centerFill  = strokeColor;
       const icon = L.divIcon({
@@ -10239,13 +10270,16 @@ function App() {
             { ts, action: 'auto-flipped to Complete', detail: 'bulk trigger status=' + status }];
           return next;
         }
-        return { ...cur, status,
+        const next = { ...cur, status,
           history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] };
+        // `visited` tag clears the schedule (mirrors the single-WO path).
+        if (statusTags[status] === 'visited' && next.schedule) delete next.schedule;
+        return next;
       }
     );
     toast(ids.size + ' set to ' + status);
     clearSelection();
-  }, [selectedIds, batchUpdate, toast, clearSelection]);
+  }, [selectedIds, batchUpdate, toast, clearSelection, statusTags]);
 
   const VIEW_BUILDERS = {
     active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases) }),
@@ -10803,6 +10837,11 @@ function App() {
             return next;
           }
           const next = { ...cur, status: payload };
+          // Slice 4 (#9): `visited` tag clears the schedule (tech finished at the
+          // site). Same data effect as completion, but the WO stays on its tab.
+          // The Itinerary tag-filter still hides legacy visited WOs that were
+          // saved before this clear-on-transition existed.
+          if (statusTags[payload] === 'visited' && next.schedule) delete next.schedule;
           next.history = [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)];
           return next;
         });
