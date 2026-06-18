@@ -4,9 +4,9 @@
 // global (window.L), used as a bare global inside the component.
 import React from 'react';
 import { DEFAULT_MAP_MARKER_COLORS, TYPE_COLORS } from './constants.js';
-import { formatPhone } from './utils.js';
+import { formatPhone, openMapsRoute } from './utils.js';
 import {
-  splitAddress, openMapsRoute, isOverdueSched, fmtSchedule,
+  splitAddress, isOverdueSched, fmtSchedule,
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips,
 } from './app.jsx';
 
