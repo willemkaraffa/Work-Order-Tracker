@@ -36,7 +36,9 @@ function toPrice(v) {
 
 // ── General: RazorSync_Invoice_Tracker.xlsx, sheet "Service Items" ────────────
 // Cols: A=Item Name, B=Description, C=Price, D=Taxable(Yes/No), E=PM (DROPPED).
-// Skip header (row 1), empty names, and the 'Materials!'/'Labor!' sentinel anchors.
+// Skip header (row 1) and empty names. 'Labor!'/'Materials!' sentinels are KEPT
+// as items: they are the fallback names used when a bid line cannot be matched
+// to a catalog entry (see InvoiceEditor bid prefill in index.html).
 async function parseGeneral(filePath) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(filePath);
@@ -46,7 +48,7 @@ async function parseGeneral(filePath) {
   ws.eachRow((row, n) => {
     if (n === 1) return; // header
     const name = toStr(cellVal(row.getCell(1)));
-    if (!name || name.endsWith('!')) return; // empty or sentinel
+    if (!name) return;
     const desc = toStr(cellVal(row.getCell(2)));
     const price = toPrice(cellVal(row.getCell(3)));
     const taxable = /^y/i.test(toStr(cellVal(row.getCell(4))));
