@@ -604,7 +604,7 @@ function MoreInfoCard({ value, onSave, color }) {
   );
 }
 
-function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit, onDelete, onPin }) {
+export function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit, onDelete, onPin }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const [editing, setEditing]   = React.useState(false);
   const [draft, setDraft]       = React.useState(body);

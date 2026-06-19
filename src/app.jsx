@@ -589,7 +589,7 @@ function nextWOId(orders, customId) {
 // Mechanism ported from legacy formatPhone().
 // formatPhone moved to ./utils.js (imported at top).
 
-function toDetailData(o) {
+export function toDetailData(o) {
   if (!o) return null;
   const { addr, city } = splitAddress(o);
   const flags = [];
@@ -3389,7 +3389,7 @@ export function HeaderChips() {
 // MapsModule carved out to ./maps.jsx (imported at top).
 
 // ModuleLauncher removed: the fold-out NavWing (nav.jsx) replaces the
-// fullscreen module-picker overlay.
+// fullscreen module-picker overlay.
 
 // ── Itinerary module ──────────────────────────────────────────────────────────
 // Daily, single-tech timeline. Pick a tech + day; drag active WOs from the
@@ -5078,27 +5078,29 @@ function App() {
 
   // MODULE_GROUPS/MODULES/MODULE_ORDER live in nav.jsx (imported at top).
 
+  // Single source for "navigate the Itinerary to a WO": scheduled -> snap to its
+  // tech+day and highlight; unscheduled -> highlight its place in the pool (the
+  // module opens the pool and scrolls to it). Shared by switchModule (WO module
+  // entry) and the Maps 'jumpItinerary' action so every entry point behaves the
+  // same.
+  const focusItinerary = React.useCallback((woId) => {
+    const o = orders.find(x => x.id === woId);
+    if (!o) return;
+    if (o.schedule && o.schedule.date) {
+      setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: woId, ts: Date.now() });
+    } else {
+      setItinFocus({ highlightId: woId, ts: Date.now() });
+    }
+  }, [orders]);
+
   // Module entry side-effects: itinerary auto-snaps to selectedWO's schedule
   // (if any); invoices highlights selectedWO row via selectedId prop.
   const switchModule = React.useCallback((m) => {
-    if (m === 'itinerary' && selectedWO) {
-      const sel = orders.find(x => x.id === selectedWO);
-      if (sel && sel.schedule && sel.schedule.date) {
-        setItinFocus({
-          tech: sel.tech || '',
-          date: sel.schedule.date,
-          highlightId: selectedWO,
-          ts: Date.now(),
-        });
-      } else if (sel) {
-        // Unscheduled WO: highlight its place in the unscheduled pool (no date).
-        setItinFocus({ highlightId: selectedWO, ts: Date.now() });
-      }
-    }
+    if (m === 'itinerary' && selectedWO) focusItinerary(selectedWO);
     // Maps: auto-select the active WO's marker on entry (mirror jumpToMap).
     if (m === 'maps' && selectedWO) setMapsSelected(selectedWO);
     setCurrentModule(m);
-  }, [selectedWO, orders]);
+  }, [selectedWO, focusItinerary]);
 
   // NavWing switches modules via switchModule directly (see ModuleNavContext
   // provider below). The old pickModule/goPrevModule/goNextModule helpers and
@@ -5490,6 +5492,12 @@ function App() {
         setMapsSelected(id);
         setCurrentModule('maps');
         break;
+      case 'jumpItinerary':
+        // Same navigation as entering Itinerary from the WO module: scheduled ->
+        // snap to slot + highlight; unscheduled -> scroll to its pool position.
+        focusItinerary(id);
+        setCurrentModule('itinerary');
+        break;
       case 'regeocode': {
         // Drop the cache entry so the App-level worker picks the WO up
         // again on its next pass. Bump the clear tick so the worker
@@ -5523,7 +5531,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget]);
+  }, [updateOrder, captureOrder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {

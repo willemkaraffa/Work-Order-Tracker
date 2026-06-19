@@ -3,15 +3,48 @@
 // cycle is safe -- nothing here runs at module-eval time). Leaflet is a CDN
 // global (window.L), used as a bare global inside the component.
 import React from 'react';
-import { DEFAULT_MAP_MARKER_COLORS, TYPE_COLORS } from './constants.js';
+import { DEFAULT_MAP_MARKER_COLORS, TYPE_COLORS, DEFAULT_MORE_INFO_COLOR } from './constants.js';
 import { formatPhone, openMapsRoute } from './utils.js';
 import {
   splitAddress, isOverdueSched, fmtSchedule,
-  itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips,
+  itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
+import { NoteCard } from './detail.jsx';
+
+// Read-only notes view for the Maps right-click menu. Reuses toDetailData
+// (same notes shape as the detail pane) + NoteCard with no handlers (-> no
+// edit/pin/delete affordances). Shows the "More Information" misc note (o.notes)
+// plus every note card, so a tech can read a WO without leaving the map.
+function NotesViewModal({ order, onClose }) {
+  if (!order) return null;
+  const d = toDetailData(order);
+  const accent = DEFAULT_MORE_INFO_COLOR;
+  const misc = (d.raw && d.raw.notes) || '';
+  return (
+    <Modal open onClose={onClose} title={order.id + ' — Notes'} width={560}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{
+          border: '1px solid var(--border-2)', borderLeft: '3px solid ' + accent,
+          background: 'color-mix(in srgb, ' + accent + ' 14%, transparent)',
+          borderRadius: 8, padding: '10px 14px',
+        }}>
+          <div style={{ fontWeight: 600, color: 'var(--text-1)', fontSize: 13, marginBottom: misc ? 6 : 0 }}>More Information</div>
+          {misc
+            ? <div style={{ fontSize: 15, lineHeight: 1.5, color: 'var(--text-1)', whiteSpace: 'pre-wrap' }}>{misc}</div>
+            : <div style={{ fontSize: 14, color: 'var(--text-3)', fontStyle: 'italic' }}>empty</div>}
+        </div>
+        {d.notes.length === 0
+          ? <div style={{ color: 'var(--text-3)', fontSize: 13, fontStyle: 'italic' }}>No notes.</div>
+          : d.notes.map(n => <NoteCard key={n.id} {...n} />)}
+      </div>
+    </Modal>
+  );
+}
 
 export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors }) {
   const [query, setQuery] = React.useState('');
+  // WO id whose read-only notes modal is open, or null.
+  const [notesWO, setNotesWO] = React.useState(null);
   // Slice 5 (#10): route polylines track one day at a time. Default today.
   const [routeDay, setRouteDay] = React.useState(itinTodayStr());
   // change10 queue item #4: multi-stop driving directions. Ordered list of WO
@@ -703,8 +736,10 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
               {ctxMenu.woId}
             </div>
             <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
+            {o && item('View notes', () => setNotesWO(o.id))}
+            <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
             {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
-            {onWoAction && item('Edit details', () => onWoAction(ctxMenu.woId, 'editDetails'))}
+            {onWoAction && item('Jump to itinerary', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
             <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
             {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
             <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
@@ -720,6 +755,13 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
           </div>
         );
       })()}
+
+      {notesWO && (
+        <NotesViewModal
+          order={(activeOrders || []).find(o => o.id === notesWO)}
+          onClose={() => setNotesWO(null)}
+        />
+      )}
     </div>
   );
 }
