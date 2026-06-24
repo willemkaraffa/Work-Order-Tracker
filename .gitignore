@@ -1,4 +1,9 @@
 node_modules/
 dist/
 bundle/
+resources/
 wo-data.json
+chromedriver.exe
+__pycache__/
+*.bak-*
+CLAUDE.original.md

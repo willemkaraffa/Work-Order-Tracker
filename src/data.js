@@ -47,6 +47,11 @@ export function useWorkOrders() {
           } catch { parsed = fresh(); }
         }
         if (!Array.isArray(parsed.orders))   parsed.orders   = [];
+        // 'Other' is no longer a valid job type — migrate legacy rows to Plumbing
+        // (the company's primary trade). Idempotent.
+        for (const o of parsed.orders) {
+          if (o && String(o.type).toLowerCase() === 'other') o.type = 'Plumbing';
+        }
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
         if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
@@ -64,6 +69,7 @@ export function useWorkOrders() {
         if (!parsed.settings.viewSorts || typeof parsed.settings.viewSorts !== 'object') parsed.settings.viewSorts = {};
         if (!Array.isArray(parsed.pms)   || !parsed.pms.length)   parsed.pms   = DEFAULT_PMS.slice();
         if (!Array.isArray(parsed.types) || !parsed.types.length) parsed.types = DEFAULT_TYPES.slice();
+        parsed.types = parsed.types.filter(t => String(t).toLowerCase() !== 'other');
         if (!Array.isArray(parsed.techs) || !parsed.techs.length) parsed.techs = DEFAULT_TECHS.slice();
         setData(parsed);
         dataRef.current = parsed;
@@ -271,6 +277,18 @@ export function useWorkOrders() {
     }
     const byId = new Map((cur.orders || []).map(o => [o.id, o]));
 
+    // Normalized WO number (digits only, no leading zeros) -> existing record id.
+    // Lets a re-import match a WO however it was keyed: id = portal # (e.g.
+    // "02105363"), id = "WO-NNN" with the # in a woId field, or the # embedded in
+    // the id ("WO-2199912"). Without this, those re-import as bogus new WOs.
+    const woNum = (s) => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+    const byWoNum = new Map();
+    for (const o of (cur.orders || [])) {
+      if (o.deleted) continue;
+      const n = woNum(o.woId) || woNum(o.id);
+      if (n) byWoNum.set(n, o.id);
+    }
+
     const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
     const digits = (s) => String(s || '').replace(/\D/g, '');
     const findDuplicate = (item) => {
@@ -297,6 +315,7 @@ export function useWorkOrders() {
       if (!inc) continue;
 
       const portalWo = String(inc.woId || '').trim();
+      const incNum = woNum(portalWo);
       let id;
       // stableId = the incoming row carries a real portal WO#. Such rows must NOT
       // be address/phone-deduped: a genuinely new WO# at a known address is a
@@ -304,6 +323,7 @@ export function useWorkOrders() {
       // from the extension, so it does NOT count as stable.)
       let stableId = false;
       if (portalWo && byId.has(portalWo))               { id = portalWo; stableId = true; }
+      else if (incNum && byWoNum.has(incNum))           { id = byWoNum.get(incNum); stableId = true; } // same WO, keyed differently
       else if (portalWo)                                { id = portalWo; stableId = true; }
       else if (inc.id && byId.has(inc.id))              id = inc.id;
       else {
@@ -313,14 +333,13 @@ export function useWorkOrders() {
       }
 
       if (byId.has(id)) {
-        batch.push({ id, isNew: false });
         const old = byId.get(id);
         // change11: WOs on tab='complete' / 'trash' carry a HARDCODED status
         // (Complete - Pending Approval / Cancelled). A re-import from the
         // scraper must NOT overwrite that with the raw portal status; only
         // active WOs accept status updates from import.
         const hardcoded = old.tab === 'complete' || old.tab === 'trash' || old.deleted;
-        byId.set(id, {
+        const merged = {
           ...old,
           pm:          inc.pm          || old.pm,
           type:        inc.type        || old.type,
@@ -334,9 +353,23 @@ export function useWorkOrders() {
           propertyId:  inc.propertyId  || old.propertyId,
           city:        inc.city        || old.city,
           portalLink:  inc.portalLink  || old.portalLink,
+          contactName: inc.contactName || old.contactName,
+          contacts:    (Array.isArray(inc.contacts) && inc.contacts.length) ? inc.contacts : old.contacts,
           bidItems:    (Array.isArray(inc.bidItems) && inc.bidItems.length) ? inc.bidItems : old.bidItems,
-          history: [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }],
-        });
+        };
+        // Silent update ONLY when something actually changed — no-op re-imports
+        // add no history and are not reported.
+        const scalars = ['pm', 'type', 'address', 'phone', 'status', 'priority', 'notes', 'propertyId', 'city', 'portalLink', 'contactName'];
+        const changed = scalars.some(k => (merged[k] || '') !== (old[k] || ''))
+          || JSON.stringify(merged.bidItems || []) !== JSON.stringify(old.bidItems || [])
+          || JSON.stringify(merged.contacts || []) !== JSON.stringify(old.contacts || []);
+        if (changed) {
+          merged.history = [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }];
+          byId.set(id, merged);
+          batch.push({ id, isNew: false });
+          imported++;
+        }
+        continue; // handled (changed or no-op); skip the shared imported++ below
       } else {
         // New row. Address/phone/propertyId dedup only for rows WITHOUT a stable
         // portal WO# — a real new WO# at a known address must still import.
@@ -354,7 +387,7 @@ export function useWorkOrders() {
         const wo = {
           id,
           pm:            inc.pm || '',
-          type:          inc.type || 'Other',
+          type:          inc.type || 'Plumbing',
           address:       inc.address || '',
           phone:         formatPhone(inc.phone || ''),
           tech:          inc.tech || '',
@@ -370,6 +403,8 @@ export function useWorkOrders() {
           dateOfService: '',
           portalLink:    inc.portalLink || '',
           city:          inc.city || '',
+          contactName:   inc.contactName || '',
+          contacts:      Array.isArray(inc.contacts) ? inc.contacts : [],
           emergency:     !!inc.emergency,
           warranty:      !!inc.warranty,
           bidItems:      Array.isArray(inc.bidItems) ? inc.bidItems : [],

@@ -414,9 +414,12 @@ function ageDaysFor(o) {
 
 export function typeLetter(type) {
   const t = String(type || '').toLowerCase();
-  if (t === 'plumbing')   return 'P';
-  if (t === 'hvac')       return 'H';
-  if (t === 'electrical') return 'E';
+  const hasP = /plumb/.test(t);
+  const hasH = /hvac|heat|cool|furnace/.test(t);
+  if (hasP && hasH) return 'PH';     // dual job (Plumbing + HVAC)
+  if (hasP)         return 'P';
+  if (hasH)         return 'H';
+  if (/electric/.test(t)) return 'E';
   return (type || '?').slice(0, 1).toUpperCase();
 }
 
@@ -879,7 +882,8 @@ const fieldInputStyle = {
 
 function WOForm({ initial, mode, onCancel, onSubmit, data }) {
   const pms      = data?.pms      || DEFAULT_PMS;
-  const types    = data?.types    || DEFAULT_TYPES;
+  // 'Other' is not an allowed job type — filter it from legacy data lists.
+  const types    = (data?.types || DEFAULT_TYPES).filter(t => String(t).toLowerCase() !== 'other');
   const techs    = data?.techs    || DEFAULT_TECHS;
   const statuses = data?.statuses || DEFAULT_STATUSES;
 
@@ -2420,6 +2424,26 @@ function UpdateBanner({ state, onInstall }) {
   );
 }
 
+// Top banner shown while a portal capture is in flight. Same slot + accent
+// styling as UpdateBanner, with an indeterminate loading bar (capture gives no
+// incremental percent — one Python run returns all at once). status = { label }
+// when active, null otherwise.
+function CaptureBanner({ status }) {
+  if (!status) return null;
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9998,
+      background: 'var(--accent)', color: 'var(--accent-fg)',
+      fontSize: 13, fontWeight: 500,
+    }}>
+      <div style={{ padding: '8px 20px' }}>{status.label}</div>
+      <div style={{ height: 3, background: 'rgba(255,255,255,0.25)', overflow: 'hidden' }}>
+        <div className="wo-capture-bar" style={{ height: '100%', width: '40%', background: '#fff' }} />
+      </div>
+    </div>
+  );
+}
+
 function MigrationDialog({ onApply, onSkip, backupBeforeApply, setBackupBeforeApply }) {
   const backup = backupBeforeApply !== undefined ? backupBeforeApply : true;
   const setBackup = setBackupBeforeApply || (() => {});
@@ -3560,7 +3584,8 @@ function App() {
   const setCustomTheme = React.useCallback((v) => updateSettings({ customTheme: v && typeof v === 'object' ? v : {} }), [updateSettings]);
   const pms   = (data?.pms   && data.pms.length)   ? data.pms   : DEFAULT_PMS.slice();
   const setPms   = React.useCallback((v) => updateData({ pms: v }),   [updateData]);
-  const types = (data?.types && data.types.length) ? data.types : DEFAULT_TYPES.slice();
+  const types = ((data?.types && data.types.length) ? data.types : DEFAULT_TYPES.slice())
+    .filter(t => String(t).toLowerCase() !== 'other');
   const setTypes = React.useCallback((v) => updateData({ types: v }), [updateData]);
   const techs = (data?.techs && data.techs.length) ? data.techs : DEFAULT_TECHS.slice();
   const setTechs = React.useCallback((v) => updateData({ techs: v }), [updateData]);
@@ -3867,6 +3892,8 @@ function App() {
 
   // Update banner state
   const [updateState, setUpdateState] = React.useState(null);
+  const [captureStatus, setCaptureStatus] = React.useState(null);
+  const msrBannerTimer = React.useRef(null);
 
   // Phase 16: paint the tray icon with the Gamble brand. Renderer
   // rasterizes GambleMark, ships the PNG to main, main does
@@ -3909,15 +3936,22 @@ function App() {
   React.useEffect(() => {
     if (window.extensionBridge && window.extensionBridge.onImport) {
       window.extensionBridge.onImport((incoming) => {
-        const { imported, dupSkipped, batch } = upsertOrders(incoming);
-        if (imported && dupSkipped)
-          toast(`Imported ${imported} · skipped ${dupSkipped} duplicate(s)`);
-        else if (imported)
-          toast(`Imported ${imported} WO${imported === 1 ? '' : 's'}`);
-        else if (dupSkipped)
-          toast(`Skipped ${dupSkipped} duplicate(s) (already in tracker)`);
-        if (Array.isArray(batch) && batch.length) {
-          setImportInspect({ batch, ts: Date.now(), dupSkipped });
+        // An import arriving clears the in-flight MSR capture banner.
+        if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
+        setCaptureStatus(null);
+        const { dupSkipped, batch } = upsertOrders(incoming);
+        // Existing WOs are updated SILENTLY (in place, no modal); only genuinely
+        // new WOs are surfaced in the import-review modal.
+        const arr = Array.isArray(batch) ? batch : [];
+        const newBatch = arr.filter(b => b.isNew);
+        const updated = arr.length - newBatch.length;
+        const parts = [];
+        if (newBatch.length) parts.push(`${newBatch.length} new`);
+        if (updated)         parts.push(`${updated} updated`);
+        if (dupSkipped)      parts.push(`${dupSkipped} skipped`);
+        if (parts.length) toast('Import: ' + parts.join(' · '));
+        if (newBatch.length) {
+          setImportInspect({ batch: newBatch, ts: Date.now(), dupSkipped });
         }
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
       });
@@ -4912,10 +4946,51 @@ function App() {
     });
   }, [updateOrder]);
 
-  // In-app portal capture: drives a BrowserWindow (main process) through the
-  // WO's tabs and merges the scraped fields into THIS record. Re-capture
-  // updates in place (updateOrder), never spawning a duplicate. Returns a
-  // promise so callers can show progress. Shared by context menu + detail pane.
+  // Merge a capture result ({ ok, wo, warnings }) into the record IN PLACE.
+  // Returns the warnings array, or null when the result was not ok. Shared by
+  // single (captureOrder) + batch (captureAllAMH) so the merge stays identical.
+  const applyCapture = React.useCallback((id, res) => {
+    if (!res || !res.ok) return null;
+    const s = res.wo || {};
+    updateOrder(id, cur => {
+      const patch = { ...cur };
+      const set = (k, v) => { if (v !== undefined && v !== null && v !== '') patch[k] = v; };
+      // Status + priority are left to the user's workflow — re-capture must
+      // not drag a manually-advanced WO back to the portal's status.
+      set('address', s.address);
+      set('city', s.city);
+      if (s.phone) patch.phone = formatPhone(s.phone);
+      set('type', s.type);
+      set('propertyId', s.propertyId);
+      set('portalLink', s.portalLink);
+      set('bidAmount', s.bidAmount);
+      if (Array.isArray(s.bidItems) && s.bidItems.length) patch.bidItems = s.bidItems;
+      if (s.notes) patch.notes = s.notes;
+      set('contactName', s.contactName);
+      if (Array.isArray(s.contacts) && s.contacts.length) patch.contacts = s.contacts;
+      const hist = [...(cur.history || []), { ts: Date.now(), action: 'captured from portal', detail: s.woId ? 'WO# ' + s.woId : '' }];
+      // change11: AMH sub-status "Pending Validation" = vendor submitted bid
+      // for AMH approval. Auto-advance from active → complete (tech-done,
+      // awaiting PM approval). Sets the hardcoded Complete - Pending
+      // Approval status and saves prevStatus. Does NOT backslide WOs already
+      // on complete/sent/trash.
+      const curTab = cur.tab || 'active';
+      if (/pending\s*validation/i.test(String(s.subStatus || '')) && curTab === 'active') {
+        patch.tab = 'complete';
+        patch.prevStatus = cur.prevStatus || cur.status || 'Open';
+        patch.status = 'Complete - Pending Approval';
+        if (patch.schedule) delete patch.schedule;
+        hist.push({ ts: Date.now(), action: 'auto-flipped to Complete', detail: 'auto: Pending Validation' });
+      }
+      patch.history = hist;
+      return patch;
+    });
+    return Array.isArray(res.warnings) ? res.warnings : [];
+  }, [updateOrder]);
+
+  // In-app portal capture: runs scrape_amh.py (headless Edge token+API) for
+  // THIS record and merges the scraped fields in place. Re-capture updates,
+  // never spawning a duplicate. Returns a promise so callers can show progress.
   const captureOrder = React.useCallback((id) => {
     const src = orders.find(o => o.id === id);
     if (!src) return Promise.resolve();
@@ -4923,51 +4998,89 @@ function App() {
     if (pm === 'MSR') { toast('MSR work orders import through the Chrome extension, not in-app capture'); return Promise.resolve(); }
     if (pm !== 'AMH') { toast('In-app capture supports AMH work orders only'); return Promise.resolve(); }
     if (!window.scraper || !window.scraper.captureWO) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
-    toast('Capturing ' + id + ' from ' + pm + '…');
+    setCaptureStatus({ label: 'Capturing ' + id + ' from ' + pm + '…' });
     return window.scraper.captureWO(src).then(res => {
       if (!res || !res.ok) { toast('Capture failed: ' + ((res && res.error) || 'unknown error')); return; }
-      const s = res.wo || {};
-      updateOrder(id, cur => {
-        const patch = { ...cur };
-        const set = (k, v) => { if (v !== undefined && v !== null && v !== '') patch[k] = v; };
-        // Status + priority are left to the user's workflow — re-capture must
-        // not drag a manually-advanced WO back to the portal's status.
-        set('address', s.address);
-        set('city', s.city);
-        if (s.phone) patch.phone = formatPhone(s.phone);
-        set('type', s.type);
-        set('propertyId', s.propertyId);
-        set('portalLink', s.portalLink);
-        set('bidAmount', s.bidAmount);
-        if (Array.isArray(s.bidItems) && s.bidItems.length) patch.bidItems = s.bidItems;
-        if (s.notes) patch.notes = s.notes;
-        set('contactName', s.contactName);
-        if (Array.isArray(s.contacts) && s.contacts.length) patch.contacts = s.contacts;
-        const hist = [...(cur.history || []), { ts: Date.now(), action: 'captured from portal', detail: s.woId ? 'WO# ' + s.woId : '' }];
-        // change11: AMH sub-status "Pending Validation" = vendor submitted bid
-        // for AMH approval. Auto-advance from active → complete (tech-done,
-        // awaiting PM approval). Sets the hardcoded Complete - Pending
-        // Approval status and saves prevStatus. Does NOT backslide WOs already
-        // on complete/sent/trash.
-        const curTab = cur.tab || 'active';
-        if (/pending\s*validation/i.test(String(s.subStatus || '')) && curTab === 'active') {
-          patch.tab = 'complete';
-          patch.prevStatus = cur.prevStatus || cur.status || 'Open';
-          patch.status = 'Complete - Pending Approval';
-          if (patch.schedule) delete patch.schedule;
-          hist.push({ ts: Date.now(), action: 'auto-flipped to Complete', detail: 'auto: Pending Validation' });
-        }
-        patch.history = hist;
-        return patch;
-      });
-      const warnings = Array.isArray(res.warnings) ? res.warnings : [];
+      const warnings = applyCapture(id, res) || [];
       if (warnings.length) {
         toast('Captured ' + id + ' (warnings: ' + warnings.join(' / ') + ')', 'warn');
       } else {
         toast('Captured ' + id);
       }
-    }).catch(e => toast('Capture error: ' + e.message));
-  }, [orders, updateOrder, toast]);
+    }).catch(e => toast('Capture error: ' + e.message))
+      .finally(() => setCaptureStatus(null));
+  }, [orders, applyCapture, toast]);
+
+  // Batch capture: every "All Open" (non-Completed) AMH WO from the portal in
+  // ONE Edge login. The scraper returns all open portal WOs keyed by number;
+  // known WOs are updated in place (applyCapture), and any WO not yet in the app
+  // is imported via upsertOrders (dedup/stableId) and surfaced in the new-WO
+  // review modal once the whole batch is done.
+  const captureAllAMH = React.useCallback(() => {
+    if (!window.scraper || !window.scraper.captureAllAMH) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
+    const numOf = o => String(o.woId || o.id || '').replace(/^WO-/i, '').trim();
+    const existing = new Map();
+    for (const o of orders) {
+      if (o.deleted || String(o.pm || '').toUpperCase() !== 'AMH') continue;
+      const n = numOf(o); if (n) existing.set(n, o.id);
+    }
+    setCaptureStatus({ label: 'Capturing all open AMH work orders…' });
+    return window.scraper.captureAllAMH().then(resp => {
+      if (!resp || !resp.ok) { toast('Batch capture failed: ' + ((resp && resp.error) || 'unknown error')); return; }
+      let updated = 0, warned = 0, fail = 0;
+      const newIncoming = [];
+      for (const [num, res] of Object.entries(resp.results || {})) {
+        const key = String(num).replace(/^WO-/i, '').trim();
+        if (existing.has(key)) {
+          const w = applyCapture(existing.get(key), res);
+          if (w === null) fail++; else { updated++; if (w.length) warned++; }
+        } else if (res && res.ok && res.wo) {
+          const s = res.wo;
+          // status omitted -> new WOs default to 'Open' (raw portal statuses
+          // like "Unscheduled"/"Posted" are not app statuses; matches single-
+          // capture leaving status to the user's workflow).
+          newIncoming.push({
+            woId: s.woId, pm: 'AMH', type: s.type, address: s.address, city: s.city,
+            phone: s.phone, notes: s.notes, propertyId: s.propertyId,
+            portalLink: s.portalLink, bidItems: s.bidItems, bidAmount: s.bidAmount,
+            contactName: s.contactName, contacts: s.contacts,
+          });
+        } else { fail++; }
+      }
+      let added = 0;
+      if (newIncoming.length) {
+        const r = upsertOrders(newIncoming);
+        added = r.imported || 0;
+        if (Array.isArray(r.batch) && r.batch.length) {
+          setImportInspect({ batch: r.batch, ts: Date.now(), dupSkipped: r.dupSkipped });
+        }
+      }
+      toast('Captured ' + updated + ' updated, ' + added + ' new'
+        + (warned ? (', ' + warned + ' with warnings') : '')
+        + (fail ? (', ' + fail + ' failed') : ''));
+    }).catch(e => toast('Batch capture error: ' + e.message))
+      .finally(() => setCaptureStatus(null));
+  }, [orders, applyCapture, upsertOrders, toast]);
+
+  // MSR bulk capture: MSR is locked to the authenticated Chrome profile, so the
+  // Chrome extension does the work. This queues a command the extension polls;
+  // captured WOs return via the normal /import -> extension-import path (toast +
+  // new-WO modal). Requires Chrome + the extension running.
+  const captureAllMSR = React.useCallback(() => {
+    if (!window.extensionBridge || !window.extensionBridge.requestMsrCapture) {
+      toast('MSR capture is only available in the desktop app'); return;
+    }
+    window.extensionBridge.requestMsrCapture()
+      .then(() => {
+        toast('MSR capture requested — keep Chrome + the extension open; WOs import automatically.');
+        // Indeterminate progress (work runs remotely in the extension). Cleared
+        // when the import arrives (onImport) or by a safety timeout.
+        setCaptureStatus({ label: 'Capturing MSR work orders (via Chrome extension)…' });
+        if (msrBannerTimer.current) clearTimeout(msrBannerTimer.current);
+        msrBannerTimer.current = setTimeout(() => setCaptureStatus(null), 8 * 60 * 1000);
+      })
+      .catch(e => toast('MSR request failed: ' + e.message));
+  }, [toast]);
 
   // Explicit-id action handler shared by context menu and detail pane.
   const woAction = React.useCallback((id, kind, payload) => {
@@ -5319,6 +5432,7 @@ function App() {
           state={updateState}
           onInstall={() => window.updater && window.updater.install && window.updater.install()}
         />
+        <CaptureBanner status={captureStatus} />
         {currentModule === 'overview' && (
           <div style={{ ...themeVars, color: 'var(--text-1)' }}>
             <OverviewModule
@@ -5423,6 +5537,26 @@ function App() {
               onSelectView={selectView}
               isPresetView={!!activePreset || !!activeInbox}
               isInboxView={!!activeInbox}
+              headerRight={(
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {(window.scraper && window.scraper.captureAllAMH) && (
+                    <button onClick={captureAllAMH} title="Capture all active AMH work orders from the portal" style={{
+                      height: 26, padding: '0 12px', borderRadius: 999,
+                      border: '1px solid var(--border-1)', background: 'transparent',
+                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
+                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
+                    }}>Capture all AMH</button>
+                  )}
+                  {(window.extensionBridge && window.extensionBridge.requestMsrCapture) && (
+                    <button onClick={captureAllMSR} title="Capture all open MSR work orders via the Chrome extension (Chrome must be open)" style={{
+                      height: 26, padding: '0 12px', borderRadius: 999,
+                      border: '1px solid var(--border-1)', background: 'transparent',
+                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
+                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
+                    }}>Capture all MSR</button>
+                  )}
+                </div>
+              )}
             />
             <div style={{ flex: 1, minHeight: 0, display: 'flex', minWidth: 0 }}>
               <Sidebar

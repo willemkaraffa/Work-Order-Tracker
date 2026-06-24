@@ -30,7 +30,10 @@ contextBridge.exposeInMainWorld('isElectron', true);
 // Extension import bridge — fires when native host writes orders to disk
 contextBridge.exposeInMainWorld('extensionBridge', {
   onImport: (cb) => ipcRenderer.on('extension-import', (_e, orders) => cb(orders)),
-  acknowledge: () => ipcRenderer.invoke('import-acknowledged')
+  acknowledge: () => ipcRenderer.invoke('import-acknowledged'),
+  // Queue a command the Chrome extension picks up on its next poll (e.g. bulk
+  // MSR capture). Results return via the normal /import -> extension-import path.
+  requestMsrCapture: () => ipcRenderer.invoke('queue-ext-command', 'captureMsrAll'),
 });
 
 // Service-item library bridge — xlsx seed / import / export (persistence stays
@@ -69,7 +72,8 @@ contextBridge.exposeInMainWorld('creds', {
 
 // Scraper bridge — trigger in-app portal scraping
 contextBridge.exposeInMainWorld('scraper', {
-  captureWO: (woData) => ipcRenderer.invoke('capture-wo', woData),
+  captureWO:     (woData) => ipcRenderer.invoke('capture-wo', woData),
+  captureAllAMH: (woNums) => ipcRenderer.invoke('capture-all-amh', woNums),
 });
 
 // Tray bridge -- main process pushes click events; renderer pushes state.

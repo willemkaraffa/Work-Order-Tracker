@@ -3,7 +3,7 @@ const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
 const { autoUpdater } = require('electron-updater');
-const { captureWO }  = require('./scraper');
+const { runAmhCapture } = require('./amh-runner');
 const libraryIO      = require('./library_io');
 
 // Single-instance guard. A second launch focuses the existing window
@@ -67,6 +67,10 @@ function writeStore(store) {
 // No registry, no native host, no bat files needed.
 const BRIDGE_PORT = 27843;
 
+// One-shot command the Chrome extension polls for (GET /command). Set by the
+// renderer (e.g. "Capture all MSR" button); cleared when the extension reads it.
+let pendingCommand = null;
+
 function startBridgeServer(win) {
   const server = http.createServer((req, res) => {
     // CORS headers so Chrome extension can POST from any page
@@ -105,6 +109,15 @@ function startBridgeServer(win) {
     if (req.method === 'GET' && req.url === '/ping') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, status: 'connected', app: 'Work Order Tracker' }));
+      return;
+    }
+
+    // Extension polls this; returns + clears any queued command (one-shot).
+    if (req.method === 'GET' && req.url === '/command') {
+      const cmd = pendingCommand;
+      pendingCommand = null;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, command: cmd }));
       return;
     }
 
@@ -523,17 +536,46 @@ ipcMain.handle('creds-clear', (_e, pm) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// ── IPC: Capture WO (full in-app BrowserWindow scrape) ────────────────────────
+// ── IPC: Capture WO (headless Edge token+API via scrape_amh.py) ───────────────
+function amhCredential() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const store = readStore();
+    const enc = store[CRED_PREFIX + 'AMH'];
+    if (!enc) return null;
+    return JSON.parse(safeStorage.decryptString(Buffer.from(enc, 'base64')));
+  } catch (e) { return null; }
+}
+
+function woNumberOf(woData) {
+  return String((woData && (woData.woId || woData.id)) || '').replace(/^WO-/i, '').trim();
+}
+
+// Single WO. Returns the { ok, wo, warnings } contract the renderer merges.
 ipcMain.handle('capture-wo', async (_e, woData) => {
-  async function getCredential(pm) {
-    try {
-      if (!safeStorage.isEncryptionAvailable()) return null;
-      const store = readStore();
-      const enc = store[CRED_PREFIX + pm.toUpperCase()];
-      if (!enc) return null;
-      const payload = safeStorage.decryptString(Buffer.from(enc, 'base64'));
-      return JSON.parse(payload);
-    } catch (e) { return null; }
-  }
-  return captureWO(woData, getCredential);
+  const pm = String((woData && woData.pm) || '').toUpperCase();
+  if (pm === 'MSR') return { ok: false, error: 'MSR work orders import through the Chrome extension, not in-app capture.' };
+  if (pm !== 'AMH') return { ok: false, error: `In-app capture supports AMH only (pm "${woData && woData.pm}").` };
+  const woNum = woNumberOf(woData);
+  if (!woNum) return { ok: false, error: 'WO has no number to locate it on AMH.' };
+  try {
+    const results = await runAmhCapture([woNum], amhCredential());
+    return results[woNum] || { ok: false, error: `WO ${woNum} not returned by AMH scraper.` };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Queue a command for the Chrome extension's next poll (e.g. bulk MSR capture).
+ipcMain.handle('queue-ext-command', (_e, action) => {
+  pendingCommand = { action: String(action || ''), ts: Date.now() };
+  return { ok: true };
+});
+
+// Batch: capture ALL "All Open" (non-Completed) AMH WOs in ONE login. The
+// scraper returns every open portal WO keyed by number; the renderer reconciles
+// (updates known WOs, imports new ones). Returns { ok, results }.
+ipcMain.handle('capture-all-amh', async () => {
+  try {
+    const results = await runAmhCapture(['__ALL_OPEN__'], amhCredential());
+    return { ok: true, results };
+  } catch (e) { return { ok: false, error: e.message }; }
 });

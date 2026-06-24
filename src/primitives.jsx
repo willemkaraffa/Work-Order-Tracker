@@ -24,9 +24,43 @@ export function PMChip({ pm }) {
   );
 }
 
+// Accepts a letter ('P'/'H'/'E'/'PH'), a full type ('Plumbing', 'HVAC',
+// 'Plumbing+HVAC'), or legacy values — normalizes so every call site renders
+// the same icon regardless of what it passes.
+function normType(kind) {
+  const s = String(kind || '');
+  const t = s.toLowerCase();
+  const hasP = t === 'p' || /plumb/.test(t);
+  const hasH = t === 'h' || /hvac|heat|cool|furnace/.test(t);
+  if (t === 'ph' || (hasP && hasH)) return 'PH';   // dual
+  if (hasP) return 'P';
+  if (hasH) return 'H';
+  if (t === 'e' || /electric/.test(t)) return 'E';
+  return (s.slice(0, 1).toUpperCase() || '?');
+}
+
 export function TypeIcon({ kind }) {
-  const label = kind === 'P' ? 'Plumbing' : kind === 'H' ? 'HVAC' : kind === 'E' ? 'Electrical' : 'Other';
-  const c = TYPE_COLORS[kind] || '#6b7280';
+  const k = normType(kind);
+  // Dual job (Plumbing + HVAC): diagonal split of the two trade colors.
+  if (k === 'PH') {
+    const cp = TYPE_COLORS.P, ch = TYPE_COLORS.H;
+    return (
+      <span title="Plumbing + HVAC" style={{
+        display: 'inline-flex', width: 20, height: 20, borderRadius: 4,
+        overflow: 'hidden', border: `1px solid ${hexToRgba('#888', 0.45)}`, flexShrink: 0,
+      }}>
+        <svg viewBox="0 0 20 20" width="20" height="20" style={{ display: 'block' }}>
+          <polygon points="0,0 20,0 0,20" fill={hexToRgba(cp, 0.30)} />
+          <polygon points="20,0 20,20 0,20" fill={hexToRgba(ch, 0.30)} />
+          <line x1="20" y1="0" x2="0" y2="20" stroke="rgba(0,0,0,0.5)" strokeWidth="1" />
+          <text x="3.5" y="9.5" fontSize="8" fontWeight="800" fill={cp} fontFamily="ui-monospace, monospace">P</text>
+          <text x="11" y="17.5" fontSize="8" fontWeight="800" fill={ch} fontFamily="ui-monospace, monospace">H</text>
+        </svg>
+      </span>
+    );
+  }
+  const label = k === 'P' ? 'Plumbing' : k === 'H' ? 'HVAC' : k === 'E' ? 'Electrical' : (kind || '');
+  const c = TYPE_COLORS[k] || '#6b7280';
   return (
     <span title={label} style={{
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -36,7 +70,7 @@ export function TypeIcon({ kind }) {
       color: c, fontSize: 11, fontWeight: 800,
       fontFamily: 'ui-monospace, monospace',
       flexShrink: 0,
-    }}>{kind}</span>
+    }}>{k}</span>
   );
 }
 

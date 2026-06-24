@@ -1,6 +1,6 @@
 {
   "name": "work-order-tracker",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "Work Order Tracker – Gamble Plumbing Heating and Air",
   "main": "main.js",
   "scripts": {
@@ -45,12 +45,16 @@
     "files": [
       "main.js",
       "preload.js",
-      "scraper.js",
-      "scraper-extract.js",
+      "amh-runner.js",
       "library_io.js",
       "index.html",
       "bundle/**",
       "assets/**"
+    ],
+    "extraResources": [
+      "scrape_amh.py",
+      { "from": "resources/python", "to": "python" },
+      { "from": "resources/msedgedriver.exe", "to": "msedgedriver.exe" }
     ]
   },
   "dependencies": {

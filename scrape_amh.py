@@ -1,0 +1,377 @@
+"""
+scrape_amh.py  --  AMH work-order capture via headless Microsoft EDGE.
+
+AMH's portal no longer supports Chromium-engine browsers driven as a generic
+browser; real Edge passes. This logs in with Selenium/Edge, captures the Bearer
+token from the network performance log, then calls AMH's REST API
+(app.amh.com/services-api/api/Order/Query) directly for structured JSON. Tiny
+browser surface (login + one list load); all WO data comes from the API.
+
+Mechanism ported from scrape_amh_bids.py (Chrome -> Edge); extraction widened
+from bids-only to a full tracker WO object per WO. Field map verified live
+2026-06-22 (see ref-amh-orderquery-api memory).
+
+stdin : JSON array of WO numbers  e.g. ["9765734","9762158"]
+stdout: JSON object { "<woNum>": { ok, wo, warnings } }
+env   : AMH_EMAIL / AMH_PASSWORD (required for fresh login)
+        EDGE_BINARY / EDGE_DRIVER (optional explicit paths; for packaged app)
+"""
+from __future__ import annotations
+import datetime, json, os, re, sys, time, urllib.request
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.edge.options import Options
+from selenium.webdriver.edge.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import NoSuchElementException
+
+SCRIPT_DIR  = Path(os.path.dirname(os.path.abspath(__file__)))
+EMAIL       = os.environ.get("AMH_EMAIL")
+PASSWORD    = os.environ.get("AMH_PASSWORD")
+LOGIN_URL   = "https://www.amh.com/login"
+WO_LIST_URL = "https://www.amh.com/vendor-admin-orders?tabId=AllOpen"
+API_BASE    = "https://app.amh.com/services-api/api"
+WO_LINK_BASE = "https://www.amh.com/my-amh/vendor-user-orders/"
+
+_DEFAULT_EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
+
+# ── driver ────────────────────────────────────────────────────────────────────
+
+def _edge_binary() -> Optional[str]:
+    cand = os.environ.get("EDGE_BINARY") or _DEFAULT_EDGE
+    return cand if cand and os.path.exists(cand) else None
+
+
+def _edge_driver_path() -> Optional[str]:
+    # Prefer an explicit/bundled msedgedriver.exe so the packaged app stays
+    # offline. Else return None and let Selenium Manager auto-resolve it.
+    for cand in (os.environ.get("EDGE_DRIVER"),
+                 str(SCRIPT_DIR / "msedgedriver.exe"),
+                 str(SCRIPT_DIR / "msedgedriver")):
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+def make_driver():
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--disable-extensions")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.set_capability("ms:loggingPrefs", {"performance": "ALL"})
+    binary = _edge_binary()
+    if binary:
+        opts.binary_location = binary
+    driver_path = _edge_driver_path()
+    if driver_path:
+        service = Service(driver_path)
+        if sys.platform == "win32":
+            service.creation_flags = _NO_WINDOW
+        return webdriver.Edge(service=service, options=opts)
+    # Selenium Manager (selenium 4.6+) resolves a matching msedgedriver.
+    return webdriver.Edge(options=opts)
+
+
+# ── login + token capture (ported from scrape_amh_bids.py) ─────────────────────
+
+def login_and_get_token(driver) -> str:
+    print("[LOGIN] Navigating to AMH login page...", file=sys.stderr)
+    driver.get(LOGIN_URL)
+    time.sleep(5)
+
+    cur = driver.current_url
+    if "/login" not in cur and "b2clogin" not in cur:
+        print("[LOGIN] Existing AMH session detected.", file=sys.stderr)
+    else:
+        if not EMAIL or not PASSWORD:
+            raise RuntimeError("AMH_EMAIL / AMH_PASSWORD not set; cannot log in.")
+        print("[LOGIN] Switching to login iframe...", file=sys.stderr)
+        iframe = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, "loginIframe")))
+        driver.switch_to.frame(iframe)
+        time.sleep(2)
+
+        email_input = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, "signInName")))
+        email_input.clear(); email_input.send_keys(EMAIL); time.sleep(0.4)
+        pwd_input = driver.find_element(By.ID, "password")
+        pwd_input.clear(); pwd_input.send_keys(PASSWORD); time.sleep(0.4)
+
+        print("[LOGIN] Submitting...", file=sys.stderr)
+        try:
+            submit = driver.find_element(By.ID, "next")
+        except NoSuchElementException:
+            submit = driver.find_element(By.XPATH,
+                "//button[@type='submit'] | //input[@type='submit']")
+        submit.click()
+        driver.switch_to.default_content()
+
+        for _ in range(25):
+            time.sleep(1)
+            low = driver.current_url.lower()
+            if "login" not in low and "b2clogin" not in low:
+                break
+
+    print("[LOGIN] Loading WO list to trigger authenticated API requests...", file=sys.stderr)
+    driver.get(WO_LIST_URL)
+    time.sleep(12)
+
+    token = None
+    for entry in driver.get_log("performance"):
+        try:
+            msg = json.loads(entry["message"])["message"]
+            if msg.get("method") == "Network.requestWillBeSent":
+                headers = msg["params"]["request"].get("headers", {})
+                auth = headers.get("Authorization", "") or headers.get("authorization", "")
+                if auth.startswith("Bearer "):
+                    token = auth
+                    break
+        except Exception:
+            pass
+    if not token:
+        raise RuntimeError("Could not capture Bearer token from network logs.")
+    print(f"[LOGIN] Bearer token captured ({len(token)} chars).", file=sys.stderr)
+    return token
+
+
+# ── API ─────────────────────────────────────────────────────────────────────
+
+def api_get(path: str, token: str, params: Optional[Dict[str, str]] = None):
+    url = f"{API_BASE}/{path}"
+    if params:
+        qs = "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in params.items())
+        url = f"{url}?{qs}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": token, "Accept": "application/json",
+        "Origin": "https://www.amh.com", "Referer": "https://www.amh.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    })
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
+
+
+def today_api_value() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT04:00:00.000Z")
+
+
+# ── extraction helpers ─────────────────────────────────────────────────────────
+
+def normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def choose_options_for_bid(bid: Optional[dict]) -> List[dict]:
+    if not bid:
+        return []
+    options = bid.get("options", []) or []
+    approved = [o for o in options if o.get("isApproved")]
+    if approved:
+        return approved
+    preferred = [o for o in options if o.get("isPreferred")]
+    return preferred if preferred else options
+
+
+def service_display_name(service: dict, remedy_map: dict) -> str:
+    remedy = service.get("remedyInstance", {}) or {}
+    name = normalize_text(remedy.get("description")) or normalize_text(remedy.get("name"))
+    if name:
+        return name
+    rid = normalize_text(service.get("remedyInstanceId"))
+    mapped = (remedy_map or {}).get(rid, {}) or {}
+    return (normalize_text(mapped.get("description"))
+            or normalize_text(mapped.get("name"))
+            or normalize_text(service.get("serviceId")))
+
+
+def extract_bids(order: dict, remedy_map: dict):
+    """Return (bidItems, bidTotal). Approved bid first, else first available;
+    line items deduped by name. Ported from scrape_amh_bids.py."""
+    bids = order.get("bids") or []
+    approved = [b for b in bids
+                if normalize_text(b.get("statusName")).lower() == "approved"]
+    bid = approved[0] if approved else (bids[0] if bids else None)
+
+    items: List[Dict] = []
+    total = 0.0
+    for option in choose_options_for_bid(bid):
+        for service in (option.get("services") or []):
+            name = service_display_name(service, remedy_map)
+            qty        = float(service.get("quantity")  or 0) or 1.0
+            unit_price = float(service.get("unitPrice") or 0)
+            vendor_tax = float(service.get("vendorTax") or 0)
+            if not name or unit_price <= 0:
+                continue
+            if any(x["name"].lower() == name.lower() for x in items):
+                continue
+            items.append({"name": name, "qty": qty, "price": unit_price})
+            total += round(qty * unit_price + vendor_tax, 2)
+    return items, round(total, 2)
+
+
+_PLUMB_RE = re.compile(r"plumb|shower|tub|toilet|drain|faucet|sink|sewer|leak", re.I)
+_HVAC_RE  = re.compile(r"hvac|heat|cool|air\s*condition|furnace|thermostat|ventilation", re.I)
+
+
+def extract_issues(issue_instances: dict):
+    """Return (type, notes) from condititionIssueInstances [sic]. Scans ALL
+    issues' category + notes for plumbing/HVAC signals: both -> dual job. Only
+    HVAC + Plumbing are real trades; never 'Other' (undetermined -> Plumbing,
+    the company's primary trade). order.typeName is the WO category, not trade."""
+    issues = list((issue_instances or {}).values())
+    has_p = has_h = False
+    note_blocks = []
+    for ci in issues:
+        cat = normalize_text(ci.get("conditionIssueCategoryName"))
+        body = normalize_text(ci.get("notes"))
+        title = normalize_text(ci.get("conditionIssueName"))
+        text = cat + " " + body
+        if _PLUMB_RE.search(text): has_p = True
+        if _HVAC_RE.search(text):  has_h = True
+        if body:
+            note_blocks.append((title + ": " + body) if title else body)
+        elif title:
+            note_blocks.append(title)
+    wo_type = "Plumbing+HVAC" if (has_p and has_h) else "HVAC" if has_h else "Plumbing"
+    return wo_type, "\n\n".join(note_blocks)
+
+
+def extract_contacts(customers: list):
+    contacts = []
+    for c in (customers or []):
+        name = normalize_text((c.get("firstName") or "") + " " + (c.get("lastName") or ""))
+        phone = normalize_text(c.get("phone") or c.get("homePhone") or c.get("otherPhone"))
+        if not name and not phone:
+            continue
+        contacts.append({
+            "name": name, "phone": phone,
+            "email": normalize_text(c.get("email")),
+            "primary": bool(c.get("isPrimary")),
+        })
+    # Primary first so contacts[0] is the primary contact.
+    contacts.sort(key=lambda x: not x["primary"])
+    return contacts
+
+
+# ── per-WO assembly ─────────────────────────────────────────────────────────
+
+def build_wo(item: dict) -> dict:
+    order = item.get("order") or item
+    prop  = order.get("property") or {}
+    addr  = prop.get("address") or {}
+
+    wo_type, notes = extract_issues(item.get("condititionIssueInstances"))
+    contacts = extract_contacts(item.get("customers"))
+    primary  = contacts[0] if contacts else None
+    bid_items, bid_total = extract_bids(order, item.get("remedyInstances"))
+
+    warnings = []
+    if not bid_items:
+        statuses = sorted({normalize_text(b.get("statusName")) for b in (order.get("bids") or [])})
+        if statuses:
+            warnings.append("no bid items (bid statuses: " + ", ".join(statuses) + ")")
+
+    wo = {
+        "woId":        normalize_text(order.get("name")),
+        "address":     normalize_text(addr.get("street")),
+        "city":        normalize_text(addr.get("city")),
+        "state":       normalize_text(addr.get("state")),
+        "zip":         normalize_text(addr.get("zipCode")),
+        "propertyId":  normalize_text(prop.get("propertyNo")),
+        "status":      normalize_text(order.get("statusName")),
+        "subStatus":   normalize_text(order.get("subStatusName")),
+        "type":        wo_type,
+        "notes":       notes,
+        "phone":       primary["phone"] if primary else "",
+        "contactName": primary["name"]  if primary else "",
+        "contacts":    contacts,
+        "bidItems":    bid_items,
+        "bidAmount":   f"{bid_total:.2f}" if bid_total else "",
+        "portalLink":  (WO_LINK_BASE + order.get("id") + "?tabId=general") if order.get("id") else "",
+    }
+    return {"ok": True, "wo": wo, "warnings": warnings}
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+# statusName values that are NOT open work (excluded from all-open capture).
+# "Posted" = work completed, awaiting invoicing (subStatus "Work Completed"); not
+# open. Open = Unscheduled / Scheduled. Verified live against portal count (19).
+ALL_OPEN_SENTINEL = "__ALL_OPEN__"
+_CLOSED_STATUSES = {"completed", "canceled", "cancelled", "posted"}
+
+
+def main():
+    raw = sys.stdin.read().strip()
+    wo_numbers: List[str] = json.loads(raw) if raw else []
+    if not wo_numbers:
+        print("{}", flush=True)
+        return
+    all_open = ALL_OPEN_SENTINEL in wo_numbers
+
+    print(f"[API] Capturing {'ALL OPEN' if all_open else len(wo_numbers)} WO(s)...", file=sys.stderr)
+    driver = make_driver()
+    try:
+        token = login_and_get_token(driver)
+    finally:
+        try: driver.quit()
+        except Exception: pass
+
+    print("[API] Fetching Order/Query...", file=sys.stderr)
+    orders = api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"})
+    if not isinstance(orders, list):
+        orders = orders.get("orders") or orders.get("items") or []
+    print(f"[API] Got {len(orders)} order(s).", file=sys.stderr)
+
+    order_map: Dict[str, dict] = {}
+    for item in orders:
+        o = item.get("order") or item
+        name = re.sub(r"^WO-", "", normalize_text(o.get("name")), flags=re.I).strip()
+        if name:
+            order_map[name] = item
+
+    results = {}
+    if all_open:
+        # Every "All Open" WO that is not Completed/Canceled, keyed by WO number.
+        for name, item in order_map.items():
+            o = item.get("order") or item
+            if normalize_text(o.get("statusName")).lower() in _CLOSED_STATUSES:
+                continue
+            try:
+                results[name] = build_wo(item)
+            except Exception as exc:
+                results[name] = {"ok": False, "error": f"extract failed: {exc}"}
+        print(f"  all-open: {len(results)} WO(s)", file=sys.stderr)
+    else:
+        for wo_num in wo_numbers:
+            stripped = re.sub(r"^WO-", "", wo_num, flags=re.I).strip()
+            item = order_map.get(stripped)
+            if not item:
+                results[wo_num] = {"ok": False,
+                                   "error": f"WO {stripped} not found in AMH active orders."}
+                continue
+            try:
+                results[wo_num] = build_wo(item)
+                w = results[wo_num]["wo"]
+                print(f"  {wo_num}: type={w['type']} items={len(w['bidItems'])} ${w['bidAmount']}",
+                      file=sys.stderr)
+            except Exception as exc:
+                results[wo_num] = {"ok": False, "error": f"extract failed: {exc}"}
+
+    print(json.dumps(results), flush=True)
+
+
+if __name__ == "__main__":
+    main()

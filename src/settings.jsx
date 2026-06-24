@@ -92,10 +92,11 @@ export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDe
   );
 }
 
-// Portal credentials for in-app capture. AMH only — its login is script-fillable
-// in the BrowserWindow. MSR uses the Chrome extension (authenticated Chrome), so
-// no credentials are stored here for it. Secrets are encrypted by the main
-// process via safeStorage; this UI never persists them in plain wo_data.
+// Portal credentials for in-app capture. AMH only — its scraper (headless Edge,
+// scrape_amh.py) logs in with these credentials, so they are REQUIRED for
+// capture to work. MSR uses the Chrome extension (authenticated Chrome), so no
+// credentials are stored here for it. Secrets are encrypted by the main process
+// via safeStorage; this UI never persists them in plain wo_data.
 function CredentialsSection() {
   const [username, setUsername] = React.useState('');
   const [password, setPassword] = React.useState('');
@@ -133,9 +134,9 @@ function CredentialsSection() {
 
   return (
     <div>
-      <SettingTitle sub="Stored encrypted on this machine (safeStorage). Reserved for future scripted login support.">Credentials</SettingTitle>
+      <SettingTitle sub="Stored encrypted on this machine (safeStorage). Used to log in to the AMH portal during capture.">Credentials</SettingTitle>
       <div style={{ marginBottom: 14, padding: '10px 12px', border: '1px solid var(--border-1)', borderRadius: 6, background: 'var(--bg-surface)', fontSize: 12, color: 'var(--text-2)', lineHeight: 1.5 }}>
-        AMH portal login is currently interactive: the first time you capture a WO, an AMH sign-in window opens — sign in once and the session is remembered. Stored credentials below are not yet wired into capture; safe to leave blank.
+        AMH capture signs in to the portal with these credentials (headless Microsoft Edge). Enter your AMH username and password below — capture will fail without them.
       </div>
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>AMH portal {stored && <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>· saved</span>}</div>
       <label style={lbl}>Username / email

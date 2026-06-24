@@ -6,7 +6,9 @@ export const DEFAULT_PMS = [
   { name: 'MSR',   color: '#10b981' },
   { name: 'Other', color: '#6b7280' },
 ];
-export const DEFAULT_TYPES = ['HVAC', 'Plumbing', 'Other'];
+// Job types: only HVAC + Plumbing are real trades; 'Plumbing+HVAC' is a dual job
+// (rendered with a split icon). 'Other' is intentionally NOT offered.
+export const DEFAULT_TYPES = ['HVAC', 'Plumbing', 'Plumbing+HVAC'];
 export const DEFAULT_TECHS = ['Daniel', 'Andrew', 'Devyn'];
 
 // change11: the `complete: true` phase flag is DEPRECATED. All phases are
@@ -39,7 +41,7 @@ export function densityFor(value) {
 
 export const MIGRATION_VERSION = '3.0';
 // Display-only app version (keep in sync with package.json on release).
-export const APP_VERSION = '4.1.1';
+export const APP_VERSION = '4.2.0';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.
