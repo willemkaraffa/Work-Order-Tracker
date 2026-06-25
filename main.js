@@ -499,6 +499,9 @@ async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal
   const b = setSheetCell(sx, dateRef, dateVal); sx = b.out;
   if (!a.hit || !b.hit) return 'cells not found (addr=' + a.hit + ' date=' + b.hit + ')';
   zip.file(target, sx);
+  // JSZip infers folder entries on load; the skeleton has none. Drop them so the
+  // output entry-set matches the original exactly (only the target sheet differs).
+  for (const k of Object.keys(zip.files)) if (zip.files[k].dir) delete zip.files[k];
   fs.writeFileSync(dest, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
   return null;
 }
