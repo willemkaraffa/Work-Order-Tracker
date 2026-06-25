@@ -41,7 +41,7 @@ export function densityFor(value) {
 
 export const MIGRATION_VERSION = '3.0';
 // Display-only app version (keep in sync with package.json on release).
-export const APP_VERSION = '4.3.0';
+export const APP_VERSION = '4.3.1';
 
 // Legacy status colors (kept until per-status colors are made user-editable).
 // Matches the DSC map in the v2.6.0 renderer so existing data looks identical.

@@ -466,6 +466,43 @@ function reorderForFolder(addr) {
   return m ? `${m[2]} ${m[1]}` : String(addr || '').trim();
 }
 
+function escXml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escRe(s)  { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+// Surgical single-cell set: rewrite only the matched <c> element to an inline
+// string, preserving its style attr. hit=false if the cell ref isn't present.
+function setSheetCell(xml, ref, val) {
+  let hit = false;
+  const re = new RegExp('<c r="' + ref + '"([^>]*?)(?:/>|>.*?</c>)', 's');
+  const out = xml.replace(re, (_full, attrs) => {
+    hit = true;
+    const a = attrs.replace(/\s+t="[^"]*"/g, '');   // drop any existing cell-type attr
+    return '<c r="' + ref + '"' + a + ' t="inlineStr"><is><t xml:space="preserve">' + escXml(val) + '</t></is></c>';
+  });
+  return { out, hit };
+}
+// Patch a bid sheet copy IN PLACE by editing only the target worksheet XML
+// inside the xlsx zip; every other entry stays byte-identical. This avoids the
+// full-workbook re-serialize exceljs does, which corrupted the Plumbing template
+// (Excel "found a problem with some content"). Returns an error string or null.
+async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal) {
+  const JSZip = require('jszip');
+  const zip   = await JSZip.loadAsync(fs.readFileSync(dest));
+  const wb    = await zip.file('xl/workbook.xml').async('string');
+  const rels  = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  const sm = wb.match(new RegExp('<sheet[^>]*name="' + escRe(escXml(sheetName)) + '"[^>]*?r:id="([^"]+)"'));
+  if (!sm) return 'sheet "' + sheetName + '" not in workbook';
+  const rt = rels.match(new RegExp('Id="' + sm[1] + '"[^>]*?Target="([^"]+)"'));
+  if (!rt) return 'sheet relationship not found';
+  const target = 'xl/' + rt[1].replace(/^\/?(xl\/)?/, '');
+  let sx = await zip.file(target).async('string');
+  const a = setSheetCell(sx, addrRef, addrVal); sx = a.out;
+  const b = setSheetCell(sx, dateRef, dateVal); sx = b.out;
+  if (!a.hit || !b.hit) return 'cells not found (addr=' + a.hit + ' date=' + b.hit + ')';
+  zip.file(target, sx);
+  fs.writeFileSync(dest, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  return null;
+}
+
 ipcMain.handle('wo-create-folder', async (_e, rec) => {
   try {
     rec = rec || {};
@@ -504,19 +541,10 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
         const name = sanitizeName(rec.address) + ' Bid ' + fileDate + '.xlsx';
         const dest = path.join(folder, name);
         if (!fs.existsSync(dest)) {                 // never clobber an edited bid
-          fs.copyFileSync(skel, dest);              // raw copy first -> preserves template
-          const ExcelJS = require('exceljs');
-          const wb = new ExcelJS.Workbook();
-          await wb.xlsx.readFile(dest);
+          fs.copyFileSync(skel, dest);              // raw copy first -> preserves template byte-for-byte
           const map = BID_CELLS[trade];
-          const ws  = wb.getWorksheet(map.sheet);
-          if (ws) {
-            ws.getCell(map.addr).value = String(rec.address || '');
-            ws.getCell(map.date).value = cellDate;
-            await wb.xlsx.writeFile(dest);
-          } else {
-            xlsxSkip = 'sheet "' + map.sheet + '" not in skeleton (cells unfilled)';
-          }
+          const err = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate);
+          if (err) xlsxSkip = err;                  // copy kept (uncorrupted, unfilled) so user can fill manually
         }
         xlsx = dest;
       }
