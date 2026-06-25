@@ -119,6 +119,7 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
               <MenuItem onClick={doEdit}>Edit details…</MenuItem>
               {onEditInvoice && <MenuItem onClick={doInvoice}>Edit invoice…</MenuItem>}
               {canCapture && <MenuItem onClick={doCap}>{capturing ? 'Capturing…' : 'Capture from portal'}</MenuItem>}
+              <MenuItem onClick={act('createFolder')}>Create folder</MenuItem>
               <MenuDivider />
               {tab === 'active' && (<>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setStatusOpen(true); }}>Change status…</MenuItem>

@@ -63,6 +63,12 @@ contextBridge.exposeInMainWorld('shell', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url)
 });
 
+// WO folder bridge — create the OneDrive folder tree for a WO (+ MSR bid sheet)
+// and reveal it in Explorer. Record = the order { id, pm, type, address }.
+contextBridge.exposeInMainWorld('woFolder', {
+  create: (record) => ipcRenderer.invoke('wo-create-folder', record)
+});
+
 // Credentials bridge — safeStorage-encrypted PM credentials
 contextBridge.exposeInMainWorld('creds', {
   set:   (pm, username, password) => ipcRenderer.invoke('creds-set', pm, username, password),

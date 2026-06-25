@@ -1391,6 +1391,9 @@ export function WOContextMenu({
         {showCapture && (
           <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'capture'); onClose(); }}>Capture from portal</MenuItem>
         )}
+        {!bulk && tab !== 'trash' && (
+          <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'createFolder'); onClose(); }}>Create folder</MenuItem>
+        )}
 
         {tab === 'complete' && (<>
           <MenuDivider />
@@ -5011,6 +5014,18 @@ function App() {
       .finally(() => setCaptureStatus(null));
   }, [orders, applyCapture, toast]);
 
+  // Create the OneDrive folder tree (+ MSR bid sheet) for a WO and open it.
+  const createFolder = React.useCallback((id) => {
+    const src = orders.find(o => o.id === id);
+    if (!src) return Promise.resolve();
+    if (!window.woFolder || !window.woFolder.create) { toast('Folder creation is only available in the desktop app'); return Promise.resolve(); }
+    return window.woFolder.create(src).then(res => {
+      if (!res || !res.ok) { toast('Folder failed: ' + ((res && res.error) || 'unknown error')); return; }
+      if (res.xlsxSkip) { toast('Folder created; bid sheet skipped: ' + res.xlsxSkip, 'warn'); return; }
+      toast(res.xlsx ? 'Folder + bid sheet created' : 'Folder created');
+    }).catch(e => toast('Folder error: ' + e.message));
+  }, [orders, toast]);
+
   // Batch capture: every "All Open" (non-Completed) AMH WO from the portal in
   // ONE Edge login. The scraper returns all open portal WOs keyed by number;
   // known WOs are updated in place (applyCapture), and any WO not yet in the app
@@ -5197,6 +5212,9 @@ function App() {
       case 'capture':
         captureOrder(id);
         break;
+      case 'createFolder':
+        createFolder(id);
+        break;
       case 'jumpToSchedule': {
         const o = orders.find(x => x.id === id);
         if (o && o.schedule) {
@@ -5254,7 +5272,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
+  }, [updateOrder, captureOrder, createFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -5263,7 +5281,7 @@ function App() {
     // Delegate shared cases to woAction.
     if (kind === 'setStatus' || kind === 'backToActive' || kind === 'softDelete' ||
         kind === 'toggleEmergency' || kind === 'toggleWarranty' ||
-        kind === 'markComplete' || kind === 'reopen') {
+        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder') {
       woAction(id, kind, payload);
       return;
     }

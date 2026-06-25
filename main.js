@@ -444,6 +444,91 @@ ipcMain.handle('open-backups-folder', async () => {
   }
 });
 
+// ── IPC: WO folder + bid sheet ────────────────────────────────────────────────
+// Build the OneDrive folder tree for a WO and (MSR only) drop a pre-filled copy
+// of the trade bid skeleton inside it, then reveal the folder in Explorer.
+// Structure:
+//   MSR -> WORK ORDERS\aMain Street Renewal\<Street Name Number>\WO <num>
+//   AMH -> WORK ORDERS\American Homes 4 Rent\<Street Name Number>\WO <num>  (folder only; AMH bids are in-app)
+//   else -> WORK ORDERS\Other Customers\<WO id>                              (folder only; deeper subfolder is manual)
+// Idempotent: re-running mkdir's are no-ops and an existing bid file is never clobbered.
+const WO_ROOT       = () => path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'WORK ORDERS');
+const BID_SKELETONS = () => path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'PM Bids Excel');
+const BID_SKELETON  = { HVAC: 'Gamble Plumbing - MSR HVAC Bid Sheet.xlsx', Plumbing: 'Gamble Plumbing - MSR Plumbing Bid Sheet.xlsx' };
+// Verified cell map: label in the column left of the value cell (see scan).
+const BID_CELLS     = { HVAC: { sheet: 'Vendor HVAC Bid Sheet', addr: 'C8', date: 'C9' }, Plumbing: { sheet: 'Plumbing - Rough & Finish', addr: 'D5', date: 'D6' } };
+
+function sanitizeName(s) { return String(s || '').replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim(); }
+// "3804 Chokecherry Ln" -> "Chokecherry Ln 3804": leading street number to the
+// end so folders sort by street name. No leading number -> unchanged.
+function reorderForFolder(addr) {
+  const m = String(addr || '').trim().match(/^(\d+[A-Za-z]?)\s+(.*)$/);
+  return m ? `${m[2]} ${m[1]}` : String(addr || '').trim();
+}
+
+ipcMain.handle('wo-create-folder', async (_e, rec) => {
+  try {
+    rec = rec || {};
+    const pm  = String(rec.pm || '').toUpperCase();
+    const num = String(rec.id || '').replace(/^WO[-\s]*/i, '').trim();
+    const root = WO_ROOT();
+
+    let folder;
+    if (pm === 'MSR' || pm === 'AMH') {
+      const base = path.join(root, pm === 'MSR' ? 'aMain Street Renewal' : 'American Homes 4 Rent');
+      const prop = sanitizeName(reorderForFolder(rec.address));
+      if (!prop) return { ok: false, error: 'No address on this work order.' };
+      folder = path.join(base, prop, 'WO ' + num);
+    } else {
+      // Other Customers: the WO id field holds the customer name for these.
+      const cust = sanitizeName(rec.id);
+      if (!cust) return { ok: false, error: 'No customer/WO id on this work order.' };
+      folder = path.join(root, 'Other Customers', cust);
+    }
+    fs.mkdirSync(folder, { recursive: true });
+
+    const d  = new Date();
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const fileDate = `${dd}-${mm}`;                                   // folder/file: DD-MM (no slashes)
+    const cellDate = `${mm}/${dd}/${String(d.getFullYear()).slice(-2)}`; // in-cell text: MM/DD/YY
+
+    let xlsx = null, xlsxSkip = null;
+    if (pm === 'MSR') {
+      // Dual (Plumbing+HVAC) and HVAC both use the HVAC sheet; pure Plumbing uses Plumbing.
+      const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
+      const skel  = path.join(BID_SKELETONS(), BID_SKELETON[trade]);
+      if (!fs.existsSync(skel)) {
+        xlsxSkip = 'bid skeleton not found: ' + skel;
+      } else {
+        const name = sanitizeName(rec.address) + ' Bid ' + fileDate + '.xlsx';
+        const dest = path.join(folder, name);
+        if (!fs.existsSync(dest)) {                 // never clobber an edited bid
+          fs.copyFileSync(skel, dest);              // raw copy first -> preserves template
+          const ExcelJS = require('exceljs');
+          const wb = new ExcelJS.Workbook();
+          await wb.xlsx.readFile(dest);
+          const map = BID_CELLS[trade];
+          const ws  = wb.getWorksheet(map.sheet);
+          if (ws) {
+            ws.getCell(map.addr).value = String(rec.address || '');
+            ws.getCell(map.date).value = cellDate;
+            await wb.xlsx.writeFile(dest);
+          } else {
+            xlsxSkip = 'sheet "' + map.sheet + '" not in skeleton (cells unfilled)';
+          }
+        }
+        xlsx = dest;
+      }
+      require('electron-log').info('[wo-create-folder] pm=MSR trade=' + trade + ' skel=' + skel + ' exists=' + fs.existsSync(skel) + ' xlsx=' + xlsx + (xlsxSkip ? ' skip=' + xlsxSkip : ''));
+    }
+    shell.openPath(folder);
+    return { ok: true, path: folder, xlsx, xlsxSkip };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
+
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.
