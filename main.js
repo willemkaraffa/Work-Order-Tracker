@@ -522,25 +522,49 @@ async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal
   return null;
 }
 
+// Resolve the WO's root folder path (the WO# folder; or the customer folder for
+// non-MSR/AMH, where the WO id field holds the customer name). The first trip's
+// bid sheet lives in this folder root; manual "Visit n" subfolders go beneath it.
+// Returns { folder } or { error }. Pure (no fs side effects) so create/open/exists share it.
+function resolveWoFolder(rec) {
+  rec = rec || {};
+  const pm  = String(rec.pm || '').toUpperCase();
+  const num = String(rec.id || '').replace(/^WO[-\s]*/i, '').trim();
+  const root = WO_ROOT();
+  if (pm === 'MSR' || pm === 'AMH') {
+    const prop = sanitizeName(reorderForFolder(rec.address));
+    if (!prop) return { error: 'No address on this work order.' };
+    return { folder: path.join(root, pm === 'MSR' ? 'aMain Street Renewal' : 'American Homes 4 Rent', prop, 'WO ' + num) };
+  }
+  const cust = sanitizeName(rec.id);
+  if (!cust) return { error: 'No customer/WO id on this work order.' };
+  return { folder: path.join(root, 'Other Customers', cust) };
+}
+
+// Gray-out signal for the "Go to folder" menu item — true only if the folder exists on disk.
+ipcMain.handle('wo-folder-exists', (_e, rec) => {
+  try { const r = resolveWoFolder(rec); return { exists: !!(r.folder && fs.existsSync(r.folder)) }; }
+  catch (e) { return { exists: false }; }
+});
+
+// Open the WO root folder in Explorer. No create — missing folder reports back so the renderer can toast.
+ipcMain.handle('wo-open-folder', (_e, rec) => {
+  try {
+    const r = resolveWoFolder(rec);
+    if (r.error) return { ok: false, error: r.error };
+    if (!fs.existsSync(r.folder)) return { ok: false, missing: true, path: r.folder };
+    shell.openPath(r.folder);
+    return { ok: true, path: r.folder };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
 ipcMain.handle('wo-create-folder', async (_e, rec) => {
   try {
     rec = rec || {};
     const pm  = String(rec.pm || '').toUpperCase();
-    const num = String(rec.id || '').replace(/^WO[-\s]*/i, '').trim();
-    const root = WO_ROOT();
-
-    let folder;
-    if (pm === 'MSR' || pm === 'AMH') {
-      const base = path.join(root, pm === 'MSR' ? 'aMain Street Renewal' : 'American Homes 4 Rent');
-      const prop = sanitizeName(reorderForFolder(rec.address));
-      if (!prop) return { ok: false, error: 'No address on this work order.' };
-      folder = path.join(base, prop, 'WO ' + num);
-    } else {
-      // Other Customers: the WO id field holds the customer name for these.
-      const cust = sanitizeName(rec.id);
-      if (!cust) return { ok: false, error: 'No customer/WO id on this work order.' };
-      folder = path.join(root, 'Other Customers', cust);
-    }
+    const resolved = resolveWoFolder(rec);
+    if (resolved.error) return { ok: false, error: resolved.error };
+    const folder = resolved.folder;
     fs.mkdirSync(folder, { recursive: true });
 
     const d  = new Date();

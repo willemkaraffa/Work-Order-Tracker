@@ -1094,19 +1094,20 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
   );
 }
 
-export function MenuItem({ onClick, danger, children }) {
+export function MenuItem({ onClick, danger, disabled, children }) {
   const [hover, setHover] = React.useState(false);
   return (
     <div
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
         padding: '7px 12px',
         fontSize: 13,
-        color: danger ? 'var(--flag-emergency)' : 'var(--text-1)',
-        background: hover ? 'var(--bg-hover)' : 'transparent',
-        cursor: 'pointer',
+        color: disabled ? 'var(--text-3)' : danger ? 'var(--flag-emergency)' : 'var(--text-1)',
+        background: (hover && !disabled) ? 'var(--bg-hover)' : 'transparent',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         userSelect: 'none',
       }}
     >{children}</div>
@@ -1216,6 +1217,20 @@ export function WOContextMenu({
   const showCapture     = !bulk && ctxRow?.pm === 'AMH' && window.scraper && window.scraper.captureWO;
   const showRemoveInbox = isInboxView && inboxId && !bulk;
 
+  // Folder-exists drives the "Go to folder" gray-out. null = unknown (fail-open,
+  // stays enabled); the open handler still guards a missing folder with a toast.
+  // address is normalized: itinerary passes the full order (address), list rows
+  // carry addr. Re-checks per WO when the menu opens.
+  const [folderExists, setFolderExists] = React.useState(null);
+  React.useEffect(() => {
+    if (bulk || tab === 'trash' || !window.woFolder || !window.woFolder.exists) { setFolderExists(null); return; }
+    let alive = true;
+    window.woFolder.exists({ pm: ctxRow?.pm, id: woId, address: ctxRow?.address || ctxRow?.addr })
+      .then(r => { if (alive) setFolderExists(!!(r && r.exists)); })
+      .catch(() => { if (alive) setFolderExists(null); });
+    return () => { alive = false; };
+  }, [woId, bulk, tab]);
+
   // Build submenu item list lazily.
   const buildSub = (key) => {
     // v4.0.1: hide LOCKED_STATUSES from the Set status submenu — they are
@@ -1252,6 +1267,10 @@ export function WOContextMenu({
       });
       return items;
     }
+    if (key === 'folder') return [
+      { label: 'Create folder', onClick: () => onWoAction && onWoAction(woId, 'createFolder') },
+      { label: 'Go to folder', disabled: folderExists === false, onClick: () => onWoAction && onWoAction(woId, 'openFolder') },
+    ];
     if (key === 'mark') return [
       {
         label: isWarranty ? 'Clear Warranty' : 'Warranty',
@@ -1387,9 +1406,7 @@ export function WOContextMenu({
         {showCapture && (
           <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'capture'); onClose(); }}>Capture from portal</MenuItem>
         )}
-        {!bulk && tab !== 'trash' && (
-          <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'createFolder'); onClose(); }}>Create folder</MenuItem>
-        )}
+        {!bulk && tab !== 'trash' && parentRow('folder', 'Folder')}
 
         {tab === 'complete' && (<>
           <MenuDivider />
@@ -1433,13 +1450,16 @@ export function WOContextMenu({
             return (
               <div
                 key={'i' + i}
-                onClick={() => { it.onClick && it.onClick(); onClose(); }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                onClick={it.disabled ? undefined : () => { it.onClick && it.onClick(); onClose(); }}
+                onMouseEnter={(e) => { if (!it.disabled) e.currentTarget.style.background = 'var(--bg-hover)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '7px 12px', fontSize: 13, color: 'var(--text-1)',
-                  cursor: 'pointer', userSelect: 'none',
+                  padding: '7px 12px', fontSize: 13,
+                  color: it.disabled ? 'var(--text-3)' : 'var(--text-1)',
+                  cursor: it.disabled ? 'default' : 'pointer',
+                  opacity: it.disabled ? 0.5 : 1,
+                  userSelect: 'none',
                 }}
               >
                 {it.icon}
@@ -5087,6 +5107,18 @@ function App() {
     }).catch(e => toast('Folder error: ' + e.message));
   }, [orders, toast]);
 
+  // Open the WO root folder in Explorer (no create). Missing folder -> toast.
+  const openWoFolder = React.useCallback((id) => {
+    const src = orders.find(o => o.id === id);
+    if (!src) return Promise.resolve();
+    if (!window.woFolder || !window.woFolder.open) { toast('Folder access is only available in the desktop app'); return Promise.resolve(); }
+    return window.woFolder.open(src).then(res => {
+      if (res && res.ok) return;
+      if (res && res.missing) { toast('No folder yet — use Create folder', 'warn'); return; }
+      toast('Open failed: ' + ((res && res.error) || 'unknown error'));
+    }).catch(e => toast('Folder error: ' + e.message));
+  }, [orders, toast]);
+
   // Batch capture: every "All Open" (non-Completed) AMH WO from the portal in
   // ONE Edge login. The scraper returns all open portal WOs keyed by number;
   // known WOs are updated in place (applyCapture), and any WO not yet in the app
@@ -5096,14 +5128,17 @@ function App() {
     if (!window.scraper || !window.scraper.captureAllAMH) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
     const numOf = o => String(o.woId || o.id || '').replace(/^WO-/i, '').trim();
     const existing = new Map();
+    const trashed  = new Set();   // AMH WOs cancelled in-app: portal may still list them open; skip, don't re-import
     for (const o of orders) {
-      if (o.deleted || String(o.pm || '').toUpperCase() !== 'AMH') continue;
-      const n = numOf(o); if (n) existing.set(n, o.id);
+      if (String(o.pm || '').toUpperCase() !== 'AMH') continue;
+      const n = numOf(o); if (!n) continue;
+      if (o.deleted) trashed.add(n);
+      else existing.set(n, o.id);
     }
     setCaptureStatus({ label: 'Capturing all open AMH work orders…' });
     return window.scraper.captureAllAMH().then(resp => {
       if (!resp || !resp.ok) { toast('Batch capture failed: ' + ((resp && resp.error) || 'unknown error')); return; }
-      let updated = 0, warned = 0, fail = 0;
+      let updated = 0, warned = 0, fail = 0, trashedSkipped = 0;
       const newIncoming = [];
       const updatedBatch = [];          // existing WOs refreshed (for the modal)
       const warnByNum = {};             // WO# -> warning strings (new + updated)
@@ -5116,6 +5151,10 @@ function App() {
           // Only WOs that came back WITH a warning go in the review modal; clean
           // updates are silent (counted only). w === null means capture failed.
           if (w === null) fail++; else { updated++; if (w.length) { warned++; updatedBatch.push({ id, isNew: false }); } }
+        } else if (trashed.has(key)) {
+          // Cancelled in-app but still on the portal's open list -> skip so it
+          // doesn't resurrect as a "new" WO in the review modal.
+          trashedSkipped++;
         } else if (res && res.ok && res.wo) {
           const s = res.wo;
           // status omitted -> new WOs default to 'Open' (raw portal statuses
@@ -5142,6 +5181,7 @@ function App() {
       if (batch.length) setImportInspect({ batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated });
       toast('Captured ' + updated + ' updated, ' + added + ' new'
         + (warned ? (', ' + warned + ' with warnings') : '')
+        + (trashedSkipped ? (', ' + trashedSkipped + ' cancelled skipped') : '')
         + (fail ? (', ' + fail + ' failed') : ''));
     }).catch(e => toast('Batch capture error: ' + e.message))
       .finally(() => setCaptureStatus(null));
@@ -5286,6 +5326,9 @@ function App() {
       case 'createFolder':
         createFolder(id);
         break;
+      case 'openFolder':
+        openWoFolder(id);
+        break;
       case 'jumpToSchedule': {
         const o = orders.find(x => x.id === id);
         if (o && o.schedule) {
@@ -5343,7 +5386,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, createFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
+  }, [updateOrder, captureOrder, createFolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -5352,7 +5395,7 @@ function App() {
     // Delegate shared cases to woAction.
     if (kind === 'setStatus' || kind === 'backToActive' || kind === 'softDelete' ||
         kind === 'toggleEmergency' || kind === 'toggleWarranty' ||
-        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder') {
+        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder' || kind === 'openFolder') {
       woAction(id, kind, payload);
       return;
     }
