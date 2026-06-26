@@ -7,3 +7,5 @@ chromedriver.exe
 __pycache__/
 *.bak-*
 CLAUDE.original.md
+
+.claude/settings.local.json

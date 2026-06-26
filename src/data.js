@@ -8,7 +8,7 @@ import {
   DEFAULT_PHASES, DEFAULT_STATUS_COLORS, DEFAULT_MORE_INFO_COLOR,
   DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, isCompletionStatusName,
 } from './constants.js';
-import { formatPhone } from './utils.js';
+import { formatPhone, composeNotes } from './utils.js';
 import { nextWOId, DEFAULT_STATUSES } from './app.jsx';
 
 // Returns [data, updateOrder]; data is null while loading.
@@ -339,27 +339,34 @@ export function useWorkOrders() {
         // scraper must NOT overwrite that with the raw portal status; only
         // active WOs accept status updates from import.
         const hardcoded = old.tab === 'complete' || old.tab === 'trash' || old.deleted;
+        // More Information: portal notes merged at the top, user's own text below,
+        // never overwritten (composeNotes). Re-imports add only new portal paras.
+        const { notes, portalNotes } = composeNotes(old.notes, old.portalNotes, inc.notes);
         const merged = {
           ...old,
-          pm:          inc.pm          || old.pm,
-          type:        inc.type        || old.type,
-          address:     inc.address     || old.address,
-          phone:       inc.phone       ? formatPhone(inc.phone) : old.phone,
-          tech:        inc.tech        || old.tech,
+          // Portal-owned — always refresh from the portal.
           status:      hardcoded ? old.status : (inc.status || old.status),
-          priority:    inc.priority    || old.priority,
-          notes:       inc.notes       || old.notes,
-          dateCreated: inc.dateCreated || old.dateCreated,
-          propertyId:  inc.propertyId  || old.propertyId,
-          city:        inc.city        || old.city,
-          portalLink:  inc.portalLink  || old.portalLink,
-          contactName: inc.contactName || old.contactName,
-          contacts:    (Array.isArray(inc.contacts) && inc.contacts.length) ? inc.contacts : old.contacts,
+          bidAmount:   inc.bidAmount || old.bidAmount,
           bidItems:    (Array.isArray(inc.bidItems) && inc.bidItems.length) ? inc.bidItems : old.bidItems,
+          // User-editable — FILL ONLY: keep the user's value, fill only if blank.
+          pm:          old.pm          || inc.pm,
+          type:        old.type        || inc.type,
+          address:     old.address     || inc.address,
+          city:        old.city        || inc.city,
+          phone:       old.phone       || (inc.phone ? formatPhone(inc.phone) : ''),
+          tech:        old.tech        || inc.tech,
+          priority:    old.priority    || inc.priority,
+          propertyId:  old.propertyId  || inc.propertyId,
+          portalLink:  old.portalLink  || inc.portalLink,
+          contactName: old.contactName || inc.contactName,
+          contacts:    (Array.isArray(old.contacts) && old.contacts.length) ? old.contacts
+                       : (Array.isArray(inc.contacts) ? inc.contacts : []),
+          dateCreated: old.dateCreated || inc.dateCreated,
+          notes, portalNotes,
         };
         // Silent update ONLY when something actually changed — no-op re-imports
         // add no history and are not reported.
-        const scalars = ['pm', 'type', 'address', 'phone', 'status', 'priority', 'notes', 'propertyId', 'city', 'portalLink', 'contactName'];
+        const scalars = ['pm', 'type', 'address', 'phone', 'status', 'priority', 'notes', 'propertyId', 'city', 'portalLink', 'contactName', 'bidAmount'];
         const changed = scalars.some(k => (merged[k] || '') !== (old[k] || ''))
           || JSON.stringify(merged.bidItems || []) !== JSON.stringify(old.bidItems || [])
           || JSON.stringify(merged.contacts || []) !== JSON.stringify(old.contacts || []);
@@ -384,6 +391,8 @@ export function useWorkOrders() {
         // the auto-flip behavior on manual status changes.
         const incStatus = inc.status || 'Open';
         const importIsCompletion = isCompletionStatusName(incStatus);
+        // Portal notes seed the More-Information field (portal block, no user text yet).
+        const seeded = composeNotes('', '', inc.notes);
         const wo = {
           id,
           pm:            inc.pm || '',
@@ -394,7 +403,8 @@ export function useWorkOrders() {
           status:        importIsCompletion ? 'Complete - Pending Approval' : incStatus,
           ...(importIsCompletion ? { prevStatus: incStatus } : {}),
           priority:      inc.priority || 'Medium',
-          notes:         inc.notes || '',
+          notes:         seeded.notes,
+          portalNotes:   seeded.portalNotes,
           dateCreated:   inc.dateCreated || new Date().toISOString().slice(0, 10),
           tab:           importIsCompletion ? 'complete' : 'active',
           deleted:       false,

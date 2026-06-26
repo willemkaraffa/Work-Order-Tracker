@@ -193,7 +193,7 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
   const [capturing, setCapturing] = React.useState(false);
   const statusRef = React.useRef(null);
 
-  const canCapture = !!(window.scraper && window.scraper.captureWO) && data?.pm === 'AMH';
+  const canCapture = data?.pm === 'AMH' && !!(window.scraper && window.scraper.captureWO);
   const doCapture = () => {
     if (capturing) return;
     setCapturing(true);

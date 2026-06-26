@@ -31,9 +31,11 @@ contextBridge.exposeInMainWorld('isElectron', true);
 contextBridge.exposeInMainWorld('extensionBridge', {
   onImport: (cb) => ipcRenderer.on('extension-import', (_e, orders) => cb(orders)),
   acknowledge: () => ipcRenderer.invoke('import-acknowledged'),
-  // Queue a command the Chrome extension picks up on its next poll (e.g. bulk
-  // MSR capture). Results return via the normal /import -> extension-import path.
-  requestMsrCapture: () => ipcRenderer.invoke('queue-ext-command', 'captureMsrAll'),
+  // Ask the extension to scan the open MSR list page for WO numbers; results
+  // arrive via onFoundWos. (MSR batch capture was dropped — Aura lazy-render made
+  // off-screen scraping unreliable; the user adds new WOs via the on-page button.)
+  requestFindNewMsr: () => ipcRenderer.invoke('queue-ext-command', 'findNewMsr'),
+  onFoundWos: (cb) => ipcRenderer.on('msr-found', (_e, items) => cb(items)),
 });
 
 // Service-item library bridge — xlsx seed / import / export (persistence stays

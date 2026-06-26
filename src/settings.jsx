@@ -642,9 +642,8 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
-      onClick={onClose}
     >
-      <div onClick={e => e.stopPropagation()} style={{
+      <div style={{
         width: 580, maxHeight: '80vh',
         background: 'var(--bg-surface)',
         border: '1px solid var(--border-1)',
@@ -824,9 +823,8 @@ function PMsEditor({ pms, setPms, onClose }) {
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
-      onClick={onClose}
     >
-      <div onClick={e => e.stopPropagation()} style={{
+      <div style={{
         width: 460, maxHeight: '80vh',
         background: 'var(--bg-surface)',
         border: '1px solid var(--border-1)',

@@ -9,6 +9,40 @@ export function formatPhone(v) {
   return v;
 }
 
+// Merge scraped portal notes into the user's "More Information" field (o.notes)
+// WITHOUT destroying user-entered text. Portal notes live at the TOP, a blank
+// line above the user's own text below. Re-captures add ONLY new portal
+// paragraphs (union, no duplicate) and never touch the user's text.
+//   oldNotes   = current o.notes (portal block + user block, or pure user text)
+//   oldPortal  = o.portalNotes (the portal block we last wrote) — used to split
+//   incPortal  = freshly scraped portal notes
+// Returns { notes, portalNotes }. If oldNotes doesn't start with oldPortal (user
+// edited the prefix), the whole of oldNotes is treated as user text so nothing
+// is ever lost (worst case: a portal paragraph re-appears, never deleted).
+export function composeNotes(oldNotes, oldPortal, incPortal) {
+  oldNotes  = String(oldNotes  || '');
+  oldPortal = String(oldPortal || '');
+  incPortal = String(incPortal || '');
+
+  let userPart = oldNotes;
+  if (oldPortal && oldNotes.slice(0, oldPortal.length) === oldPortal) {
+    userPart = oldNotes.slice(oldPortal.length).replace(/^\s+/, '');
+  }
+
+  const paras = (s) => s.split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean);
+  const norm  = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const merged = paras(oldPortal);
+  const seen = new Set(merged.map(norm));
+  for (const p of paras(incPortal)) {
+    if (!seen.has(norm(p))) { merged.push(p); seen.add(norm(p)); }
+  }
+  const portalNotes = merged.join('\n\n');
+  const notes = portalNotes
+    ? (userPart ? portalNotes + '\n\n' + userPart : portalNotes)
+    : userPart;
+  return { notes, portalNotes };
+}
+
 // Slice 5 (#10): routing. Great-circle km between two lat/lon points (hoisted
 // from the geocoder so routing + suspect-distance share one implementation).
 export function haversineKm(la1, lo1, la2, lo2) {

@@ -14,7 +14,7 @@ import {
   Dot, PMChip, TypeIcon, FlagGlyph, StatusPill, ActionBtn, FilterChip,
   InlineEdit, SettingTitle, SettingRow, Seg, miniBtnStyle, ReorderBtns, swapAt,
 } from './primitives.jsx';
-import { formatPhone, haversineKm, roadKm } from './utils.js';
+import { formatPhone, haversineKm, roadKm, composeNotes } from './utils.js';
 import { MODULE_GROUPS, MODULES, MODULE_ORDER, ModuleNavContext, NavWing, RAIL as NAV_RAIL } from './nav.jsx';
 import { MapsModule } from './maps.jsx';
 import { ItineraryModule } from './itinerary.jsx';
@@ -754,16 +754,12 @@ function computeAlerts(orders, thresholds) {
 /* ---------- modal + form primitives ---------- */
 
 export function Modal({ open, onClose, title, children, width = 560 }) {
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose && onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  // Intentionally NO backdrop-click or Escape close: modals hold entered data
+  // (imports, edits) and must close only via X / Cancel / Create-Done so an
+  // accidental outside click can't discard the user's work.
   if (!open) return null;
   return (
     <div
-      onClick={onClose}
       style={{
         position: 'fixed', inset: 0,
         background: 'rgba(0,0,0,0.55)',
@@ -1217,7 +1213,7 @@ export function WOContextMenu({
   const showViewDetails = source === 'list' && !bulk;
   const showSchedule    = tab === 'active' && !bulk;
   const showMark        = tab === 'active' && !bulk;
-  const showCapture     = !bulk && window.scraper && window.scraper.captureWO && ctxRow?.pm === 'AMH';
+  const showCapture     = !bulk && ctxRow?.pm === 'AMH' && window.scraper && window.scraper.captureWO;
   const showRemoveInbox = isInboxView && inboxId && !bulk;
 
   // Build submenu item list lazily.
@@ -2408,7 +2404,7 @@ function UpdateBanner({ state, onInstall }) {
   else label = 'Update available' + (version ? ' v' + version : '') + '. Downloading...';
   return (
     <div style={{
-      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+      flexShrink: 0,
       background: 'var(--accent)', color: 'var(--accent-fg)',
       padding: '8px 20px',
       display: 'flex', alignItems: 'center', gap: 12,
@@ -2427,21 +2423,33 @@ function UpdateBanner({ state, onInstall }) {
   );
 }
 
-// Top banner shown while a portal capture is in flight. Same slot + accent
-// styling as UpdateBanner, with an indeterminate loading bar (capture gives no
-// incremental percent — one Python run returns all at once). status = { label }
-// when active, null otherwise.
+// In-flow top strip shown while a portal capture is in flight (pushes the app
+// header down rather than overlaying it). status = { label, done?, total? }.
+// When total is known (MSR per-WO loop) it shows a "done / total" counter + a
+// determinate bar; otherwise an indeterminate animated bar (AMH is one atomic
+// API call with no per-WO step).
 function CaptureBanner({ status }) {
   if (!status) return null;
+  const { label, done, total } = status;
+  const hasCount = typeof total === 'number' && total > 0;
+  const pct = hasCount ? Math.min(100, Math.round(((done || 0) / total) * 100)) : 0;
   return (
     <div style={{
-      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9998,
-      background: 'var(--accent)', color: 'var(--accent-fg)',
+      // Fixed top strip above modal backdrops (zIndex 400): an in-flow banner was
+      // painted over by the import-review modal that opens right after capture,
+      // making capture progress invisible. 500 keeps it under toasts (99999).
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 500,
+      background: 'var(--accent, #6a92c4)', color: 'var(--accent-fg, #fff)',
       fontSize: 13, fontWeight: 500,
     }}>
-      <div style={{ padding: '8px 20px' }}>{status.label}</div>
+      <div style={{ padding: '8px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ flex: 1 }}>{label}</span>
+        {hasCount && <span style={{ fontVariantNumeric: 'tabular-nums' }}>{(done || 0)} / {total}</span>}
+      </div>
       <div style={{ height: 3, background: 'rgba(255,255,255,0.25)', overflow: 'hidden' }}>
-        <div className="wo-capture-bar" style={{ height: '100%', width: '40%', background: '#fff' }} />
+        {hasCount
+          ? <div style={{ height: '100%', width: pct + '%', background: '#fff', transition: 'width .2s ease' }} />
+          : <div className="wo-capture-bar" style={{ height: '100%', width: '40%', background: '#fff' }} />}
       </div>
     </div>
   );
@@ -2811,9 +2819,8 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular }) 
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
-      onClick={onClose}
     >
-      <div onClick={e => e.stopPropagation()} style={{
+      <div style={{
         width: 400, maxHeight: '75vh',
         background: 'var(--bg-surface)',
         border: '1px solid var(--border-1)',
@@ -3249,20 +3256,27 @@ function BidPromptModal({ order, onEnter, onSkip, onClose, verb = 'send' }) {
 // jump to its detail in the WO module.
 function ImportInspectModal({ state, orders, onClose, onWoAction, onSelectWO }) {
   if (!state) return null;
+  const warnByNum = state.warnByNum || {};
   const items = (state.batch || []).map(b => {
     const o = orders.find(x => x.id === b.id);
-    return { ...b, o };
+    const key = o ? String(o.woId || '').replace(/^WO-/i, '').trim() : '';
+    return { ...b, o, warnings: warnByNum[key] || [] };
   }).filter(x => x.o);
   const newCount = items.filter(x => x.isNew).length;
   const updatedCount = items.length - newCount;
+  const issueCount = items.filter(x => x.warnings.length).length;
+  // AMH passes the true modified total (clean updates aren't listed as rows);
+  // other importers fall back to the row-derived count.
+  const modifiedCount = state.modifiedCount != null ? state.modifiedCount : updatedCount;
   return (
     <Modal open onClose={onClose} title={'Imported ' + items.length + ' work order' + (items.length === 1 ? '' : 's')} width={820}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
           {newCount > 0 && (newCount + ' new')}
-          {newCount > 0 && updatedCount > 0 && ' · '}
-          {updatedCount > 0 && (updatedCount + ' updated')}
+          {newCount > 0 && modifiedCount > 0 && ' · '}
+          {modifiedCount > 0 && (modifiedCount + ' modified')}
           {state.dupSkipped ? ' · ' + state.dupSkipped + ' duplicate(s) skipped' : ''}
+          {issueCount > 0 && (<span style={{ color: 'var(--flag-emergency)' }}>{' · ' + issueCount + ' with issue'}</span>)}
           . Review before they merge into the active list.
         </div>
         <div style={{
@@ -3283,7 +3297,7 @@ function ImportInspectModal({ state, orders, onClose, onWoAction, onSelectWO }) 
               </tr>
             </thead>
             <tbody>
-              {items.map(({ id, isNew, o }) => {
+              {items.map(({ id, isNew, o, warnings }) => {
                 const { addr, city } = splitAddress(o);
                 return (
                   <tr key={id} style={{ borderBottom: '1px solid var(--border-1)' }}>
@@ -3295,6 +3309,11 @@ function ImportInspectModal({ state, orders, onClose, onWoAction, onSelectWO }) 
                     <td style={{ padding: '8px 10px', color: 'var(--text-1)' }}>
                       {addr || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>(no address)</span>}
                       {city && <span style={{ color: 'var(--text-2)' }}>{', ' + city}</span>}
+                      {warnings.length > 0 && (
+                        <div style={{ fontSize: 11, color: 'var(--flag-emergency)', marginTop: 2 }}>
+                          {'Issue: ' + warnings.join('; ')}
+                        </div>
+                      )}
                     </td>
                     <td style={{ padding: '8px 10px', color: 'var(--text-2)' }}>{o.pm || '-'}</td>
                     <td style={{ padding: '8px 10px', color: 'var(--text-2)' }}>{o.type || '-'}</td>
@@ -3897,6 +3916,11 @@ function App() {
   const [updateState, setUpdateState] = React.useState(null);
   const [captureStatus, setCaptureStatus] = React.useState(null);
   const msrBannerTimer = React.useRef(null);
+  // New MSR WO numbers found on a portal list page but not yet in the tracker.
+  const [newMsrWos, setNewMsrWos] = React.useState(null);
+  const ordersRef = React.useRef([]);
+  // Keep the latest orders reachable from the one-time onFoundWos listener.
+  React.useEffect(() => { ordersRef.current = orders; }, [orders]);
 
   // Phase 16: paint the tray icon with the Gamble brand. Renderer
   // rasterizes GambleMark, ships the PNG to main, main does
@@ -3957,6 +3981,32 @@ function App() {
           setImportInspect({ batch: newBatch, ts: Date.now(), dupSkipped });
         }
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
+      });
+    }
+    if (window.extensionBridge && window.extensionBridge.onFoundWos) {
+      // Extension scanned an MSR list page; diff its WO numbers against the
+      // tracker and surface the ones not yet added.
+      window.extensionBridge.onFoundWos((items) => {
+        // Results arrived: clear the in-flight scan banner (mirror onImport).
+        if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
+        setCaptureStatus(null);
+        const arr = Array.isArray(items) ? items : [];
+        const normNum = s => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+        const known = new Set();
+        for (const o of ordersRef.current) {
+          if (o.deleted) continue;
+          const n = normNum(o.woId) || normNum(o.id);
+          if (n) known.add(n);
+        }
+        const seen = new Set();
+        const fresh = [];
+        for (const it of arr) {
+          const n = normNum(it.num);
+          if (!n || known.has(n) || seen.has(n)) continue;
+          seen.add(n); fresh.push({ num: it.num, url: it.url });
+        }
+        setNewMsrWos({ items: fresh, scanned: arr.length });
+        toast(fresh.length ? (fresh.length + ' new MSR WO(s) found') : 'No new MSR WOs on this list');
       });
     }
     if (window.updater && window.updater.onStatus) {
@@ -4957,20 +5007,25 @@ function App() {
     const s = res.wo || {};
     updateOrder(id, cur => {
       const patch = { ...cur };
-      const set = (k, v) => { if (v !== undefined && v !== null && v !== '') patch[k] = v; };
-      // Status + priority are left to the user's workflow — re-capture must
-      // not drag a manually-advanced WO back to the portal's status.
-      set('address', s.address);
-      set('city', s.city);
-      if (s.phone) patch.phone = formatPhone(s.phone);
-      set('type', s.type);
-      set('propertyId', s.propertyId);
-      set('portalLink', s.portalLink);
-      set('bidAmount', s.bidAmount);
+      // User-editable fields: FILL ONLY — keep the user's value, fill only when
+      // blank, so a re-capture never overwrites data the user entered/corrected.
+      const fill = (k, v) => { if (!patch[k] && v) patch[k] = v; };
+      fill('address', s.address);
+      fill('city', s.city);
+      if (!patch.phone && s.phone) patch.phone = formatPhone(s.phone);
+      fill('type', s.type);
+      fill('propertyId', s.propertyId);
+      fill('portalLink', s.portalLink);
+      fill('contactName', s.contactName);
+      if ((!Array.isArray(patch.contacts) || !patch.contacts.length) && Array.isArray(s.contacts) && s.contacts.length) patch.contacts = s.contacts;
+      // Portal-owned fields: always refresh from the portal.
+      if (s.bidAmount) patch.bidAmount = s.bidAmount;
       if (Array.isArray(s.bidItems) && s.bidItems.length) patch.bidItems = s.bidItems;
-      if (s.notes) patch.notes = s.notes;
-      set('contactName', s.contactName);
-      if (Array.isArray(s.contacts) && s.contacts.length) patch.contacts = s.contacts;
+      // More Information: portal notes merged at top, user's own text preserved
+      // below; re-capture adds only new portal paragraphs (composeNotes).
+      const composed = composeNotes(cur.notes, cur.portalNotes, s.notes);
+      patch.notes = composed.notes;
+      patch.portalNotes = composed.portalNotes;
       const hist = [...(cur.history || []), { ts: Date.now(), action: 'captured from portal', detail: s.woId ? 'WO# ' + s.woId : '' }];
       // change11: AMH sub-status "Pending Validation" = vendor submitted bid
       // for AMH approval. Auto-advance from active → complete (tech-done,
@@ -4998,7 +5053,13 @@ function App() {
     const src = orders.find(o => o.id === id);
     if (!src) return Promise.resolve();
     const pm = String(src.pm || '').toUpperCase();
-    if (pm === 'MSR') { toast('MSR work orders import through the Chrome extension, not in-app capture'); return Promise.resolve(); }
+    if (pm === 'MSR') {
+      // MSR capture happens on the portal page itself: open the WO in Chrome and
+      // use the extension's on-page "Capture WO" button (reliable; off-screen
+      // scraping is not).
+      toast('Open this WO in Chrome and use the extension’s on-page Capture button.');
+      return Promise.resolve();
+    }
     if (pm !== 'AMH') { toast('In-app capture supports AMH work orders only'); return Promise.resolve(); }
     if (!window.scraper || !window.scraper.captureWO) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
     setCaptureStatus({ label: 'Capturing ' + id + ' from ' + pm + '…' });
@@ -5044,11 +5105,17 @@ function App() {
       if (!resp || !resp.ok) { toast('Batch capture failed: ' + ((resp && resp.error) || 'unknown error')); return; }
       let updated = 0, warned = 0, fail = 0;
       const newIncoming = [];
+      const updatedBatch = [];          // existing WOs refreshed (for the modal)
+      const warnByNum = {};             // WO# -> warning strings (new + updated)
       for (const [num, res] of Object.entries(resp.results || {})) {
         const key = String(num).replace(/^WO-/i, '').trim();
+        if (res && Array.isArray(res.warnings) && res.warnings.length) warnByNum[key] = res.warnings;
         if (existing.has(key)) {
-          const w = applyCapture(existing.get(key), res);
-          if (w === null) fail++; else { updated++; if (w.length) warned++; }
+          const id = existing.get(key);
+          const w = applyCapture(id, res);
+          // Only WOs that came back WITH a warning go in the review modal; clean
+          // updates are silent (counted only). w === null means capture failed.
+          if (w === null) fail++; else { updated++; if (w.length) { warned++; updatedBatch.push({ id, isNew: false }); } }
         } else if (res && res.ok && res.wo) {
           const s = res.wo;
           // status omitted -> new WOs default to 'Open' (raw portal statuses
@@ -5062,14 +5129,17 @@ function App() {
           });
         } else { fail++; }
       }
-      let added = 0;
+      let added = 0, newBatch = [], dupSkipped = 0;
       if (newIncoming.length) {
         const r = upsertOrders(newIncoming);
         added = r.imported || 0;
-        if (Array.isArray(r.batch) && r.batch.length) {
-          setImportInspect({ batch: r.batch, ts: Date.now(), dupSkipped: r.dupSkipped });
-        }
+        dupSkipped = r.dupSkipped || 0;
+        newBatch = Array.isArray(r.batch) ? r.batch : [];
       }
+      // Surface new AND updated WOs (plus any warnings) in the review modal so
+      // WOs flagged "with issue" can be examined, not just counted in the toast.
+      const batch = [...newBatch, ...updatedBatch];
+      if (batch.length) setImportInspect({ batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated });
       toast('Captured ' + updated + ' updated, ' + added + ' new'
         + (warned ? (', ' + warned + ' with warnings') : '')
         + (fail ? (', ' + fail + ' failed') : ''));
@@ -5077,24 +5147,25 @@ function App() {
       .finally(() => setCaptureStatus(null));
   }, [orders, applyCapture, upsertOrders, toast]);
 
-  // MSR bulk capture: MSR is locked to the authenticated Chrome profile, so the
-  // Chrome extension does the work. This queues a command the extension polls;
-  // captured WOs return via the normal /import -> extension-import path (toast +
-  // new-WO modal). Requires Chrome + the extension running.
-  const captureAllMSR = React.useCallback(() => {
-    if (!window.extensionBridge || !window.extensionBridge.requestMsrCapture) {
-      toast('MSR capture is only available in the desktop app'); return;
+  // Find new MSR WOs: MSR batch capture was dropped (Salesforce lazy-render made
+  // off-screen scraping unreliable). Instead, ask the extension to scan the open
+  // MSR list page for WO numbers; results arrive via onFoundWos, which diffs them
+  // against the tracker and lists the ones not yet added (the user captures each
+  // with the extension's on-page button). Requires Chrome + the extension + an
+  // MSR list tab open.
+  const findNewMsr = React.useCallback(() => {
+    if (!window.extensionBridge || !window.extensionBridge.requestFindNewMsr) {
+      toast('This needs the desktop app + Chrome extension'); return;
     }
-    window.extensionBridge.requestMsrCapture()
-      .then(() => {
-        toast('MSR capture requested — keep Chrome + the extension open; WOs import automatically.');
-        // Indeterminate progress (work runs remotely in the extension). Cleared
-        // when the import arrives (onImport) or by a safety timeout.
-        setCaptureStatus({ label: 'Capturing MSR work orders (via Chrome extension)…' });
-        if (msrBannerTimer.current) clearTimeout(msrBannerTimer.current);
-        msrBannerTimer.current = setTimeout(() => setCaptureStatus(null), 8 * 60 * 1000);
-      })
-      .catch(e => toast('MSR request failed: ' + e.message));
+    // In-flight banner: the scan is async (extension polls, scans, POSTs back),
+    // so show progress until results arrive via onFoundWos (which clears it) or
+    // the 2-min safety timeout fires.
+    setCaptureStatus({ label: 'Scanning the open MSR list for new work orders…' });
+    if (msrBannerTimer.current) clearTimeout(msrBannerTimer.current);
+    msrBannerTimer.current = setTimeout(() => setCaptureStatus(null), 2 * 60 * 1000);
+    window.extensionBridge.requestFindNewMsr()
+      .then(() => toast('Scanning the open MSR list for new WOs — keep Chrome + the extension open.'))
+      .catch(e => { setCaptureStatus(null); toast('Request failed: ' + e.message); });
   }, [toast]);
 
   // Explicit-id action handler shared by context menu and detail pane.
@@ -5446,11 +5517,15 @@ function App() {
           onAddInbox: onAddInbox,
           onOpenSettings: () => { setCurrentModule('work-orders'); setCurrentView('settings'); },
         }}>
+        {/* Banners are in-flow at the very top and push the module content
+            (incl. the WO header + its buttons) down instead of overlaying it. */}
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
         <UpdateBanner
           state={updateState}
           onInstall={() => window.updater && window.updater.install && window.updater.install()}
         />
         <CaptureBanner status={captureStatus} />
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         {currentModule === 'overview' && (
           <div style={{ ...themeVars, color: 'var(--text-1)' }}>
             <OverviewModule
@@ -5565,13 +5640,13 @@ function App() {
                       fontWeight: 600, cursor: 'pointer', lineHeight: 1,
                     }}>Capture all AMH</button>
                   )}
-                  {(window.extensionBridge && window.extensionBridge.requestMsrCapture) && (
-                    <button onClick={captureAllMSR} title="Capture all open MSR work orders via the Chrome extension (Chrome must be open)" style={{
+                  {(window.extensionBridge && window.extensionBridge.requestFindNewMsr) && (
+                    <button onClick={findNewMsr} title="Scan the open MSR list page for work orders not yet in the tracker (Chrome + extension must be open)" style={{
                       height: 26, padding: '0 12px', borderRadius: 999,
                       border: '1px solid var(--border-1)', background: 'transparent',
                       color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
                       fontWeight: 600, cursor: 'pointer', lineHeight: 1,
-                    }}>Capture all MSR</button>
+                    }}>Find new MSR WOs</button>
                   )}
                 </div>
               )}
@@ -5635,6 +5710,8 @@ function App() {
           )}
         </div>
         )}
+        </div>{/* end module content (flex:1) */}
+        </div>{/* end top-strip flex column */}
 
         {/* ImportInspectModal rendered before add/edit modals so when its
             per-row Edit button triggers the edit modal, the edit modal mounts
@@ -5650,6 +5727,40 @@ function App() {
             setCurrentModule('work-orders');
           }}
         />
+
+        {newMsrWos && (
+          <Modal open onClose={() => setNewMsrWos(null)}
+            title={'New MSR work orders (' + newMsrWos.items.length + ')'} width={460}>
+            {newMsrWos.items.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
+                All {newMsrWos.scanned} work orders on this list are already in the tracker.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 4 }}>
+                  {newMsrWos.items.length} of {newMsrWos.scanned} scanned work orders aren’t in the tracker.
+                  Open each and use the extension’s on-page Capture button to add it.
+                </div>
+                {newMsrWos.items.map(it => (
+                  <div key={it.num} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    gap: 10, padding: '7px 0', borderBottom: '1px solid var(--border-1)',
+                  }}>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{it.num}</span>
+                    {it.url && (
+                      <button onClick={() => window.shell && window.shell.openExternal && window.shell.openExternal(it.url)}
+                        style={{
+                          height: 24, padding: '0 12px', borderRadius: 6,
+                          border: '1px solid var(--border-2)', background: 'transparent',
+                          color: 'var(--accent)', fontFamily: 'inherit', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        }}>Open</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Modal>
+        )}
 
         <Modal open={modal === 'add'} onClose={() => setModal(null)} title="Add work order" width={620}>
           <WOForm

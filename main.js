@@ -121,6 +121,22 @@ function startBridgeServer(win) {
       return;
     }
 
+    // WO numbers the extension scanned off an MSR list page -> forwarded to the
+    // renderer, which diffs them against the tracker and alerts on new ones.
+    if (req.method === 'POST' && req.url === '/found-wos') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const d = JSON.parse(body);
+          if (win && !win.isDestroyed()) win.webContents.send('msr-found', Array.isArray(d.items) ? d.items : []);
+        } catch (e) {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
     // /config — returns current lists so extension can sync
     if (req.method === 'GET' && req.url === '/config') {
       try {
@@ -680,9 +696,10 @@ ipcMain.handle('capture-wo', async (_e, woData) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// Queue a command for the Chrome extension's next poll (e.g. bulk MSR capture).
-ipcMain.handle('queue-ext-command', (_e, action) => {
-  pendingCommand = { action: String(action || ''), ts: Date.now() };
+// Queue a command for the Chrome extension's next poll (bulk or single MSR
+// capture). payload carries any args (e.g. a single WO's portal url).
+ipcMain.handle('queue-ext-command', (_e, action, payload) => {
+  pendingCommand = { action: String(action || ''), payload: payload || null, ts: Date.now() };
   return { ok: true };
 });
 
