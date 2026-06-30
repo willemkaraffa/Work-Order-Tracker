@@ -122,6 +122,19 @@ Collateral: must not skip a WO the user UN-trashed (restored) — key off curren
 
 ---
 
+## Status (2026-06-30)
+
+- A2 (#12a) — DONE, committed 12762e1. wasVisited + 5 tests.
+- A4 (#13)  — DONE, committed 4e5509b. isTrashedReimport central skip + notify + 5 tests.
+- A3 (#12b) — BLOCKED. The committed MSR fixture is a LIST/preview view; only date
+  present is Scheduled Start Time (5/22/2026), which is exactly what the regex
+  grabs. No Date-Created/Accepted field in the captured DOM ("Accepted" is only an
+  org-flag token). Needs: the real accept-date field on a full MSR WO-DETAIL page,
+  OR a decision to fall back to import-date, OR defer to the MSR scraper rework.
+- A1 (#8)  — REPRODUCED (Open -> "Job Complete - Enter Bid", not a completion
+  status, so no clear fires). Awaiting approval of the fix approach (config tag vs
+  /job complete/i auto-clear predicate).
+
 ## Sequencing within Batch A
 
 1. A2 (#12a) — clearest root cause, pure predicate, fast gated win.

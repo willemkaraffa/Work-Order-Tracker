@@ -75,6 +75,10 @@ for (const file of dumps) {
     check('woId', out.woId, '02761757');
     check('type', out.type, 'HVAC');
     check('status', out.status, 'In Progress');
+    // round5 A3 / #12b: MSR has no accept date -> dateCreated must be the capture
+    // date (today), NOT the Scheduled Start Time (5/22/2026 -> 2026-05-22).
+    check('dateCreated = capture date', out.dateCreated, new Date().toISOString().slice(0, 10));
+    if (out.dateCreated === '2026-05-22') { fail++; console.log('  FAIL dateCreated still = scheduled date'); }
   }
 }
 

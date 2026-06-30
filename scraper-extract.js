@@ -411,10 +411,12 @@
     data.notes = [...issues.map(s => s.replace(/\s*\|\s*/g, ' | ').trim()), ...freeNotes]
       .filter(Boolean).join('\n').slice(0, 1000);
 
-    const dateMatch = bodyText.match(/(?:Work Completed|Scheduled Start Time)\s+([\d\/]+)/i);
-    data.dateCreated = dateMatch
-      ? toISODate(dateMatch[1])
-      : new Date().toISOString().slice(0, 10);
+    // MSR exposes no accept/created date in the captured DOM. The old code used
+    // "Work Completed" / "Scheduled Start Time" — neither is when the WO was
+    // accepted, so dateCreated came out as the scheduled date (e.g. a WO never
+    // visited read as created on its schedule day). Use the capture date instead
+    // (round5 A3 / #12b); revisit if a real accept-date field is found.
+    data.dateCreated = new Date().toISOString().slice(0, 10);
 
     data.portalLink = location.href;
     return data;
