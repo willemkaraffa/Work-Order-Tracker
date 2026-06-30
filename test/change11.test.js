@@ -24,6 +24,7 @@ const { loadEsm } = require('./_load.js');
 const {
   phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
+  wasVisited,
 } = loadEsm('src/orders-logic.js');
 const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
 const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
@@ -402,6 +403,39 @@ test('migrateOrders: active WO in a complete-flagged phase → tab=complete + un
 
 test('migrateOrders: non-array input passes through', () => {
   assert.strictEqual(migrateOrders(null), null);
+});
+
+// ─── wasVisited (return-trip predicate, round5 A2 / #12a) ────────────────────
+
+const TAGS = { 'Visited': 'visited', 'Open': 'schedule', 'Return Trip Scheduled': 'returnschedule' };
+
+test('wasVisited: scheduled-but-never-visited → false (first trip, not return)', () => {
+  // WO 03061113 case: scheduled, tech never showed, no visited status applied.
+  const o = { status: 'Open', history: [{ action: 'scheduled', detail: '2026-06-24 09:00' }] };
+  assert.strictEqual(wasVisited(o, TAGS), false);
+});
+
+test('wasVisited: current status is visited-tagged → true', () => {
+  assert.strictEqual(wasVisited({ status: 'Visited', history: [] }, TAGS), true);
+});
+
+test('wasVisited: past status-change to a visited-tagged status → true', () => {
+  const o = { status: 'Open', history: [
+    { action: 'scheduled', detail: '2026-06-01 09:00' },
+    { action: 'status', detail: 'Open → Visited' },
+    { action: 'status', detail: 'Visited → Open' },
+  ] };
+  assert.strictEqual(wasVisited(o, TAGS), true);
+});
+
+test('wasVisited: no visited tag configured → false', () => {
+  const o = { status: 'Open', history: [{ action: 'status', detail: 'Open → Closed' }] };
+  assert.strictEqual(wasVisited(o, {}), false);
+});
+
+test('wasVisited: null/empty safe', () => {
+  assert.strictEqual(wasVisited(null, TAGS), false);
+  assert.strictEqual(wasVisited({}, undefined), false);
 });
 
 // ─── phaseForOrder ───────────────────────────────────────────────────────────

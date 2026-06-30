@@ -255,6 +255,26 @@ export function applySendToInvoice(cur) {
   return next;
 }
 
+// Was this WO actually VISITED before? Drives return-trip detection in
+// setSchedule. A visit = a `visited`-tagged status applied to the WO (that tag
+// also auto-clears the schedule and hides the WO from the itinerary). We detect
+// it from the current status or any past 'status' history entry whose target is
+// visited-tagged. NOT "was ever scheduled" — a WO the tech never showed up to
+// (scheduled then re-scheduled) must count as a first trip, not a return.
+// history 'status' detail format is '<old> → <new>' (see setStatus).
+export function wasVisited(o, statusTags) {
+  const tags = statusTags || {};
+  if (o && tags[o.status] === 'visited') return true;
+  const h = Array.isArray(o && o.history) ? o.history : [];
+  for (const e of h) {
+    if (!e || e.action !== 'status') continue;
+    const parts = String(e.detail || '').split('→');
+    const to = parts.length > 1 ? parts[parts.length - 1].trim() : '';
+    if (to && tags[to] === 'visited') return true;
+  }
+  return false;
+}
+
 // Today as YYYY-MM-DD (local), for expired-schedule comparison.
 export function itinTodayStr() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');

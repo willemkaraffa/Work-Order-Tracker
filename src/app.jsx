@@ -9,7 +9,7 @@ import {
 import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
-  applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11,
+  applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -4745,16 +4745,16 @@ function App() {
       else next.schedule = schedule;
       if (tech) next.tech = tech;
       const hist = Array.isArray(o.history) ? o.history : [];
-      // G: auto-status on schedule. First schedule (no prior 'scheduled' history)
-      // -> the `schedule`-tagged status; a re-schedule -> the `returnschedule`-
-      // tagged status. Only if such a status is configured and differs from the
-      // current one. "Scheduled before" is derived from history (no counter); a
-      // phase change to In Progress leaves that history intact, so the next
-      // schedule is correctly treated as a return trip.
+      // G: auto-status on schedule. First trip -> the `schedule`-tagged status;
+      // a return trip -> the `returnschedule`-tagged status. Only if such a
+      // status is configured and differs from the current one. "Return trip" is
+      // gated on the WO having actually been VISITED before (wasVisited), not
+      // merely scheduled before — a WO the tech never showed up to and is now
+      // re-scheduled is still a first trip (round5 A2 / #12a).
       let statusNote = '';
       if (schedule !== null) {
-        const scheduledBefore = hist.some(h => h && h.action === 'scheduled');
-        const wantTag = scheduledBefore ? 'returnschedule' : 'schedule';
+        const visitedBefore = wasVisited(o, statusTags);
+        const wantTag = visitedBefore ? 'returnschedule' : 'schedule';
         const target = Object.keys(statusTags).find(s => statusTags[s] === wantTag);
         if (target && o.status !== target) { next.status = target; statusNote = ' · status → ' + target; }
       }
