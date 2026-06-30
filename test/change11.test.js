@@ -24,7 +24,7 @@ const { loadEsm } = require('./_load.js');
 const {
   phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
-  wasVisited, isTrashedReimport,
+  wasVisited, isTrashedReimport, clearsScheduleOnSet,
 } = loadEsm('src/orders-logic.js');
 const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
 const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
@@ -403,6 +403,26 @@ test('migrateOrders: active WO in a complete-flagged phase → tab=complete + un
 
 test('migrateOrders: non-array input passes through', () => {
   assert.strictEqual(migrateOrders(null), null);
+});
+
+// ─── clearsScheduleOnSet (round5 A1 / #8) ────────────────────────────────────
+
+test('clearsScheduleOnSet: "Job Complete - Enter Bid" → true (batched site-done)', () => {
+  assert.strictEqual(clearsScheduleOnSet('Job Complete - Enter Bid', {}), true);
+});
+
+test('clearsScheduleOnSet: visited-tagged status → true', () => {
+  assert.strictEqual(clearsScheduleOnSet('On Site Done', { 'On Site Done': 'visited' }), true);
+});
+
+test('clearsScheduleOnSet: ordinary active status → false', () => {
+  assert.strictEqual(clearsScheduleOnSet('Parts Pending', {}), false);
+  assert.strictEqual(clearsScheduleOnSet('Open', { Open: 'schedule' }), false);
+});
+
+test('clearsScheduleOnSet: null/empty safe', () => {
+  assert.strictEqual(clearsScheduleOnSet(null, null), false);
+  assert.strictEqual(clearsScheduleOnSet('', {}), false);
 });
 
 // ─── isTrashedReimport (auto-reject, round5 A4 / #13) ────────────────────────

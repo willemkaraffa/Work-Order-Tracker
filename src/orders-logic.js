@@ -294,6 +294,19 @@ export function isTrashedReimport(inc, deletedOrders) {
   return false;
 }
 
+// Should setting this status clear the WO's itinerary schedule, while leaving
+// the WO on its current tab? True when the status is `visited`-tagged (existing
+// hook) OR its name contains "job complete" (round5 A1 / #8). Plumbers batch
+// statuses straight to "Job Complete - Enter Bid" — that is NOT a completion
+// status (bid still pending, stays active) but the site visit IS done, so the
+// WO must leave the itinerary. Completion statuses are handled separately (they
+// flip to Complete and clear schedule there); this is for the active case.
+export function clearsScheduleOnSet(status, statusTags) {
+  const tags = statusTags || {};
+  if (tags[status] === 'visited') return true;
+  return /job complete/i.test(String(status || ''));
+}
+
 // Today as YYYY-MM-DD (local), for expired-schedule comparison.
 export function itinTodayStr() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');

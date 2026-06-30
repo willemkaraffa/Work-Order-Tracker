@@ -126,14 +126,19 @@ Collateral: must not skip a WO the user UN-trashed (restored) — key off curren
 
 - A2 (#12a) — DONE, committed 12762e1. wasVisited + 5 tests.
 - A4 (#13)  — DONE, committed 4e5509b. isTrashedReimport central skip + notify + 5 tests.
-- A3 (#12b) — BLOCKED. The committed MSR fixture is a LIST/preview view; only date
-  present is Scheduled Start Time (5/22/2026), which is exactly what the regex
-  grabs. No Date-Created/Accepted field in the captured DOM ("Accepted" is only an
-  org-flag token). Needs: the real accept-date field on a full MSR WO-DETAIL page,
-  OR a decision to fall back to import-date, OR defer to the MSR scraper rework.
-- A1 (#8)  — REPRODUCED (Open -> "Job Complete - Enter Bid", not a completion
-  status, so no clear fires). Awaiting approval of the fix approach (config tag vs
-  /job complete/i auto-clear predicate).
+- A3 (#12b) — DONE, committed b58df19. MSR has no accept date in the captured DOM
+  (the fixture is a list/preview; only Scheduled Start Time). Scraper now sets
+  dateCreated = capture date instead of the misleading scheduled date. Revisit
+  for a real accept-date field in the MSR scraper rework. Fixture-backed test.
+- A1 (#8)  — DONE. clearsScheduleOnSet(status, statusTags) = visited-tagged OR
+  /job complete/i; swapped into the single + bulk setStatus schedule-clear sites.
+  "Job Complete - Enter Bid" now drops the WO from the itinerary while it stays
+  active (bid pending). 4 tests. Full applySetStatus extraction remains Gap 1.5.
+
+ALL of Batch A complete. Live spot-checks still owed (GUI, not gated): set a WO
+to "Job Complete - Enter Bid" and confirm it leaves the itinerary; reschedule a
+never-visited WO and confirm it is not tagged returnschedule; re-import a trashed
+WO and confirm the rejection toast.
 
 ## Sequencing within Batch A
 

@@ -10,6 +10,7 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
+  clearsScheduleOnSet,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -4551,8 +4552,9 @@ function App() {
         }
         const next = { ...cur, status,
           history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] };
-        // `visited` tag clears the schedule (mirrors the single-WO path).
-        if (statusTags[status] === 'visited' && next.schedule) delete next.schedule;
+        // `visited` tag OR "Job Complete" status clears the schedule (mirrors the
+        // single-WO path; round5 A1 / #8).
+        if (clearsScheduleOnSet(status, statusTags) && next.schedule) delete next.schedule;
         return next;
       }
     );
@@ -5255,11 +5257,11 @@ function App() {
             return next;
           }
           const next = { ...cur, status: payload };
-          // Slice 4 (#9): `visited` tag clears the schedule (tech finished at the
-          // site). Same data effect as completion, but the WO stays on its tab.
-          // The Itinerary tag-filter still hides legacy visited WOs that were
-          // saved before this clear-on-transition existed.
-          if (statusTags[payload] === 'visited' && next.schedule) delete next.schedule;
+          // `visited` tag OR a "Job Complete" status clears the schedule (tech
+          // finished at the site). Same data effect as completion, but the WO
+          // stays on its tab (round5 A1 / #8 — batched "Job Complete - Enter Bid"
+          // is not a completion status yet still means the visit is done).
+          if (clearsScheduleOnSet(payload, statusTags) && next.schedule) delete next.schedule;
           next.history = [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)];
           return next;
         });
