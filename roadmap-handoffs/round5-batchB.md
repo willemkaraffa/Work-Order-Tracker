@@ -14,8 +14,8 @@ Three issues, one commit:
 2. Listed WO# -> now street address (primary). Still picks by id.
 3. Nearby sub leaked tech names (`o.tech || city`) -> now city only. Recents now
    resolve to address + city too.
-LIVE-VERIFY OWED: open a WO modal, click Nearby/Recent — dropdown above the map,
-rows = address + city, no tech names.
+LIVE-VERIFIED PASS (user, 2026-06-30): dropdown above the map, rows = address +
+city, no tech names. isolation:isolate was the correct root fix.
 
 ## Remaining Batch B (not started)
 
