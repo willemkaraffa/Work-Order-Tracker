@@ -745,6 +745,10 @@ function CommandCenter({ onClose, topBar, detail, rightRail }) {
             flex: '1 1 0', minWidth: 320, maxWidth: 380,
             borderLeft: '1px solid var(--border-1)', background: 'var(--bg-surface)',
             display: 'flex', flexDirection: 'column', overflowY: 'auto',
+            // Contain the Leaflet inset's internal panes (z 200-700) so they stop
+            // escaping into the modal stacking context and covering the top bar's
+            // Nearby/Recent dropdowns (prior z-index bump on the bar alone failed).
+            isolation: 'isolate',
           }}>
             {rightRail}
           </div>
@@ -819,7 +823,7 @@ function CCDropdown({ label, items, onPick }) {
           {items.map(it => (
             <div key={it.id} onClick={() => { setOpen(false); onPick(it.id); }}
               style={{ padding: '6px 12px', fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', gap: 8 }}>
-              <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{it.id}</span>
+              <span style={{ fontWeight: 600 }}>{it.primary || it.id}</span>
               {it.sub && <span style={{ color: 'var(--text-3)' }}>{it.sub}</span>}
             </div>
           ))}
@@ -5557,13 +5561,17 @@ function App() {
     const myAddr = (splitAddress(me).addr || '').toLowerCase();
     const myCity = (splitAddress(me).city || '').toLowerCase();
     const mySet = ccTradeSet(typeLetter(me.type));
+    // Nav-aid row: primary = street address (people don't recognize WO#s at a
+    // glance), sub = city ONLY (was o.tech on nearby, which leaked tech names).
+    const mkItem = (o) => ({ id: o.id, primary: splitAddress(o).addr || o.id, sub: splitAddress(o).city || '' });
     const siblings = (myAddr ? orders.filter(o => !o.deleted && o.id !== me.id && (splitAddress(o).addr || '').toLowerCase() === myAddr) : [])
-      .map(o => ({ id: o.id, sub: splitAddress(o).city || '' }));
+      .map(mkItem);
     const nearby = (myCity ? orders.filter(o => !o.deleted && o.id !== me.id
         && (splitAddress(o).city || '').toLowerCase() === myCity
         && ccTradeSet(typeLetter(o.type)).some(t => mySet.includes(t))) : [])
-      .map(o => ({ id: o.id, sub: (o.tech || splitAddress(o).city || '') }));
-    const recents = recentWOs.filter(id => id !== me.id).map(id => ({ id }));
+      .map(mkItem);
+    const recents = recentWOs.filter(id => id !== me.id)
+      .map(id => orders.find(o => o.id === id)).filter(Boolean).map(mkItem);
     const idx = visibleOrder.indexOf(me.id);
     const phaseName = (phases.find(p => (p.statuses || []).includes(me.status)) || {}).name || null;
     const canCapture = me.pm === 'AMH' && !!(window.scraper && window.scraper.captureWO);
