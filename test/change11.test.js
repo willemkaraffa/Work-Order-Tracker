@@ -14,210 +14,31 @@
 'use strict';
 
 const assert = require('assert');
+const { loadEsm } = require('./_load.js');
 
-// ─── Extracted logic (mirrors index.html) ────────────────────────────────────
+// SHIPPED logic imported via the esbuild bridge — no more hand-copied mirrors.
+// phaseFor / phaseForOrder / daysSince / ageDaysFor / migrateOrders /
+// migrateSettingsForChange11 come from src/orders-logic.js; DEFAULT_PHASES /
+// DEFAULT_STATUSES / isCompletionStatusName from src/constants.js. Breaking any
+// branch in those now turns THIS test red — that is the change11 drift fix.
+const {
+  phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
+  applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
+} = loadEsm('src/orders-logic.js');
+const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
+const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
 
-const DEFAULT_STATUSES = [
-  'Open', 'Bid Submitted', 'Bid Approved - Return', 'Parts Pending',
-  'Bid Approved - Complete', 'Pending-Complete', 'Closed',
-  'Complete - Pending Approval', 'Cancelled',
-];
+// Aliases: existing test bodies keep their names but now exercise SHIPPED code.
+// reconcileChange11 carries the real v6 revert logic (a superset of the old
+// distilled reconcileV5); the prior assertions hold and new branches are covered.
+const reconcileV5   = reconcileChange11;
+const markComplete  = applyMarkComplete;
+const reopen        = applyReopen;
+const sendToInvoice = applySendToInvoice;
 
-const DEFAULT_PHASES = [
-  { id: 'intake',   name: 'Intake',      statuses: ['Open'] },
-  { id: 'await',    name: 'Awaiting PM', statuses: ['Bid Submitted'] },
-  { id: 'approved', name: 'Approved',    statuses: ['Bid Approved - Return'] },
-  { id: 'progress', name: 'In progress', statuses: ['Parts Pending', 'Bid Approved - Complete'] },
-  { id: 'wrap',     name: 'Wrapping up', statuses: ['Pending-Complete'] },
-  { id: 'done',     name: 'Done',        statuses: ['Closed'] },
-];
-
-function phaseFor(status, phases) {
-  const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
-  const s = String(status || '').trim();
-  if (!s) return list[0]?.name || 'Intake';
-  for (const p of list) if ((p.statuses || []).includes(s)) return p.name;
-  const sl = s.toLowerCase();
-  for (const p of list) for (const ps of (p.statuses || [])) {
-    if (String(ps).toLowerCase() === sl) return p.name;
-  }
-  if (sl === 'open')                          return 'Intake';
-  if (sl.startsWith('bid submitted'))         return 'Awaiting PM';
-  if (sl.startsWith('bid approved'))          return 'Approved';
-  if (sl.startsWith('parts pending'))         return 'In progress';
-  if (sl.startsWith('pending-complete'))      return 'Wrapping up';
-  if (sl === 'closed')                        return 'Done';
-  return list[0]?.name || 'Intake';
-}
-
-function phaseForOrder(o, phases) {
-  if (o.deleted || o.tab === 'trash') return 'Cancelled';
-  if (o.tab === 'sent')     return 'Billing';
-  if (o.tab === 'complete') return 'Complete';
-  return phaseFor(o.status, phases);
-}
-
-function daysSince(d) {
-  if (!d) return 0;
-  const t = new Date(String(d) + 'T00:00:00').getTime();
-  if (isNaN(t)) return 0;
-  return Math.floor((Date.now() - t) / 86400000);
-}
-
-function ageDaysFor(o) {
-  const tab = o.tab || 'active';
-  if (tab === 'sent') return null;
-  if (tab === 'complete') {
-    const h = Array.isArray(o.history) ? o.history : [];
-    for (let i = h.length - 1; i >= 0; i--) {
-      const a = String(h[i].action || '').toLowerCase();
-      if (a.includes('marked complete') || a.includes('auto-flipped to complete')) {
-        return Math.floor((Date.now() - h[i].ts) / 86400000);
-      }
-    }
-    return daysSince(o.dateCreated);
-  }
-  return daysSince(o.dateCreated);
-}
-
-function itinTodayStr() {
-  const d = new Date(), p = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
-
-// v4.0.1: narrowed heuristic. Was "any 'job complete' substring" which
-// mis-caught "Job Complete - Enter Bid" (still active workflow). Now requires
-// BOTH "bid submitted" AND "complete" — i.e. tech-done AND bid is in.
-function isCompletionStatus(s) {
-  if (!s) return false;
-  if (s === 'Pending-Complete' || s === 'Closed') return true;
-  const sl = String(s).toLowerCase();
-  return sl.includes('bid submitted') && sl.includes('complete');
-}
-
-function migrateSettingsForChange11(stored) {
-  const out = {};
-  const inPhases = Array.isArray(stored && stored.phases) ? stored.phases : DEFAULT_PHASES;
-  const phases = inPhases.map(p => {
-    if (!p) return p;
-    const { complete: _drop, ...rest } = p;
-    return { ...rest, statuses: Array.isArray(p.statuses) ? p.statuses.slice() : [] };
-  });
-  const approvedP = phases.find(p => p.id === 'approved');
-  const progressP = phases.find(p => p.id === 'progress');
-  if (approvedP && approvedP.statuses.includes('Bid Approved - Complete')) {
-    approvedP.statuses = approvedP.statuses.filter(s => s !== 'Bid Approved - Complete');
-  }
-  if (progressP && !progressP.statuses.includes('Bid Approved - Complete')) {
-    progressP.statuses = [...progressP.statuses, 'Bid Approved - Complete'];
-  }
-  out.phases = phases;
-  const inStatuses = Array.isArray(stored && stored.statuses) ? stored.statuses : DEFAULT_STATUSES;
-  let nextStatuses = inStatuses.slice();
-  if (!nextStatuses.includes('Cancelled')) nextStatuses.push('Cancelled');
-  if (!nextStatuses.includes('Complete - Pending Approval')) nextStatuses.push('Complete - Pending Approval');
-  out.statuses = nextStatuses;
-  return out;
-}
-
-// Reconciler v5 logic, distilled to a pure function.
-function reconcileV5(orders, storedPhases) {
-  const phaseList = Array.isArray(storedPhases) && storedPhases.length ? storedPhases : DEFAULT_PHASES;
-  const LEGACY_COMPLETE_IDS = new Set(['wrap', 'done', 'billing']);
-  const completePhaseNames = new Set();
-  for (const p of phaseList) {
-    if (!p) continue;
-    if (p.complete === true) completePhaseNames.add(p.name);
-    if (p.id && LEGACY_COMPLETE_IDS.has(p.id)) completePhaseNames.add(p.name);
-  }
-  let flipped = 0, promotedFromInvoiced = 0, hardcodedComplete = 0, hardcodedCancelled = 0, expiredCleared = 0;
-  const today = itinTodayStr();
-  let nextOrders = (orders || []).map(o => {
-    const t = (o.tab || 'active');
-    // Pass 0: deleted/trash WOs
-    if (o.deleted) {
-      const needsStatus  = o.status !== 'Cancelled';
-      const needsUnsched = !!o.schedule;
-      if (needsStatus || needsUnsched) {
-        hardcodedCancelled++;
-        const next = { ...o };
-        if (needsStatus) { next.prevStatus = o.prevStatus || o.status || 'Open'; next.status = 'Cancelled'; }
-        if (needsUnsched) delete next.schedule;
-        return next;
-      }
-      return o;
-    }
-    // Pass 1: tab='paid'/'invoiced' → 'sent'
-    if (t === 'paid' || t === 'invoiced') {
-      promotedFromInvoiced++;
-      return { ...o, tab: 'sent' };
-    }
-    // Pass 2: tab='complete' without hardcoded status
-    if (t === 'complete') {
-      if (o.status !== 'Complete - Pending Approval') {
-        hardcodedComplete++;
-        return { ...o, prevStatus: o.prevStatus || o.status || 'Open', status: 'Complete - Pending Approval' };
-      }
-      return o;
-    }
-    // Pass 3: active WOs whose status/phase signals tech-done
-    if (t !== 'active') return o;
-    const phaseName = phaseForOrder(o, phaseList);
-    const byPhase  = completePhaseNames.has(phaseName);
-    const byStatus = isCompletionStatus(o.status);
-    if (!byPhase && !byStatus) return o;
-    flipped++;
-    const next = {
-      ...o, tab: 'complete',
-      prevStatus: o.prevStatus || o.status || 'Open',
-      status: 'Complete - Pending Approval',
-    };
-    if (next.schedule) delete next.schedule;
-    return next;
-  });
-  // Pass 4: clear expired schedules
-  nextOrders = nextOrders.map(o => {
-    if (!o || !o.schedule || !o.schedule.date) return o;
-    if (o.schedule.date >= today) return o;
-    expiredCleared++;
-    const clone = { ...o };
-    delete clone.schedule;
-    return clone;
-  });
-  return { orders: nextOrders, flipped, promotedFromInvoiced, hardcodedComplete, hardcodedCancelled, expiredCleared };
-}
-
-// Handlers (pure transformations) ---------------------------------------------
-
-function markComplete(o) {
-  const prior = o.status || 'Open';
-  const next = {
-    ...o,
-    tab: 'complete',
-    prevStatus: o.prevStatus || prior,
-    status: 'Complete - Pending Approval',
-  };
-  if (next.schedule) delete next.schedule;
-  return next;
-}
-
-function reopen(o) {
-  const from = o.tab || 'active';
-  const next = { ...o };
-  if (from === 'complete') {
-    next.tab = 'active';
-    const restored = o.prevStatus || 'Open';
-    next.status = restored;
-    delete next.prevStatus;
-  } else if (from === 'sent') {
-    next.tab = 'complete';
-    next.prevStatus = o.prevStatus || o.status || 'Open';
-    next.status = 'Complete - Pending Approval';
-  } else {
-    next.tab = 'active';
-  }
-  return next;
-}
+// softDelete / restore / applySetStatus remain LOCAL distillations: those
+// transforms are still inline inside the woAction switch + bulk ops in app.jsx,
+// not yet extracted. See roadmap-handoffs/qa-gaps-remaining.md.
 
 function softDelete(o) {
   const next = {
@@ -233,13 +54,6 @@ function restore(o) {
   const restored = o.prevStatus || 'Open';
   const next = { ...o, deleted: false, status: restored, tab: 'active' };
   delete next.prevStatus;
-  return next;
-}
-
-function sendToInvoice(o) {
-  // Gate: only valid from Complete. Caller checks; here we just transform.
-  const next = { ...o, tab: 'sent' };
-  if (next.schedule) delete next.schedule;
   return next;
 }
 
@@ -552,6 +366,42 @@ test('migrateSettings: moves Bid Approved - Complete from approved to end of pro
 test('migrateSettings: strips complete flag from phases', () => {
   const r = migrateSettingsForChange11({ phases: [{ id: 'wrap', name: 'Wrapping up', complete: true, statuses: [] }] });
   assert.strictEqual(r.phases[0].complete, undefined);
+});
+
+// ─── migrateOrders (SHIPPED, imported) ───────────────────────────────────────
+// Direct coverage of the real migrateOrders so a broken branch fails the gate.
+
+test('migrateOrders: tab=paid/invoiced → sent', () => {
+  const r = migrateOrders([
+    { id: 'P', tab: 'paid', status: 'X' },
+    { id: 'I', tab: 'invoiced', status: 'X' },
+  ], DEFAULT_PHASES);
+  assert.strictEqual(r[0].tab, 'sent');
+  assert.strictEqual(r[1].tab, 'sent');
+});
+
+test('migrateOrders: priority field → archive note card, priority stripped', () => {
+  const r = migrateOrders([{ id: 'A', tab: 'active', status: 'Open', priority: 'High' }], DEFAULT_PHASES);
+  assert.strictEqual(r[0].priority, undefined);
+  assert.ok(r[0].noteCards.some(c => c.body === 'Imported priority: High'));
+});
+
+test('migrateOrders: id-less note card gets a stable id', () => {
+  const r = migrateOrders([{ id: 'A', tab: 'active', status: 'Open', noteCards: [{ body: 'hi' }] }], DEFAULT_PHASES);
+  assert.ok(r[0].noteCards[0].id, 'expected an id assigned');
+});
+
+test('migrateOrders: active WO in a complete-flagged phase → tab=complete + unscheduled', () => {
+  const phases = DEFAULT_PHASES.map(p => p.id === 'done' ? { ...p, complete: true } : p);
+  const r = migrateOrders([
+    { id: 'A', tab: 'active', status: 'Closed', schedule: { date: '2099-01-01', start: '09:00' } },
+  ], phases);
+  assert.strictEqual(r[0].tab, 'complete');
+  assert.strictEqual(r[0].schedule, undefined);
+});
+
+test('migrateOrders: non-array input passes through', () => {
+  assert.strictEqual(migrateOrders(null), null);
 });
 
 // ─── phaseForOrder ───────────────────────────────────────────────────────────

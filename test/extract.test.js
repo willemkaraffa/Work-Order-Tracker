@@ -7,8 +7,12 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 
-const DUMP_DIR = 'C:/Users/pvega/Downloads';
+const DUMP_DIR = path.join(__dirname, 'fixtures');
 const MODULE = path.join(__dirname, '..', 'scraper-extract.js');
+
+if (!fs.existsSync(DUMP_DIR) || !fs.readdirSync(DUMP_DIR).some(f => /^wo-dump-.*\.json$/.test(f))) {
+  console.log('SKIP extract: no dumps in test/fixtures'); process.exit(2);
+}
 
 function loadDump(file) {
   const dump = JSON.parse(fs.readFileSync(path.join(DUMP_DIR, file), 'utf8'));

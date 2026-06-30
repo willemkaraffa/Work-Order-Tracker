@@ -170,7 +170,7 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
 }
 
 
-export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onEdit, onEditInvoice, onAction, statuses, moreInfoColor, types, techs, pms, inboxes, onWoAction, onAddToInbox, onAddToNewInbox, onRemoveFromInbox }) {
+export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, onAddNote, onEditNote, onDeleteNote, onPinNote, onSetMisc, onSetClient, onEdit, onEditInvoice, onAction, statuses, moreInfoColor, types, techs, pms, inboxes, onWoAction, onAddToInbox, onAddToNewInbox, onRemoveFromInbox }) {
   const [ctxMenu, setCtxMenu] = React.useState(null);
   const closeCtx = React.useCallback(() => setCtxMenu(null), []);
   React.useEffect(() => {
@@ -202,6 +202,7 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     setCtxMenu({ woId: data.wo, x: e.clientX, y: e.clientY, tab: data.tab });
   };
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
+  const [clientMenuOpen, setClientMenuOpen] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
   const statusRef = React.useRef(null);
 
@@ -220,6 +221,15 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     document.addEventListener('keydown', onKey);
     return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
   }, [statusMenuOpen]);
+
+  React.useEffect(() => {
+    if (!clientMenuOpen) return;
+    const close = () => setClientMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [clientMenuOpen]);
 
   if (!data) {
     return (
@@ -324,7 +334,31 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
           display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', rowGap: 6, columnGap: 14,
           fontSize: 12,
         }}>
-          <Field label="PM" value={<PMChip pm={data.pm} />} />
+          <Field label="Client" value={
+            <span
+              onClick={onSetClient ? (e) => { e.stopPropagation(); setClientMenuOpen(o => !o); } : undefined}
+              style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: onSetClient ? 'pointer' : 'default' }}
+            >
+              <PMChip pm={data.pm} />
+              {onSetClient && <span style={{ fontSize: 9, color: 'var(--text-3)' }}>{'▾'}</span>}
+              {clientMenuOpen && (
+                <div style={{
+                  position: 'absolute', top: '100%', left: 0, marginTop: 4,
+                  minWidth: 200, maxHeight: 260, overflowY: 'auto',
+                  background: 'var(--bg-surface)', border: '1px solid var(--border-2)',
+                  borderRadius: 8, boxShadow: '0 12px 30px rgba(0,0,0,0.45)', padding: '4px 0', zIndex: 60,
+                }}>
+                  <MenuCaption>Set client</MenuCaption>
+                  {(pms || []).map(p => (
+                    <MenuItem key={p.name} onClick={(e) => { e.stopPropagation(); setClientMenuOpen(false); onSetClient(data.wo, p.name); }}>
+                      <span style={{ fontWeight: 700 }}>{p.name}</span>
+                      {p.fullName && p.fullName !== p.name && <span style={{ color: 'var(--text-3)', marginLeft: 6 }}>{p.fullName}</span>}
+                    </MenuItem>
+                  ))}
+                </div>
+              )}
+            </span>
+          } />
           <Field label="Type" value={
             <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <TypeIcon kind={data.type} />{data.typeLabel}

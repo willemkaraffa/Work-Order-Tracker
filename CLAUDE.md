@@ -22,6 +22,14 @@
 - Run local tests or build steps to verify your changes actually work before completion.
 - If in the even of failed execution/live tests, review code for errors first BEFORE suggesting user input.
 
+## 4a. Testing gate (QA framework)
+- Done-gate for any code change: `npm run verify` (builds the renderer + runs every test) must pass before claiming a fix works. Build catches JSX/esbuild errors; tests catch logic + render regressions.
+- `npm test` runs all tests; `npm run test:logic` runs the fixture-free subset (portable, always runnable). Tests exit 2 = SKIP (e.g. a DOM fixture is absent) and do NOT fail the gate.
+- Tests live in `test/`, node + jsdom + exit codes (0 pass / 1 fail / 2 skip). Logic tests import the SHIPPED code through `test/_load.js` (esbuild bridge) — never hand-copy app logic into a test (that drift produced false-green tests; see `src/orders-logic.js`).
+- Pure order/phase/age/migration logic lives in `src/orders-logic.js`. Add new pure logic there (not buried in `app.jsx`) so it stays testable.
+- Renderer/lifecycle changes: `test/renderer-smoke.test.js` mounts the real App. For an observable UI change also verify in the live app (electron / preview tools), not by static read.
+- Full QA workflow: `roadmap-handoffs/qa-protocol.md`.
+
 ## 5. Caveman
 - ALWAYS begin session on /caveman ultra skill
 - refresh /caveman ultra skill on detection of verbose dialogue from Claude Code

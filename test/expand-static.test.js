@@ -7,7 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 
-const DUMP = 'C:/Users/pvega/Downloads/wo-dump-AMH-1779978895264.json';
+const DUMP = path.join(__dirname, 'fixtures', 'wo-dump-AMH-1779978895264.json');
+if (!fs.existsSync(DUMP)) { console.log('SKIP expand-static: fixture missing'); process.exit(2); }
 const d = JSON.parse(fs.readFileSync(DUMP, 'utf8'));
 const dom = new JSDOM(d.html, { url: d.url, runScripts: 'outside-only' });
 Object.defineProperty(dom.window.document.body, 'innerText', {

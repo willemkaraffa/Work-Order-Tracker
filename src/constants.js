@@ -1,15 +1,41 @@
 // Pure data + pure helpers carved out of app.jsx (no React, no JSX). One-way
 // dependency: app.jsx (and later section modules) import from here.
 
+// Clients (formerly PMs). `name` is the stable short CODE shown everywhere
+// (chips, sidebar, map popup) and stored on each WO as o.pm -- it never changes
+// on a rename, so WOs never orphan. `fullName` is the human label, freely
+// editable. See acronymOf for the new-client code suggestion.
 export const DEFAULT_PMS = [
-  { name: 'AMH',   color: '#1a73e8' },
-  { name: 'MSR',   color: '#10b981' },
-  { name: 'Other', color: '#6b7280' },
+  { name: 'AMH',   fullName: 'American Homes 4 Rent', color: '#1a73e8' },
+  { name: 'MSR',   fullName: 'Main Street Renewal',   color: '#10b981' },
+  { name: 'Other', fullName: 'Other',                 color: '#6b7280' },
 ];
+
+// Suggest a short Client code from a full name: capital letters first, else the
+// first 3 letters uppercased. Only a SUGGESTION -- not every acronym derives
+// ("American Homes 4 Rent" -> "AHR"; the user corrects it to "AMH").
+export function acronymOf(fullName) {
+  const caps = (String(fullName || '').match(/[A-Z]/g) || []).join('');
+  if (caps.length >= 2) return caps.slice(0, 4);
+  const letters = String(fullName || '').replace(/[^A-Za-z]/g, '');
+  return letters.slice(0, 3).toUpperCase();
+}
 // Job types: only HVAC + Plumbing are real trades; 'Plumbing+HVAC' is a dual job
 // (rendered with a split icon). 'Other' is intentionally NOT offered.
 export const DEFAULT_TYPES = ['HVAC', 'Plumbing', 'Plumbing+HVAC'];
 export const DEFAULT_TECHS = ['Daniel', 'Andrew', 'Devyn'];
+
+export const DEFAULT_STATUSES = [
+  'Open',
+  'Bid Submitted',
+  'Bid Approved - Return',
+  'Parts Pending',
+  'Bid Approved - Complete',
+  'Pending-Complete',
+  'Closed',
+  'Complete - Pending Approval',
+  'Cancelled',
+];
 
 // change11: the `complete: true` phase flag is DEPRECATED. All phases are
 // considered active workflow now; the tab field (active / complete / sent /
@@ -75,12 +101,13 @@ export const LOCKED_STATUSES = new Set(['Cancelled', 'Complete - Pending Approva
 //   onsite   -> map marker fill = status color, wins over the overdue border
 //   visited  -> clear the WO's schedule (also drops it off the Itinerary list)
 //   offmap   -> hide the map marker (field work done, bid entry only)
-export const SYSTEM_TAGS = ['schedule', 'onsite', 'visited', 'offmap'];
+export const SYSTEM_TAGS = ['schedule', 'returnschedule', 'onsite', 'visited', 'offmap'];
 export const SYSTEM_TAG_LABELS = {
-  schedule: 'Schedule (open modal)',
-  onsite:   'On site (map highlight)',
-  visited:  'Visited (clear schedule)',
-  offmap:   'Off map (hide marker)',
+  schedule:       'Scheduled (auto-set on first schedule)',
+  returnschedule: 'Return trip scheduled (auto-set when re-scheduling)',
+  onsite:         'On site (map highlight)',
+  visited:        'Visited (clear schedule)',
+  offmap:         'Off map (hide marker)',
 };
 
 // change11 v4.0.1: heuristic for "tech-done, bid submitted" — fires the

@@ -3,13 +3,96 @@
 // cycle is safe -- nothing here runs at module-eval time). Leaflet is a CDN
 // global (window.L), used as a bare global inside the component.
 import React from 'react';
-import { DEFAULT_MAP_MARKER_COLORS, TYPE_COLORS, DEFAULT_MORE_INFO_COLOR } from './constants.js';
+import { DEFAULT_MAP_MARKER_COLORS, TYPE_COLORS, DEFAULT_MORE_INFO_COLOR, hexToRgba, normalizeHex, LOCKED_STATUSES } from './constants.js';
 import { formatPhone, openMapsRoute } from './utils.js';
 import {
-  splitAddress, isOverdueSched, fmtSchedule,
+  splitAddress, isOverdueSched, fmtSchedule, typeLetter,
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
+
+// Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
+// render loop so the command-center MapInset draws an identical marker (single
+// source of marker appearance). Color scheme (swapped): the status pill color
+// FILLS the droplet body; the job-type color is the BORDER, drawn bold so
+// categories stay easy to tell apart against any fill. suspect location
+// overrides the fill as a warning. Precedence for the fill: onsite-tag (tech
+// live on site) > overdue > status color > legacy scheduled-gold / white.
+export function woMarkerIcon(L, o, g, cfg) {
+  const { statusColors, statusTags, typeColors, markerColors, overdueCfg } = cfg;
+  const suspect = !!(g && g.suspect);
+  const isScheduled = !!(o.schedule && o.schedule.date);
+  const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
+  const tag = statusTags[o.status];
+  const statusPill = statusColors && statusColors[o.status];
+  const statusComposite =
+    tag === 'onsite'   ? (statusPill || '#3b82f6')
+    : isOverdue        ? overdueCfg.borderColor
+    : (statusPill || (isScheduled ? '#facc15' : '#fff'));
+  const fillColor = suspect ? markerColors.suspect : statusComposite;
+  const strokeColor = typeColors[o.type] || markerColors.fallback;
+  const emphasize = tag === 'onsite' || isScheduled;
+  const strokeWidth = emphasize ? 4 : 3;
+  const centerR     = emphasize ? 5 : 4;
+  const centerFill  = strokeColor;
+  return L.divIcon({
+    className: '',
+    // viewBox padded 2px each side so the stroke is not clipped; anchor at the tip.
+    html: '<svg viewBox="-2 -2 28 40" width="24" height="34" style="display:block;overflow:visible">'
+      + '<path d="M12 0C5.4 0 0 5.4 0 12c0 8.5 12 24 12 24s12-15.5 12-24c0-6.6-5.4-12-12-12z" '
+      + 'fill="' + fillColor + '" stroke="' + strokeColor + '" stroke-width="' + strokeWidth + '"/>'
+      + '<circle cx="12" cy="12" r="' + centerR + '" fill="' + centerFill + '"/>'
+      + '</svg>',
+    iconSize: [24, 34], iconAnchor: [12, 32], popupAnchor: [0, -30],
+  });
+}
+
+// Single-marker mini map for the command-center right rail. ONE Leaflet instance,
+// mounted only while the overlay is open and torn down on WO change (effect keyed
+// on wo.id), so there is never more than one live inset map. High zoom on the
+// WO's geocoded point; reuses woMarkerIcon so the marker matches the full Maps
+// module. No cached location -> placeholder + jump to the full Maps module (where
+// the geocode worker runs).
+export function MapInset({ wo, geocache, statusColors, statusTags, mapMarkerColors, mapTypeColors, overdueCfg, onOpenMaps }) {
+  const containerRef = React.useRef(null);
+  const mapRef = React.useRef(null);
+  const g = wo && geocache && geocache[wo.id];
+  const hasLoc = !!(g && !g.error && g.lat != null);
+  React.useEffect(() => {
+    if (!hasLoc || !window.L || !containerRef.current || mapRef.current) return;
+    const L = window.L;
+    const markerColors = { ...DEFAULT_MAP_MARKER_COLORS, ...(mapMarkerColors || {}) };
+    const typeColors = { HVAC: TYPE_COLORS.H, Plumbing: TYPE_COLORS.P, Electrical: TYPE_COLORS.E, ...(mapTypeColors || {}) };
+    const m = L.map(containerRef.current, { zoomControl: true, boxZoom: false, attributionControl: false })
+      .setView([g.lat, g.lon], 11); // RDU-area zoom: see the location at a glance
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(m);
+    L.marker([g.lat, g.lon], { icon: woMarkerIcon(L, wo, g, { statusColors, statusTags, typeColors, markerColors, overdueCfg }) }).addTo(m);
+    mapRef.current = m;
+    // The overlay sizes its rail after mount; invalidate once so tiles fill in.
+    const t = setTimeout(() => { try { m.invalidateSize(); } catch (_) {} }, 60);
+    return () => { clearTimeout(t); m.remove(); mapRef.current = null; };
+  }, [hasLoc, wo && wo.id]);
+  const labelStyle = { fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '0 12px 12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={labelStyle}>Location</span>
+        {onOpenMaps && wo && (
+          <button onClick={() => onOpenMaps(wo.id)} style={{
+            height: 22, padding: '0 8px', border: '1px solid var(--border-2)', borderRadius: 6,
+            background: 'var(--bg-surface-2)', color: 'var(--accent)', fontFamily: 'inherit',
+            fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+          }}>Open in Maps →</button>
+        )}
+      </div>
+      {hasLoc
+        ? <div ref={containerRef} style={{ height: 220, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border-1)' }} />
+        : <div style={{ height: 220, borderRadius: 8, border: '1px dashed var(--border-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: 12, color: 'var(--text-3)', fontSize: 12 }}>
+            No mapped location yet. Open in Maps to geocode this address.
+          </div>}
+    </div>
+  );
+}
 
 // Read-only notes view for the Maps right-click menu. Reuses toDetailData
 // (same notes shape as the detail pane) + NoteCard with no handlers (-> no
@@ -41,7 +124,7 @@ function NotesViewModal({ order, onClose }) {
   );
 }
 
-export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors }) {
+export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
   const [query, setQuery] = React.useState('');
   // WO id whose read-only notes modal is open, or null.
   const [notesWO, setNotesWO] = React.useState(null);
@@ -105,7 +188,12 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
   }, [mapTypeColors]);
   // Maps-specific right-click menu. Small set of actions (no full WO menu).
   const [ctxMenu, setCtxMenu] = React.useState(null); // { woId, x, y }
-  const closeCtxMenu = React.useCallback(() => setCtxMenu(null), []);
+  // Status submenu open state for the marker/sidebar right-click menu (N1).
+  const [ctxStatus, setCtxStatus] = React.useState(false);
+  // Job-type visibility filter (lifted to App so it persists across module
+  // switches). Key by typeLetter ('P'/'H'/'PH'); true = hidden. Filters both the
+  // sidebar list and the markers (markers iterate `list`).
+  const closeCtxMenu = React.useCallback(() => { setCtxMenu(null); setCtxStatus(false); }, []);
   React.useEffect(() => {
     if (!ctxMenu) return;
     const onKey = (e) => { if (e.key === 'Escape') closeCtxMenu(); };
@@ -145,6 +233,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
     const q = query.trim().toLowerCase();
     return (activeOrders || [])
       .filter(o => !o.deleted)
+      .filter(o => !hiddenTypes[typeLetter(o.type)])
       .filter(o => {
         if (!q) return true;
         const { addr, city } = splitAddress(o);
@@ -153,7 +242,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
           || (city || '').toLowerCase().includes(q);
       })
       .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
-  }, [activeOrders, query]);
+  }, [activeOrders, query, hiddenTypes]);
 
   // Init Leaflet map once on mount; tear down on unmount.
   // Initial center/zoom: settings.mapsDefaultView if set, else US-wide fallback.
@@ -246,6 +335,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
         '<div style="font-size:12px;line-height:1.4">'
           + '<div style="font-weight:600">' + String(o.id) + '</div>'
           + '<div>' + (addr || '') + (city ? '<br/>' + city : '') + '</div>'
+          + (o.pm ? '<div style="color:#888;margin-top:2px">Client: ' + o.pm + '</div>' : '')
           + (o.tech ? '<div style="color:#888;margin-top:2px">Tech: ' + o.tech + '</div>' : '')
           + schedHtml
           + phoneHtml
@@ -253,44 +343,9 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
           + warnHtml
         + '</div>'
       );
-      // Color scheme (swapped): the status pill color now FILLS the droplet
-      // body; the job-type color is the BORDER, drawn bold so categories stay
-      // easy to tell apart against any fill. suspect location overrides the
-      // fill as a warning (job-type stays visible on the border).
-      const isScheduled = !!(o.schedule && o.schedule.date);
-      // Slice 2 (#3): past schedule + threshold swaps gold to overdue color.
-      const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
-      // Slice 4 (#9): status composite (reuses the pill colors in
-      // statusColors). Precedence: onsite-tag wins (tech is live on site ->
-      // beats overdue), then overdue, then the status color, then the legacy
-      // scheduled-gold / white fallback. This now drives the FILL.
-      const tag = statusTags[o.status];
-      const statusPill = statusColors && statusColors[o.status];
-      const statusComposite =
-        tag === 'onsite'   ? (statusPill || '#3b82f6')
-        : isOverdue        ? overdueCfg.borderColor
-        : (statusPill || (isScheduled ? '#facc15' : '#fff'));
-      const fillColor = suspect ? markerColors.suspect : statusComposite;
-      // Job-type color on the border, bold.
-      const strokeColor = typeColors[o.type] || markerColors.fallback;
-      const emphasize = tag === 'onsite' || isScheduled;
-      const strokeWidth = emphasize ? 4 : 3;
-      const centerR     = emphasize ? 5 : 4;
-      const centerFill  = strokeColor;
-      const icon = L.divIcon({
-        className: '',
-        // viewBox padded 2px on every side ("-2 -2 28 40") so the stroke (up to
-        // 3px wide, i.e. 1.5px outside the path edge) is not clipped at the
-        // crown/sides. Anchor recomputed for the padded box: tip (path 12,36)
-        // maps to px (12, 32) at 24x34.
-        html: '<svg viewBox="-2 -2 28 40" width="24" height="34" style="display:block;overflow:visible">'
-          + '<path d="M12 0C5.4 0 0 5.4 0 12c0 8.5 12 24 12 24s12-15.5 12-24c0-6.6-5.4-12-12-12z" '
-          + 'fill="' + fillColor + '" stroke="' + strokeColor + '" stroke-width="' + strokeWidth + '"/>'
-          + '<circle cx="12" cy="12" r="' + centerR + '" fill="' + centerFill + '"/>'
-          + '</svg>',
-        iconSize: [24, 34], iconAnchor: [12, 32],
-        popupAnchor: [0, -30],
-      });
+      // Marker appearance (status-fill, type-border, overdue/onsite/scheduled
+      // emphasis) is built by the shared woMarkerIcon so the inset map matches.
+      const icon = woMarkerIcon(L, o, g, { statusColors, statusTags, typeColors, markerColors, overdueCfg });
       const marker = L.marker([g.lat, g.lon], { icon, opacity: isSel ? 1 : 0.9 })
         .addTo(markersLayerRef.current);
       marker.bindPopup(html);
@@ -477,6 +532,27 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
                 boxSizing: 'border-box',
               }}
             />
+            {/* Job-type show/hide. Click toggles a type off the list + map. */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              {[['H', 'HVAC'], ['P', 'Plumbing'], ['PH', 'Dual']].map(([k, label]) => {
+                const hidden = !!hiddenTypes[k];
+                const c = k === 'PH' ? 'var(--text-2)' : (TYPE_COLORS[k] || 'var(--text-2)');
+                return (
+                  <button key={k}
+                    onClick={() => setHiddenTypes(s => ({ ...s, [k]: !s[k] }))}
+                    title={hidden ? 'Show ' + label : 'Hide ' + label}
+                    style={{
+                      flex: 1, height: 24, borderRadius: 6, cursor: 'pointer',
+                      border: '1px solid ' + (hidden ? 'var(--border-2)' : c),
+                      background: hidden ? 'transparent' : hexToRgba(normalizeHex(c.startsWith('#') ? c : '#6b7280'), 0.16),
+                      color: hidden ? 'var(--text-3)' : c,
+                      fontFamily: 'inherit', fontSize: 11, fontWeight: 700,
+                      textDecoration: hidden ? 'line-through' : 'none',
+                      opacity: hidden ? 0.6 : 1,
+                    }}>{label}</button>
+                );
+              })}
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {list.length === 0 && (
@@ -736,22 +812,39 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
               {ctxMenu.woId}
             </div>
             <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
-            {o && item('View notes', () => setNotesWO(o.id))}
-            <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
-            {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
-            {onWoAction && item('Jump to itinerary', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
-            <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
-            {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
-            <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
-            {g && g.lat != null && item('Center map here', () => {
-              if (mapRef.current) mapRef.current.panTo([g.lat, g.lon]);
-            })}
-            {g && g.lat != null && setDefaultView && item('Set this point as default view', () => {
-              const z = mapRef.current ? mapRef.current.getZoom() : (defaultView && defaultView.zoom) || 10;
-              setDefaultView({ lat: +g.lat.toFixed(5), lon: +g.lon.toFixed(5), zoom: z });
-            })}
-            {onWoAction && item('Re-geocode address', () => onWoAction(ctxMenu.woId, 'regeocode'))}
-            {onWoAction && g && g.suspect && item('Dismiss suspect flag', () => onWoAction(ctxMenu.woId, 'dismissSuspect'))}
+            {ctxStatus ? (<>
+              <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-3)' }}>Set status</div>
+              {(statuses || []).filter(s => !LOCKED_STATUSES.has(s)).map(s => React.cloneElement(item(s, () => onWoAction(ctxMenu.woId, 'setStatus', s)), { key: s }))}
+              <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
+              <div onClick={(e) => { e.stopPropagation(); setCtxStatus(false); }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                style={{ padding: '7px 12px', fontSize: 13, color: 'var(--text-2)', cursor: 'pointer', userSelect: 'none' }}>← Back</div>
+            </>) : (<>
+              {o && item('View notes', () => setNotesWO(o.id))}
+              <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
+              {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
+              {onWoAction && item(o && o.schedule && o.schedule.date ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
+              {onWoAction && statuses && statuses.length > 0 && (
+                <div onClick={(e) => { e.stopPropagation(); setCtxStatus(true); }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                  style={{ padding: '7px 12px', fontSize: 13, color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }}>Change status ▸</div>
+              )}
+              {onWoAction && item('Jump to itinerary', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
+              <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
+              {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
+              <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
+              {g && g.lat != null && item('Center map here', () => {
+                if (mapRef.current) mapRef.current.panTo([g.lat, g.lon]);
+              })}
+              {g && g.lat != null && setDefaultView && item('Set this point as default view', () => {
+                const z = mapRef.current ? mapRef.current.getZoom() : (defaultView && defaultView.zoom) || 10;
+                setDefaultView({ lat: +g.lat.toFixed(5), lon: +g.lon.toFixed(5), zoom: z });
+              })}
+              {onWoAction && item('Re-geocode address', () => onWoAction(ctxMenu.woId, 'regeocode'))}
+              {onWoAction && g && g.suspect && item('Dismiss suspect flag', () => onWoAction(ctxMenu.woId, 'dismissSuspect'))}
+            </>)}
           </div>
         );
       })()}

@@ -1,11 +1,18 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, DEFAULT_PHASES, DENSITY_MAP, densityFor,
+  DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, DEFAULT_PHASES, DEFAULT_STATUSES, DENSITY_MAP, densityFor,
   MIGRATION_VERSION, APP_VERSION, DEFAULT_STATUS_COLORS, LOCKED_STATUSES, SYSTEM_TAGS,
   SYSTEM_TAG_LABELS, isCompletionStatusName, EDITABLE_THEME_VARS, DEFAULT_MORE_INFO_COLOR,
   statusColor, TYPE_COLORS, DEFAULT_MAP_MARKER_COLORS, normalizeHex, hexToRgba,
 } from './constants.js';
+import {
+  phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
+  ageDaysFor, migrateOrders, migrateSettingsForChange11,
+  applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11,
+} from './orders-logic.js';
+// Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
+export { DEFAULT_STATUSES };
 import {
   PhasesContext, usePhases, StatusColorsContext, useStatusColors,
   ToastContext, useToast, PMsContext, usePMs,
@@ -16,8 +23,8 @@ import {
 } from './primitives.jsx';
 import { formatPhone, haversineKm, roadKm, composeNotes } from './utils.js';
 import { MODULE_GROUPS, MODULES, MODULE_ORDER, ModuleNavContext, NavWing, RAIL as NAV_RAIL } from './nav.jsx';
-import { MapsModule } from './maps.jsx';
-import { ItineraryModule } from './itinerary.jsx';
+import { MapsModule, MapInset } from './maps.jsx';
+import { ItineraryModule, DayTimeline } from './itinerary.jsx';
 import { DetailPane } from './detail.jsx';
 import { ListPane } from './listpane.jsx';
 import { SettingsDrawer } from './settings.jsx';
@@ -57,11 +64,6 @@ export const TT_LIGHT = {
   // Accents map straight to Latte named colors
   '--accent':        '#1e66f5',  // Latte: blue
   '--accent-fg':     '#ffffff',
-
-  // Age-warning tints derived from Latte red
-  '--age-1':         '#f4d4d8',  // very light red wash
-  '--age-2':         '#eeb6bc',  // mid red wash
-  '--age-3':         '#e58a93',  // saturated red wash
 
   // Flags map to Latte semantic colors
   '--flag-emergency':'#d20f39',  // Latte: red
@@ -110,9 +112,6 @@ export const TT_DARK = {
   '--accent':        'oklch(68% 0.11 240)',
   '--accent-soft':   'oklch(28% 0.06 240)',
   '--accent-fg':     '#0c0c0c',
-  '--age-1':         'oklch(19% 0.025 25)',
-  '--age-2':         'oklch(23% 0.055 25)',
-  '--age-3':         'oklch(28% 0.085 25)',
   '--flag-emergency':'oklch(70% 0.15 25)',
   '--flag-warranty': 'oklch(70% 0.12 240)',
   '--p-intake':      'oklch(75% 0.02 0)',
@@ -144,17 +143,7 @@ export const TT_DARK = {
 // auto-flip from a Job Complete status). Both are managed automatically — they
 // surface only on trash/complete WOs and are restored to the pre-flip status
 // (prevStatus) on Restore/Reopen.
-export const DEFAULT_STATUSES = [
-  'Open',
-  'Bid Submitted',
-  'Bid Approved - Return',
-  'Parts Pending',
-  'Bid Approved - Complete',
-  'Pending-Complete',
-  'Closed',
-  'Complete - Pending Approval',
-  'Cancelled',
-];
+// DEFAULT_STATUSES moved to ./constants.js (re-exported at top for consumers).
 
 // Constants + pure helpers moved to ./constants.js (imported at top).
 
@@ -318,99 +307,8 @@ async function renderGambleMarkPng(size = 32) {
 }
 
 /* ---------- data adapters ---------- */
-
-// Configurable phase mapping. `phases` arg comes from wo_data.phases (defaults if absent).
-// Lookup is exact-first, then case-insensitive, then a legacy heuristic so old data still buckets.
-function phaseFor(status, phases) {
-  const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
-  const s = String(status || '').trim();
-  if (!s) return list[0]?.name || 'Intake';
-  for (const p of list) if ((p.statuses || []).includes(s)) return p.name;
-  const sl = s.toLowerCase();
-  for (const p of list) for (const ps of (p.statuses || [])) {
-    if (String(ps).toLowerCase() === sl) return p.name;
-  }
-  // legacy heuristic fallback
-  if (sl === 'open')                          return 'Intake';
-  if (sl.startsWith('bid submitted'))         return 'Awaiting PM';
-  if (sl.startsWith('bid approved'))          return 'Approved';
-  if (sl.startsWith('parts pending'))         return 'In progress';
-  if (sl.startsWith('pending-complete') ||
-      sl === 'pending complete')              return 'Wrapping up';
-  if (sl === 'closed')                        return 'Done';
-  return list[0]?.name || 'Intake';
-}
-
-// change11:
-// - sent goes under "Billing"
-// - complete goes under "Complete" (matches the user-facing tab name)
-// - trash/deleted WOs go under a single "Cancelled" bucket regardless of their
-//   stored status. (Their status is hardcoded to 'Cancelled' on softDelete; the
-//   phase bucket name matches so the Trash view reads as one flat list.)
-// Active (and any unhandled) WOs use phaseFor on the status.
-function phaseForOrder(o, phases) {
-  if (o.deleted || o.tab === 'trash') return 'Cancelled';
-  if (o.tab === 'sent')     return 'Billing';
-  if (o.tab === 'complete') return 'Complete';
-  return phaseFor(o.status, phases);
-}
-
-function phaseStyle(status, phases) {
-  const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
-  const name = phaseFor(status, list);
-  const p = list.find(x => x.name === name);
-  if (p) return { phase: name, fg: p.fg, bg: p.bg, dot: p.fg };
-  return { phase: name, fg: 'var(--text-2)', bg: 'var(--bg-surface-2)', dot: 'var(--text-2)' };
-}
-
-function daysSince(d) {
-  if (!d) return 0;
-  const t = new Date(String(d) + 'T00:00:00').getTime();
-  if (isNaN(t)) return 0;
-  return Math.floor((Date.now() - t) / 86400000);
-}
-
-function ageLevelFor(d) {
-  const n = daysSince(d);
-  return ageLevelForDays(n);
-}
-
-function ageLevelForDays(n) {
-  if (n == null) return 0;
-  if (n >= 30) return 3;
-  if (n >= 15) return 2;
-  if (n >= 8)  return 1;
-  return 0;
-}
-
-// Age in days, scoped to the current tab.
-// - paid:      null (no age, no tint — WO is finalized)
-// - sent:      days since the most recent 'sent to billing queue' history entry.
-// change11:
-// - complete:  days since the most recent 'marked complete' history entry.
-//              Surfaces aging color coding on the Complete tab (not yet paid).
-// - sent:      days since the most recent 'sent to billing' entry — used
-//              ONLY by the Invoices module's aging buckets, not by ageDaysFor
-//              directly (sent rows do not display an age in the WO list).
-// - other:     days since dateCreated (legacy behavior).
-function ageDaysFor(o) {
-  const tab = o.tab || 'active';
-  if (tab === 'sent') return null;
-  if (tab === 'complete') {
-    const h = Array.isArray(o.history) ? o.history : [];
-    for (let i = h.length - 1; i >= 0; i--) {
-      const a = String(h[i].action || '').toLowerCase();
-      if (a.includes('marked complete') || a.includes('auto-flipped to complete')) {
-        return Math.floor((Date.now() - h[i].ts) / 86400000);
-      }
-    }
-    // Fallback: WO was on tab='complete' without a marked/auto-flipped entry
-    // (e.g. imported pre-change11). Use dateCreated so the aging tint is not
-    // misleadingly fresh.
-    return daysSince(o.dateCreated);
-  }
-  return daysSince(o.dateCreated);
-}
+// phaseFor / phaseForOrder / phaseStyle / daysSince / ageLevelFor /
+// ageLevelForDays / ageDaysFor moved to ./orders-logic.js (imported at top).
 
 export function typeLetter(type) {
   const t = String(type || '').toLowerCase();
@@ -732,7 +630,7 @@ function computeAlerts(orders, thresholds) {
     if (o.emergency && (s === 'open' || s === '') && ageStage >= t.emergencyUnscheduled) {
       entry = { kind: 'emergency', blurb: `Emergency, still in Open — needs dispatch · ${ageStage} days in stage` };
     } else if (s.startsWith('bid submitted') && ageStage >= t.bidOutNoResponse) {
-      entry = { kind: 'stale', blurb: `Bid out ${ageStage} days, no response from ${o.pm || 'PM'}` };
+      entry = { kind: 'stale', blurb: `Bid out ${ageStage} days, no response from ${o.pm || 'Client'}` };
     } else if (s.startsWith('parts pending') && ageStage >= t.partsPastEta) {
       entry = { kind: 'parts', blurb: `Parts pending ${ageStage} days — vendor delay?` };
     } else if (s.startsWith('bid approved - return') && ageStage >= t.approvedUnscheduled) {
@@ -804,6 +702,258 @@ function FormField({ label, children, span = 1 }) {
     <div style={{ gridColumn: `span ${span}` }}>
       <div style={{ fontSize: 12, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>{label}</div>
       {children}
+    </div>
+  );
+}
+
+// Per-WO command center overlay. Replaces the old inline DetailPane column: the
+// WO list now spans full width and selecting a WO opens this. Large centered
+// panel = the existing DetailPane (left, its own header doubles as the sub-module
+// header) + a right rail for the map/itinerary insets (added in later slices).
+// Esc and the X button close; backdrop click does NOT (DetailPane holds an
+// unsaved note composer/draft). Mounted only when exactly one WO is selected, so
+// the later Leaflet inset has exactly one live instance. `detail`/`rightRail` are
+// passed as elements so this shell stays presentational.
+function CommandCenter({ onClose, topBar, detail, rightRail }) {
+  // Esc closes. Arrow-key prev/next is owned by ListPane's window-level handler
+  // (it holds the visible order and stays mounted under the overlay), which
+  // restacks selectedWO; duplicating it here would double-step. The top bar's
+  // prev/next buttons cover pointer users.
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 400,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 1100, maxWidth: '94vw', height: '80vh', maxHeight: '90vh',
+        background: 'var(--bg-canvas)', border: '1px solid var(--border-1)',
+        borderRadius: 12, boxShadow: '0 24px 60px rgba(0,0,0,0.45)',
+        overflow: 'hidden', display: 'flex', flexDirection: 'column', position: 'relative',
+      }}>
+        {topBar}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+          <div style={{ flex: '1.6 1 0', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+            {detail}
+          </div>
+          <div style={{
+            flex: '1 1 0', minWidth: 320, maxWidth: 380,
+            borderLeft: '1px solid var(--border-1)', background: 'var(--bg-surface)',
+            display: 'flex', flexDirection: 'column', overflowY: 'auto',
+          }}>
+            {rightRail}
+          </div>
+        </div>
+        <button onClick={onClose} title="Close (Esc)" style={{
+          position: 'absolute', top: 8, right: 10, zIndex: 30,
+          width: 28, height: 28, borderRadius: 6, border: '1px solid var(--border-2)',
+          background: 'var(--bg-surface)', color: 'var(--text-2)', cursor: 'pointer',
+          fontFamily: 'inherit', fontSize: 16, lineHeight: 1,
+        }}>{'✕'}</button>
+      </div>
+    </div>
+  );
+}
+
+// Settings shown as a large centered popup (N4) instead of the cramped right
+// column, so tabs get room and don't cut off. Wraps the existing SettingsDrawer
+// (a full-height section). Esc or the drawer's own Close button exits. Nested
+// editors (PMsEditor etc.) are their own z-400 overlays rendered inside -> paint
+// above this one.
+function SettingsOverlay({ onClose, children }) {
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 400,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 1120, maxWidth: '95vw', height: '85vh', maxHeight: '92vh',
+        background: 'var(--bg-canvas)', border: '1px solid var(--border-1)',
+        borderRadius: 12, boxShadow: '0 24px 60px rgba(0,0,0,0.45)',
+        overflow: 'hidden', display: 'flex',
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const ccBtnStyle = (accent) => ({
+  height: 24, padding: '0 8px', border: '1px solid var(--border-2)', borderRadius: 6,
+  background: 'var(--bg-surface-2)', color: accent || 'var(--text-1)', fontFamily: 'inherit',
+  fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+});
+
+// Small dropdown of WO ids (siblings / nearby / recents) for the command-center
+// top bar. Hidden when empty. Picking an id swaps the overlay to that WO.
+function CCDropdown({ label, items, onPick }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  if (!items || !items.length) return null;
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(o => !o)} style={ccBtnStyle()}>{label} ({items.length}) ▾</button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, marginTop: 4, minWidth: 200,
+          maxHeight: 300, overflowY: 'auto', background: 'var(--bg-surface)',
+          border: '1px solid var(--border-2)', borderRadius: 8,
+          boxShadow: '0 12px 30px rgba(0,0,0,0.45)', padding: '4px 0', zIndex: 1000,
+        }}>
+          {items.map(it => (
+            <div key={it.id} onClick={() => { setOpen(false); onPick(it.id); }}
+              style={{ padding: '6px 12px', fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', gap: 8 }}>
+              <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{it.id}</span>
+              {it.sub && <span style={{ color: 'var(--text-3)' }}>{it.sub}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Horizontal workflow-phase stepper. Highlights the phase holding the WO's
+// status; phases before it read as done (accent connector), after as pending.
+function PhaseStepper({ phases, current }) {
+  if (!phases || !phases.length) return null;
+  const idx = phases.findIndex(p => p.name === current);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden' }}>
+      {phases.map((p, i) => {
+        const cur = i === idx;
+        const reached = idx >= 0 && i <= idx;
+        return (
+          <React.Fragment key={p.name}>
+            {i > 0 && <span style={{ width: 12, height: 2, flexShrink: 0, background: reached ? 'var(--accent)' : 'var(--border-2)' }} />}
+            <span title={p.name} style={{
+              fontSize: 11, fontWeight: cur ? 700 : 500, padding: '2px 6px', borderRadius: 999,
+              color: cur ? 'var(--accent)' : (idx >= 0 && i < idx) ? 'var(--text-2)' : 'var(--text-3)',
+              border: '1px solid ' + (cur ? 'var(--accent)' : 'transparent'),
+              whiteSpace: 'nowrap',
+            }}>{p.name}</span>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+// Command-center top bar: prev/next + position, phase stepper, sibling/nearby/
+// recent jump dropdowns, and promoted actions (Edit / Folder / Capture).
+function CCTopBar({ index, total, onPrev, onNext, phases, phaseName, siblings, nearby, recents, onPick, onEdit, onAction, canCapture, woId }) {
+  const navBtn = (disabled, on, glyph) => (
+    <button disabled={disabled} onClick={on} style={{
+      width: 26, height: 24, border: '1px solid var(--border-2)', borderRadius: 6,
+      background: 'var(--bg-surface-2)', color: disabled ? 'var(--text-3)' : 'var(--text-1)',
+      cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit', fontSize: 12, lineHeight: 1,
+      opacity: disabled ? 0.5 : 1,
+    }}>{glyph}</button>
+  );
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 44px 8px 14px', borderBottom: '1px solid var(--border-1)',
+      background: 'var(--bg-surface)', flexShrink: 0,
+      position: 'relative', zIndex: 20, // own stacking layer above the Leaflet inset
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        {navBtn(index <= 0, onPrev, '◀')}
+        {navBtn(index < 0 || index >= total - 1, onNext, '▶')}
+        {index >= 0 && <span style={{ fontSize: 12, color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' }}>{index + 1} / {total}</span>}
+      </div>
+      <PhaseStepper phases={phases} current={phaseName} />
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <CCDropdown label="Siblings" items={siblings} onPick={onPick} />
+        <CCDropdown label="Nearby" items={nearby} onPick={onPick} />
+        <CCDropdown label="Recent" items={recents} onPick={onPick} />
+        {onEdit && <button onClick={() => onEdit(woId)} style={ccBtnStyle()}>Edit</button>}
+        <button onClick={() => onAction && onAction('openFolder')} style={ccBtnStyle()}>Folder</button>
+        {canCapture && <button onClick={() => onAction && onAction('capture')} style={ccBtnStyle('var(--accent)')}>Capture</button>}
+      </div>
+    </div>
+  );
+}
+
+// Ctrl/Cmd+K quick-jump palette. Fuzzy match on WO#, address, city; Enter or
+// click opens the command center for the match. Distinct from the header search
+// (which filters the list in place) -- this jumps without changing the list.
+function QuickJump({ open, orders, onClose, onPick }) {
+  const [q, setQ] = React.useState('');
+  const inputRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    setQ('');
+    const t = setTimeout(() => { if (inputRef.current) inputRef.current.focus(); }, 0);
+    return () => clearTimeout(t);
+  }, [open]);
+  if (!open) return null;
+  const query = q.trim().toLowerCase();
+  const results = query ? (orders || []).filter(o => !o.deleted).filter(o => {
+    const { addr, city } = splitAddress(o);
+    return String(o.id).toLowerCase().includes(query)
+      || (addr || '').toLowerCase().includes(query)
+      || (city || '').toLowerCase().includes(query);
+  }).slice(0, 8) : [];
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 500,
+      display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: '12vh',
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 520, maxWidth: '92vw', background: 'var(--bg-surface)',
+        border: '1px solid var(--border-1)', borderRadius: 12,
+        boxShadow: '0 24px 60px rgba(0,0,0,0.5)', overflow: 'hidden',
+      }}>
+        <input
+          ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') onClose();
+            else if (e.key === 'Enter' && results[0]) onPick(results[0].id);
+          }}
+          placeholder="Jump to work order — number, address, city"
+          style={{
+            width: '100%', boxSizing: 'border-box', padding: '14px 16px',
+            border: 'none', borderBottom: '1px solid var(--border-1)',
+            background: 'transparent', color: 'var(--text-1)', fontFamily: 'inherit',
+            fontSize: 15, outline: 'none',
+          }}
+        />
+        <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+          {results.map(o => {
+            const { addr, city } = splitAddress(o);
+            return (
+              <div key={o.id} onClick={() => onPick(o.id)} style={{
+                padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid var(--border-2)',
+                display: 'flex', gap: 10, alignItems: 'baseline',
+              }}>
+                <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
+                <span style={{ color: 'var(--text-2)', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {addr}{city ? ', ' + city : ''}
+                </span>
+              </div>
+            );
+          })}
+          {query && results.length === 0 && (
+            <div style={{ padding: '14px 16px', color: 'var(--text-3)', fontSize: 13 }}>No matches.</div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -967,7 +1117,7 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
           <input style={fieldInputStyle} value={form.propertyId} onChange={set('propertyId')} />
         </FormField>
 
-        <FormField label="PM" span={1}>
+        <FormField label="Client" span={1}>
           <select style={fieldInputStyle} value={form.pm} onChange={set('pm')}>
             {pms.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
           </select>
@@ -1479,7 +1629,25 @@ export function WOContextMenu({
 // (HeaderChips). Sidebar now hosts only the LIST-style elements that need
 // persistent vertical space: Saved views (presets) and Inboxes. Rendered only
 // on the Work Orders module; non-WO modules collapse the column to 0 (see App).
-function Sidebar({ activeView, onSelectView, presets, inboxes, onRenamePreset, onDeletePreset, onRenameInbox, onDeleteInbox, onAddInbox }) {
+function ClientSBRow({ label, color, selected, onClick }) {
+  return (
+    <div onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+      background: selected ? 'var(--bg-row-sel)' : 'transparent',
+      color: selected ? 'var(--text-1)' : 'var(--text-2)',
+      fontWeight: selected ? 600 : 400,
+    }}>
+      <span style={{ width: 8, height: 8, borderRadius: 4, flexShrink: 0,
+        background: color || 'var(--text-3)' }} />
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+    </div>
+  );
+}
+
+function Sidebar({ activeView, onSelectView, clients, presets, inboxes, onRenamePreset, onDeletePreset, onRenameInbox, onDeleteInbox, onAddInbox }) {
+  const av = activeView || '';
+  const onClient = av.startsWith('cl:');
   return (
     <aside style={{
       width: 200, flexShrink: 0, boxSizing: 'border-box',
@@ -1491,6 +1659,22 @@ function Sidebar({ activeView, onSelectView, presets, inboxes, onRenamePreset, o
       minHeight: 0,
       overflowY: 'auto',
     }}>
+      {/* Clients: Gmail-style inbox per client (o.pm). "All" = no client filter. */}
+      <div style={{ marginBottom: 4, padding: '0 10px', fontSize: 12, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.02em' }}>
+        Clients
+      </div>
+      <ClientSBRow label="All" color="var(--accent)" selected={!onClient} onClick={() => onSelectView('active')} />
+      {(clients || []).map(c => (
+        <ClientSBRow
+          key={c.name}
+          label={c.fullName && c.fullName !== c.name ? c.name + ' · ' + c.fullName : c.name}
+          color={c.color}
+          selected={av === 'cl:' + c.name}
+          onClick={() => onSelectView('cl:' + c.name)}
+        />
+      ))}
+
+      <div style={{ marginTop: 16 }} />
       {presets.length > 0 && (
         <div style={{ marginBottom: 4, padding: '0 10px', fontSize: 12, color: 'var(--text-3)', fontWeight: 600, letterSpacing: '0.02em' }}>
           Saved views
@@ -1869,82 +2053,9 @@ const TT_WOS = {
 // more than one entry), a "+N" chip reveals their names + numbers on hover.
 // DetailPane + note/phone/overflow cluster carved out to ./detail.jsx.
 
-/* ---------- landing (right-pane variant) ---------- */
-function Landing({ alerts = [], onSelectWO }) {
-  return (
-    <section style={{ minWidth: 0, minHeight: 0, height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-canvas)' }}>
-      <div style={{
-        padding: '36px 40px 24px',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '1px solid var(--border-1)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <GambleMark size={48} />
-          <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1 }}>
-            <div style={{
-              fontFamily: "'Bricolage Grotesque', 'IBM Plex Sans', sans-serif",
-              fontWeight: 700, fontSize: 28, letterSpacing: '-0.025em',
-            }}>Trade Tracker</div>
-            <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>by Gamble</div>
-          </div>
-        </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
-            {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 2 }}>Welcome back</div>
-        </div>
-      </div>
-
-      <div style={{ padding: '24px 40px', flex: 1, minHeight: 0, overflow: 'auto' }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 14 }}>
-          <div style={{ fontSize: 20, fontWeight: 600 }}>Needs your attention</div>
-          <div style={{ fontSize: 13, color: 'var(--text-2)' }}>{alerts.length} {alerts.length === 1 ? 'item' : 'items'}</div>
-        </div>
-        {alerts.length === 0 ? (
-          <div style={{ fontSize: 13, color: 'var(--text-3)', padding: '20px 0' }}>
-            Nothing flagged. Thresholds are configurable in Settings.
-          </div>
-        ) : (
-          <>
-            {alerts.map((a, i) => <AlertCard key={a.wo || ('idx-' + i)} {...a} onClick={() => onSelectWO(a.wo)} />)}
-            <div style={{ marginTop: 18, fontSize: 12, color: 'var(--text-3)' }}>
-              Thresholds for these alerts are configurable in Settings.
-            </div>
-          </>
-        )}
-      </div>
-
-    </section>
-  );
-}
-
-function AlertCard({ kind, wo, addr, blurb, onClick }) {
-  const color =
-    kind === 'emergency' ? 'var(--flag-emergency)' :
-    kind === 'stale'     ? 'oklch(60% 0.13 50)' :
-    kind === 'parts'     ? 'oklch(60% 0.13 280)' :
-                           'oklch(58% 0.12 145)';
-  return (
-    <div onClick={onClick} style={{
-      display: 'flex', gap: 12,
-      padding: '12px 14px', marginBottom: 8,
-      border: '1px solid var(--border-1)', borderRadius: 8,
-      background: 'var(--bg-surface)', cursor: 'pointer',
-    }}>
-      <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0, marginTop: 7 }} />
-      <div style={{ flex: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{wo}</span>
-          <span style={{ fontSize: 15, fontWeight: 600 }}>{addr}</span>
-        </div>
-        <div style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 2 }}>{blurb}</div>
-      </div>
-      <span style={{ color: 'var(--text-3)', fontSize: 16, alignSelf: 'center' }}>{'→'}</span>
-    </div>
-  );
-}
-
+/* ---------- (retired) right-pane Attention/Landing view ----------
+   Removed: the attention tri-pane is replaced by the header bell notifications
+   dropdown. The Overview module keeps its own FSAlertCard summary. */
 /* ---------- settings drawer ---------- */
 // TT_SECTIONS carved out to ./settings.jsx.
 
@@ -2455,10 +2566,11 @@ function CaptureBanner({ status }) {
   const pct = hasCount ? Math.min(100, Math.round(((done || 0) / total) * 100)) : 0;
   return (
     <div style={{
-      // Fixed top strip above modal backdrops (zIndex 400): an in-flow banner was
-      // painted over by the import-review modal that opens right after capture,
-      // making capture progress invisible. 500 keeps it under toasts (99999).
-      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 500,
+      // In-flow strip in the top banner column (under UpdateBanner). It no longer
+      // needs to be fixed/overlaid: capture results now land in the notification
+      // bell instead of auto-popping a modal over the banner, so nothing paints
+      // over it. In-flow = it pushes content down instead of covering the header.
+      flexShrink: 0,
       background: 'var(--accent, #6a92c4)', color: 'var(--accent-fg, #fff)',
       fontSize: 13, fontWeight: 500,
     }}>
@@ -2604,108 +2716,7 @@ function ToastHost({ toasts }) {
 // stable ids onto existing note cards. (o.notes is the "More Information" field
 // as of change8 and is no longer folded into the note stream.) Idempotent --
 // safe to run more than once.
-function migrateOrders(orders, storedPhases) {
-  if (!Array.isArray(orders)) return orders;
-  // Build a lookup of phase-name -> complete-flag from stored phases so the
-  // change11 tab migration can determine which active WOs should flip to
-  // tab='complete'. Stored phases pre-migration carry the legacy
-  // `complete: true` flag on wrap/done/billing; phaseForOrder uses statuses
-  // to bucket each WO into a named phase.
-  const phaseList = Array.isArray(storedPhases) && storedPhases.length ? storedPhases : DEFAULT_PHASES;
-  const completeNames = new Set(phaseList.filter(p => p && p.complete === true).map(p => p.name));
-  return orders.map(o => {
-    const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
-
-    // 0) Ensure every existing card has a stable id (guards against id-less cards
-    //    from old imports; id-less keys caused React to reuse wrong NoteCard instances).
-    for (let i = 0; i < cards.length; i++) {
-      if (!cards[i].id) {
-        cards[i] = { ...cards[i], id: 'n_mig_fix_' + (o.id || 'x') + '_' + i };
-      }
-    }
-
-    // 1) o.notes is now the "More Information" (Misc) field (change8); it is no
-    //    longer folded into the note stream. Preserved as-is on the order.
-
-    // 2) Priority field -> archive card (skip if already imported)
-    const prio = typeof o.priority === 'string' ? o.priority.trim() : '';
-    if (prio) {
-      const already = cards.some(c => c && typeof c.body === 'string' && c.body.startsWith('Imported priority:'));
-      if (!already) {
-        cards.push({
-          id: 'n_mig_prio_' + (o.id || Date.now()),
-          ts: Date.now(),
-          type: 'Note',
-          body: 'Imported priority: ' + prio,
-          pinned: false,
-          edited: false,
-        });
-      }
-    }
-
-    // 3) Strip priority + dead workbook-sync fields (syncStatus, bidItems);
-    //    carry everything else through.
-    const { priority: _drop, syncStatus: _drop2, bidItems: _drop3, ...rest } = o;
-    const next = { ...rest, noteCards: cards };
-
-    // change11: tab model rework.
-    // - tab='paid' or 'invoiced' (deprecated) -> 'sent' (Invoices module).
-    // - tab='active' WOs whose phase was complete-marked -> tab='complete'.
-    // - deleted WOs without a status -> 'Cancelled' (so Trash row reads right).
-    if (next.tab === 'paid' || next.tab === 'invoiced') {
-      next.tab = 'sent';
-    } else if ((next.tab || 'active') === 'active') {
-      const phaseName = phaseForOrder(next, phaseList);
-      if (completeNames.has(phaseName)) {
-        next.tab = 'complete';
-        // Auto-unschedule per change11 rule: complete WOs leave the itinerary.
-        if (next.schedule) delete next.schedule;
-      }
-    }
-    if (next.deleted && !next.status) next.status = 'Cancelled';
-    return next;
-  });
-}
-
-// change11: migrate stored phases, statuses, statusColors in sync with
-// migrateOrders. Returns a patch object suitable for updateData(...).
-function migrateSettingsForChange11(stored) {
-  const out = {};
-
-  // Phases: strip the deprecated complete flag, ensure 'Bid Approved - Complete'
-  // sits at the end of 'In progress' (move from approved if present).
-  const inPhases = Array.isArray(stored && stored.phases) ? stored.phases : DEFAULT_PHASES;
-  const phases = inPhases.map(p => {
-    if (!p) return p;
-    const { complete: _drop, ...rest } = p;
-    return { ...rest, statuses: Array.isArray(p.statuses) ? p.statuses.slice() : [] };
-  });
-  const approvedP = phases.find(p => p.id === 'approved');
-  const progressP = phases.find(p => p.id === 'progress');
-  if (approvedP && approvedP.statuses.includes('Bid Approved - Complete')) {
-    approvedP.statuses = approvedP.statuses.filter(s => s !== 'Bid Approved - Complete');
-  }
-  if (progressP && !progressP.statuses.includes('Bid Approved - Complete')) {
-    progressP.statuses = [...progressP.statuses, 'Bid Approved - Complete'];
-  }
-  out.phases = phases;
-
-  // Statuses: ensure Cancelled + 'Complete - Pending Approval' both present.
-  const inStatuses = Array.isArray(stored && stored.statuses) ? stored.statuses : DEFAULT_STATUSES;
-  let nextStatuses = inStatuses.slice();
-  if (!nextStatuses.includes('Cancelled')) nextStatuses.push('Cancelled');
-  if (!nextStatuses.includes('Complete - Pending Approval')) nextStatuses.push('Complete - Pending Approval');
-  out.statuses = nextStatuses;
-
-  // Status colors: set defaults if not already mapped.
-  const inColors = (stored && stored.statusColors) || {};
-  let colorsPatch = null;
-  if (!inColors['Cancelled']) colorsPatch = { ...(colorsPatch || inColors), Cancelled: '#6b7280' };
-  if (!inColors['Complete - Pending Approval']) colorsPatch = { ...(colorsPatch || inColors), 'Complete - Pending Approval': '#fbbf24' };
-  if (colorsPatch) out.statusColors = colorsPatch;
-
-  return out;
-}
+// migrateOrders / migrateSettingsForChange11 moved to ./orders-logic.js (imported at top).
 
 // ── Service-item Library module ──────────────────────────────────────────────
 // Generic source-of-truth library. Tabs are SOURCE-scoped (General / AMH), not
@@ -2978,12 +2989,33 @@ const WO_TAB_VIEWS = [
 // (Add WO, attention badge, kebab menu for Export/New inbox/Modules/Settings).
 // Lifted out of Sidebar in change10 slice 3.5.
 const HeaderActionsContext = React.createContext({
-  onAddWO: () => {}, onOpenAttention: () => {}, attentionCount: 0,
+  onAddWO: () => {}, notifications: [], onNotifClick: () => {}, onDismissNotif: () => {},
   onExportCsv: () => {}, onAddInbox: () => {}, onOpenSettings: () => {},
 });
+// Notification dot color by kind.
+function notifDot(kind) {
+  switch (kind) {
+    case 'emergency': case 'overdue': return 'var(--flag-emergency)';
+    case 'stale':   return 'oklch(60% 0.13 50)';
+    case 'parts':   return 'oklch(60% 0.13 280)';
+    case 'capture': return 'var(--accent)';
+    case 'update':  return 'oklch(65% 0.15 150)';
+    default:        return 'var(--text-3)';
+  }
+}
+
 export function HeaderChips() {
   const a = React.useContext(HeaderActionsContext);
   const [menuOpen, setMenuOpen] = React.useState(false);
+  const [bellOpen, setBellOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!bellOpen) return;
+    const close = () => setBellOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') setBellOpen(false); };
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [bellOpen]);
   React.useEffect(() => {
     if (!menuOpen) return;
     const close = () => setMenuOpen(false);
@@ -3010,13 +3042,52 @@ export function HeaderChips() {
       }} title="Add work order">
         <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> Add WO
       </button>
-      {a.attentionCount > 0 && (
-        <button onClick={a.onOpenAttention} style={{
-          ...chipBtn, color: 'var(--flag-emergency)', borderColor: 'var(--flag-emergency)',
-        }} title="Open Needs attention">
-          ✦ {a.attentionCount}
+      <div style={{ position: 'relative' }}>
+        <button onClick={(e) => { e.stopPropagation(); setBellOpen(o => !o); }} style={{
+          ...iconBtn, position: 'relative',
+          ...(a.notifications.length ? { borderColor: 'var(--flag-emergency)', color: 'var(--flag-emergency)' } : null),
+        }} title="Notifications">
+          {'◉'}
+          {a.notifications.length > 0 && (
+            <span style={{
+              position: 'absolute', top: -5, right: -5, minWidth: 16, height: 16, padding: '0 4px',
+              borderRadius: 8, background: 'var(--flag-emergency)', color: '#fff',
+              fontSize: 10, fontWeight: 700, lineHeight: '16px', textAlign: 'center',
+            }}>{a.notifications.length}</span>
+          )}
         </button>
-      )}
+        {bellOpen && (
+          <div onClick={(e) => e.stopPropagation()} style={{
+            position: 'absolute', top: '100%', right: 0, marginTop: 6,
+            width: 340, maxHeight: 420, overflowY: 'auto',
+            background: 'var(--bg-surface)', border: '1px solid var(--border-2)',
+            borderRadius: 10, boxShadow: '0 16px 40px rgba(0,0,0,0.5)', padding: '6px 0', zIndex: 60,
+          }}>
+            <div style={{ padding: '6px 14px 8px', fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+              Notifications
+            </div>
+            {a.notifications.length === 0 ? (
+              <div style={{ padding: '14px', fontSize: 13, color: 'var(--text-3)', fontStyle: 'italic' }}>Nothing to report.</div>
+            ) : a.notifications.map(n => (
+              <div key={n.id}
+                onClick={() => { setBellOpen(false); a.onNotifClick(n); }}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 12px 8px 14px', cursor: 'pointer', borderTop: '1px solid var(--border-1)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
+                <span style={{ width: 7, height: 7, borderRadius: 4, marginTop: 5, flexShrink: 0, background: notifDot(n.kind) }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.title}</div>
+                  {n.sub && <div style={{ fontSize: 12, color: 'var(--text-2)', marginTop: 1 }}>{n.sub}</div>}
+                </div>
+                {n.id.startsWith('ev-') && a.onDismissNotif && (
+                  <span onClick={(e) => { e.stopPropagation(); a.onDismissNotif(n.id); }}
+                    title="Dismiss" style={{ color: 'var(--text-3)', cursor: 'pointer', padding: '0 4px', fontSize: 14, lineHeight: 1 }}>{'×'}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       <button onClick={a.onOpenSettings} style={iconBtn} title="Settings">{'⚙'}</button>
       <div style={{ position: 'relative' }}>
         <button onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o); }} style={iconBtn} title="More">{'⋯'}</button>
@@ -3308,7 +3379,7 @@ function ImportInspectModal({ state, orders, onClose, onWoAction, onSelectWO }) 
               <tr style={{ background: 'var(--bg-surface)', color: 'var(--text-3)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
                 <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>WO #</th>
                 <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>Address</th>
-                <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>PM</th>
+                <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>Client</th>
                 <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>Type</th>
                 <th style={{ padding: '8px 10px', textAlign: 'left', borderBottom: '1px solid var(--border-1)' }}>Tech</th>
                 <th style={{ padding: '8px 10px', textAlign: 'center', borderBottom: '1px solid var(--border-1)' }}>Flags</th>
@@ -3399,10 +3470,34 @@ function ImportInspectModal({ state, orders, onClose, onWoAction, onSelectWO }) 
 
 function App() {
   const [selectedWO, setSelectedWO] = React.useState(null);
+  // coOpen separates "command center is open" from "row is highlighted in the
+  // list". Needed for the keyboard contract: arrow keys walk/highlight the list
+  // (selectedWO) without popping the overlay; Enter/click opens (coOpen). While
+  // open, arrows restack the overlay to the newly highlighted WO. Closing keeps
+  // the highlight so arrow-walking continues. selectedWO alone can't encode both.
+  const [coOpen, setCoOpen] = React.useState(false);
+  // Ordered list of WO ids currently visible in the list pane (post
+  // filter/sort/group/collapse). Reported up by ListPane so the overlay's
+  // prev/next walk the exact same order the user sees -- no recompute/drift.
+  const [visibleOrder, setVisibleOrder] = React.useState([]);
+  const [quickJumpOpen, setQuickJumpOpen] = React.useState(false);
   const [recentWOs, setRecentWOs] = React.useState([]);
   const pushRecent = React.useCallback((id) => {
     if (!id) return;
     setRecentWOs(prev => [id, ...prev.filter(x => x !== id)].slice(0, 5));
+  }, []);
+  // Open the command center for a WO (click / Enter / external jump). highlightWO
+  // only moves the list selection (arrow keys) -- it restacks an already-open
+  // overlay but never opens a closed one.
+  const openWO = React.useCallback((id) => { if (!id) return; setSelectedWO(id); pushRecent(id); setCoOpen(true); }, [pushRecent]);
+  const highlightWO = React.useCallback((id) => { if (!id) return; setSelectedWO(id); pushRecent(id); }, [pushRecent]);
+  // Ctrl/Cmd+K toggles the quick-jump palette anywhere in the app.
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); setQuickJumpOpen(o => !o); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
   const [currentView, setCurrentView] = React.useState('active');
   // Slice 5 (change10): top-level module + launcher overlay + invoice editor.
@@ -3460,6 +3555,9 @@ function App() {
   // Maps selected WO lifted to App so context-menu "Jump to Map" from any
   // module can pre-select a WO before navigating to Maps. Resets on reload.
   const [mapsSelected, setMapsSelected] = React.useState(null);
+  // Lifted so the maps job-type filter persists across module switches (resets on
+  // reload, like itinTech). { 'P'|'H'|'PH': true } = hidden.
+  const [mapsHiddenTypes, setMapsHiddenTypes] = React.useState({});
   // Shared route stops (ordered WO ids), lifted from MapsModule so Itinerary
   // can read/write the same route. Session-local; does not persist.
   const [routeStops, setRouteStops] = React.useState([]);
@@ -3626,6 +3724,17 @@ function App() {
   const setCustomTheme = React.useCallback((v) => updateSettings({ customTheme: v && typeof v === 'object' ? v : {} }), [updateSettings]);
   const pms   = (data?.pms   && data.pms.length)   ? data.pms   : DEFAULT_PMS.slice();
   const setPms   = React.useCallback((v) => updateData({ pms: v }),   [updateData]);
+  // B2: renaming a Client CODE cascades to every WO's o.pm so no WO orphans
+  // (requirement #2). Atomic single write of pms + orders. NOTE: AMH/MSR codes
+  // are re-emitted by the scraper, so renaming those codes orphans FUTURE imports
+  // -- the editor steers users to edit the full name, not the code, for those.
+  const renameClientCode = React.useCallback((oldCode, newCode) => {
+    const o = (oldCode || '').trim(), n = (newCode || '').trim();
+    if (!n || o === n) return;
+    const nextPms    = pms.map(p => p.name === o ? { ...p, name: n } : p);
+    const nextOrders = orders.map(w => w.pm === o ? { ...w, pm: n } : w);
+    updateData({ pms: nextPms, orders: nextOrders });
+  }, [pms, orders, updateData]);
   const types = ((data?.types && data.types.length) ? data.types : DEFAULT_TYPES.slice())
     .filter(t => String(t).toLowerCase() !== 'other');
   const setTypes = React.useCallback((v) => updateData({ types: v }), [updateData]);
@@ -3734,135 +3843,12 @@ function App() {
     if (loading || !settings) return;
     if (settings.change11Reconciled_v6 === '1') return;
     const storedPhases = (data && Array.isArray(data.phases)) ? data.phases : DEFAULT_PHASES;
-    const LEGACY_COMPLETE_IDS = new Set(['wrap', 'done', 'billing']);
-    const completePhaseNames = new Set();
-    for (const p of storedPhases) {
-      if (!p) continue;
-      if (p.complete === true) completePhaseNames.add(p.name);
-      if (p.id && LEGACY_COMPLETE_IDS.has(p.id)) completePhaseNames.add(p.name);
-    }
-    // v4.0.1: uses central narrower helper (bid submitted + complete, not
-    // just "job complete"). Earlier reconciler version mis-flipped statuses
-    // like "Job Complete - Enter Bid" that still belong on Active.
-    const isCompletionStatus = isCompletionStatusName;
-    let flipped = 0;
-    let promotedFromInvoiced = 0;
-    let hardcodedComplete = 0;
-    let hardcodedCancelled = 0;
-    let revertedFromComplete = 0;
-    const nextOrders = (orders || []).map(o => {
-      const t = (o.tab || 'active');
-      // Pass 0: deleted/trash WOs — ensure status='Cancelled' AND no lingering
-      // schedule (cancelled jobs should never appear on the itinerary). v5
-      // added the schedule clear; earlier reconciler passes only fixed status.
-      if (o.deleted) {
-        const needsStatus   = o.status !== 'Cancelled';
-        const needsUnsched  = !!o.schedule;
-        if (needsStatus || needsUnsched) {
-          hardcodedCancelled++;
-          const next = { ...o };
-          if (needsStatus) {
-            next.prevStatus = o.prevStatus || o.status || 'Open';
-            next.status = 'Cancelled';
-          }
-          if (needsUnsched) delete next.schedule;
-          const detailParts = [];
-          if (needsStatus)  detailParts.push((o.status || '') + ' → Cancelled');
-          if (needsUnsched) detailParts.push('unscheduled');
-          next.history = [...(Array.isArray(o.history) ? o.history : []),
-            { ts: Date.now(), action: 'reconciled trash (change11 v5)', detail: detailParts.join(' · ') }];
-          return next;
-        }
-        return o;
-      }
-      // Pass 1: tab='paid' or 'invoiced' (deprecated) -> 'sent'. Idempotent.
-      if (t === 'paid' || t === 'invoiced') {
-        promotedFromInvoiced++;
-        const next = { ...o, tab: 'sent' };
-        next.history = [...(Array.isArray(o.history) ? o.history : []),
-          { ts: Date.now(), action: 'auto-flipped to Sent (change11 v4)', detail: 'was tab=' + t }];
-        return next;
-      }
-      // Pass 2: Complete tab handling.
-      //
-      // v6 narrowed isCompletionStatusName so "Job Complete - Enter Bid" no
-      // longer triggers the auto-flip. Earlier passes mis-flipped WOs with
-      // that status (and similar). Detect + revert here:
-      //   - tab='complete' AND prevStatus exists
-      //   - prevStatus is NOT a completion status under the new rule
-      //   - history shows the most recent complete-related action was an
-      //     auto-flip (not a user-driven 'marked complete')
-      // If all true, revert to active + restore prevStatus.
-      //
-      // Otherwise: fix any WO on Complete whose status isn't hardcoded.
-      if (t === 'complete') {
-        const hist = Array.isArray(o.history) ? o.history : [];
-        let lastAutoIdx = -1, lastManualIdx = -1;
-        for (let i = 0; i < hist.length; i++) {
-          const a = String(hist[i].action || '').toLowerCase();
-          if (a.includes('auto-flipped to complete')) lastAutoIdx = i;
-          else if (a.includes('marked complete')) lastManualIdx = i;
-        }
-        const wasAutoFlipped = lastAutoIdx > lastManualIdx;
-        if (o.prevStatus && wasAutoFlipped && !isCompletionStatusName(o.prevStatus)) {
-          revertedFromComplete++;
-          const next = {
-            ...o, tab: 'active',
-            status: o.prevStatus,
-          };
-          delete next.prevStatus;
-          next.history = [...hist,
-            { ts: Date.now(), action: 'reconciled complete (change11 v6)', detail: 'reverted auto-flip; status: Complete - Pending Approval → ' + o.prevStatus }];
-          return next;
-        }
-        if (o.status !== 'Complete - Pending Approval') {
-          hardcodedComplete++;
-          return {
-            ...o,
-            prevStatus: o.prevStatus || o.status || 'Open',
-            status: 'Complete - Pending Approval',
-            history: [...(Array.isArray(o.history) ? o.history : []),
-              { ts: Date.now(), action: 'hardcoded status (change11 v4)', detail: (o.status || '') + ' → Complete - Pending Approval' }],
-          };
-        }
-        return o;
-      }
-      // Pass 3: active WOs whose stored phase or status signals tech-done.
-      if (t !== 'active') return o;
-      const phaseName = phaseForOrder(o, storedPhases);
-      const byPhase  = completePhaseNames.has(phaseName);
-      const byStatus = isCompletionStatus(o.status);
-      if (!byPhase && !byStatus) return o;
-      flipped++;
-      const next = {
-        ...o,
-        tab: 'complete',
-        prevStatus: o.prevStatus || o.status || 'Open',
-        status: 'Complete - Pending Approval',
-      };
-      if (next.schedule) delete next.schedule;
-      next.history = [...(Array.isArray(o.history) ? o.history : []),
-        { ts: Date.now(), action: 'auto-flipped to Complete (change11 v4)',
-          detail: 'phase=' + phaseName + ' status=' + (o.status || '') + ' → Complete - Pending Approval' }];
-      return next;
-    });
-    // Pass 4: clear expired schedules in the SAME write so we never race with
-    // the standalone auto-unschedule effect. The standalone effect is gated on
-    // change11Reconciled_v6 being set, so it stays out of the way until this
-    // pass completes.
-    const today = itinTodayStr();
-    let expiredCleared = 0;
-    const finalOrders = nextOrders.map(o => {
-      if (!o || !o.schedule || !o.schedule.date) return o;
-      if (o.schedule.date >= today) return o;
-      expiredCleared++;
-      const clone = { ...o };
-      const wasDate = clone.schedule.date;
-      delete clone.schedule;
-      clone.history = [...(Array.isArray(o.history) ? o.history : []),
-        { ts: Date.now(), action: 'auto-unscheduled (expired)', detail: 'was ' + wasDate }];
-      return clone;
-    });
+    // Pure core in ./orders-logic.js (passes 0-4 + counters). Side effects
+    // (settings patch, write, toast) stay here.
+    const {
+      orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
+      hardcodedCancelled, revertedFromComplete, expiredCleared,
+    } = reconcileChange11(orders, storedPhases);
     const patch = migrateSettingsForChange11(data || {});
     const phasesChanged   = JSON.stringify(patch.phases)   !== JSON.stringify(storedPhases);
     const statusesChanged = JSON.stringify(patch.statuses) !== JSON.stringify((data && data.statuses) || []);
@@ -3938,6 +3924,13 @@ function App() {
   const msrBannerTimer = React.useRef(null);
   // New MSR WO numbers found on a portal list page but not yet in the tracker.
   const [newMsrWos, setNewMsrWos] = React.useState(null);
+  // Notification events (capture/scraper results). Session-only; alerts + overdue
+  // are derived live (see `notifications` memo), these are the non-derivable events.
+  const [notifEvents, setNotifEvents] = React.useState([]);
+  const pushNotif = React.useCallback((ev) => {
+    setNotifEvents(prev => [{ id: 'ev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), ts: Date.now(), ...ev }, ...prev].slice(0, 30));
+  }, []);
+  const dismissNotif = React.useCallback((id) => setNotifEvents(prev => prev.filter(n => n.id !== id)), []);
   const ordersRef = React.useRef([]);
   // Keep the latest orders reachable from the one-time onFoundWos listener.
   React.useEffect(() => { ordersRef.current = orders; }, [orders]);
@@ -3998,7 +3991,10 @@ function App() {
         if (dupSkipped)      parts.push(`${dupSkipped} skipped`);
         if (parts.length) toast('Import: ' + parts.join(' · '));
         if (newBatch.length) {
-          setImportInspect({ batch: newBatch, ts: Date.now(), dupSkipped });
+          // Notification instead of an auto-popping modal (no work interruption);
+          // clicking the item opens the import-review modal on demand.
+          pushNotif({ kind: 'capture', captureType: 'import', title: newBatch.length + ' new WO' + (newBatch.length === 1 ? '' : 's') + ' captured',
+            sub: 'Click to review and add', payload: { batch: newBatch, ts: Date.now(), dupSkipped } });
         }
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
       });
@@ -4025,7 +4021,9 @@ function App() {
           if (!n || known.has(n) || seen.has(n)) continue;
           seen.add(n); fresh.push({ num: it.num, url: it.url });
         }
-        setNewMsrWos({ items: fresh, scanned: arr.length });
+        // Notification instead of auto-popping the modal; click opens the list.
+        pushNotif({ kind: 'capture', captureType: 'msr', title: fresh.length ? (fresh.length + ' new MSR WO' + (fresh.length === 1 ? '' : 's')) : 'MSR scan: no new WOs',
+          sub: fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'), payload: { items: fresh, scanned: arr.length } });
         toast(fresh.length ? (fresh.length + ' new MSR WO(s) found') : 'No new MSR WOs on this list');
       });
     }
@@ -4370,6 +4368,37 @@ function App() {
   const trashOrders    = React.useMemo(() => orders.filter(o => o.deleted),                                      [orders]);
   const alerts       = React.useMemo(() => loading ? [] : computeAlerts(orders, alertThresholds),              [orders, loading, alertThresholds]);
 
+  // Unified notification list for the header bell dropdown. Derived (live):
+  // schedule-overdue + the stale/emergency/parts alerts + an app-update item.
+  // Session events (capture results) appended. Replaces the old attention view.
+  const notifications = React.useMemo(() => {
+    const out = [];
+    if (!loading) {
+      for (const o of orders) {
+        if (o.deleted || (o.tab && o.tab !== 'active')) continue;
+        if (o.schedule && o.schedule.date && isOverdueSched(o.schedule.date, o.schedule.start)) {
+          out.push({ id: 'overdue-' + o.id, kind: 'overdue', title: 'Overdue · ' + o.id,
+            sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''), wo: o.id });
+        }
+      }
+    }
+    for (const a of alerts) out.push({ id: 'alert-' + (a.wo || a.kind), kind: a.kind, title: (a.wo || a.kind), sub: a.blurb, wo: a.wo });
+    if (updateState && (updateState.status === 'available' || updateState.status === 'downloaded')) {
+      out.push({ id: 'update', kind: 'update', title: 'App update available', sub: updateState.status === 'downloaded' ? 'Ready to install' : 'Downloading…', update: true });
+    }
+    for (const e of notifEvents) out.push(e);
+    return out;
+  }, [orders, alerts, notifEvents, updateState, overdueTick, loading]);
+  // Click a notification: WO items open the command center; capture items open
+  // their review modal; the update item installs.
+  const onNotifClick = React.useCallback((n) => {
+    if (!n) return;
+    if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
+    else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
+    else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
+    else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
+  }, [openWO]);
+
   // Push tray state whenever relevant values change.
   React.useEffect(() => {
     if (!window.tray || !window.tray.setState) return;
@@ -4539,8 +4568,14 @@ function App() {
   const activePreset = activePresetId ? (presets.find(p => p.id === activePresetId) || null) : null;
   const activeInboxId = (typeof currentView === 'string' && currentView.startsWith('ib:')) ? currentView.slice(3) : null;
   const activeInbox = activeInboxId ? (inboxes.find(b => b.id === activeInboxId) || null) : null;
+  // Client inbox (Gmail-style sidebar): 'cl:<name>' pins the active view to that
+  // client (o.pm) while leaving the other pills (type/status/tech) and search
+  // editable -- so it is NOT treated as a locked preset.
+  const activeClient = (typeof currentView === 'string' && currentView.startsWith('cl:')) ? currentView.slice(3) : null;
   const effectiveQuery   = (activePreset || activeInbox) ? (activePreset ? (activePreset.query || '') : '') : query;
-  const effectiveFilters = (activePreset || activeInbox) ? (activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : { pm: '', type: '', status: '', tech: '' }) : filters;
+  const effectiveFilters = activeClient
+    ? { ...filters, pm: activeClient }
+    : ((activePreset || activeInbox) ? (activePreset ? (activePreset.filters || { pm: '', type: '', status: '', tech: '' }) : { pm: '', type: '', status: '', tech: '' }) : filters);
   const effectiveSort    = activeInbox ? { key: '', dir: 'asc' } : (activePreset ? (activePreset.sort || currentSort) : currentSort);
 
   let viewData;
@@ -4559,6 +4594,8 @@ function App() {
     };
   } else if (activePreset) {
     viewData = { ...VIEW_BUILDERS.active(), title: activePreset.name || 'Saved view' };
+  } else if (activeClient) {
+    viewData = { ...VIEW_BUILDERS.active(), title: activeClient };
   } else if (VIEW_BUILDERS[currentView]) {
     viewData = VIEW_BUILDERS[currentView]();
   } else {
@@ -4607,14 +4644,6 @@ function App() {
     });
   }, [viewData]);
 
-  const counts = loading
-    ? { attention: '·', active: '·', complete: '·', sent: '·' }
-    : {
-        attention: alerts.length,
-        active:    activeOrders.length,
-        complete:  completeOrders.length,
-        sent:      sentOrders.length,
-      };
 
   const selectedRecord = React.useMemo(
     () => selectedWO ? orders.find(o => o.id === selectedWO) : null,
@@ -4626,13 +4655,7 @@ function App() {
   // and emit a clear history entry. Active WOs cannot be invoiced anymore — the
   // detail-pane primary action on Active is "Mark Complete" instead.
   const doSendToInvoice = React.useCallback((id) => {
-    updateOrder(id, cur => {
-      const next = { ...cur, tab: 'sent' };
-      if (next.schedule) delete next.schedule;
-      next.history = [...(Array.isArray(cur.history) ? cur.history : []),
-        { ts: Date.now(), action: 'sent to billing queue', detail: '' }];
-      return next;
-    });
+    updateOrder(id, applySendToInvoice);
   }, [updateOrder]);
 
   // Sending with no bid no longer hard-blocks: prompt to enter a bid now or
@@ -4654,19 +4677,7 @@ function App() {
   // (mirrors Trash's hardcoded Cancelled). Saves prior status into prevStatus
   // so Reopen can revert. Auto-unschedule (Complete WOs leave the itinerary).
   const doMarkComplete = React.useCallback((id) => {
-    updateOrder(id, cur => {
-      const prior = cur.status || 'Open';
-      const next = {
-        ...cur,
-        tab: 'complete',
-        prevStatus: cur.prevStatus || prior,
-        status: 'Complete - Pending Approval',
-      };
-      if (next.schedule) delete next.schedule;
-      next.history = [...(Array.isArray(cur.history) ? cur.history : []),
-        { ts: Date.now(), action: 'marked complete', detail: 'status: ' + prior + ' → Complete - Pending Approval' }];
-      return next;
-    });
+    updateOrder(id, applyMarkComplete);
   }, [updateOrder]);
 
   // Slice 2 (#5): Mark Complete reuses the Send-to-Invoice bid prompt — if the
@@ -4683,29 +4694,7 @@ function App() {
   // - complete → active: restore prevStatus, clear the hardcoded Pending Approval.
   // - sent → complete: re-hardcode 'Complete - Pending Approval' (keep prevStatus).
   const reopen = React.useCallback((id) => {
-    updateOrder(id, cur => {
-      const from = cur.tab || 'active';
-      const next = { ...cur };
-      if (from === 'complete') {
-        next.tab = 'active';
-        const restored = cur.prevStatus || 'Open';
-        next.status = restored;
-        delete next.prevStatus;
-        next.history = [...(Array.isArray(cur.history) ? cur.history : []),
-          { ts: Date.now(), action: 'reopened', detail: 'complete → active, status: ' + (cur.status || '') + ' → ' + restored }];
-      } else if (from === 'sent') {
-        next.tab = 'complete';
-        next.prevStatus = cur.prevStatus || cur.status || 'Open';
-        next.status = 'Complete - Pending Approval';
-        next.history = [...(Array.isArray(cur.history) ? cur.history : []),
-          { ts: Date.now(), action: 'reopened', detail: 'sent → complete' }];
-      } else {
-        next.tab = 'active';
-        next.history = [...(Array.isArray(cur.history) ? cur.history : []),
-          { ts: Date.now(), action: 'reopened', detail: from + ' → active' }];
-      }
-      return next;
-    });
+    updateOrder(id, applyReopen);
   }, [updateOrder]);
 
   // Invoice editor (slice 3). Reads the service library fresh from storage so
@@ -4755,14 +4744,28 @@ function App() {
       if (schedule === null) delete next.schedule;
       else next.schedule = schedule;
       if (tech) next.tech = tech;
+      const hist = Array.isArray(o.history) ? o.history : [];
+      // G: auto-status on schedule. First schedule (no prior 'scheduled' history)
+      // -> the `schedule`-tagged status; a re-schedule -> the `returnschedule`-
+      // tagged status. Only if such a status is configured and differs from the
+      // current one. "Scheduled before" is derived from history (no counter); a
+      // phase change to In Progress leaves that history intact, so the next
+      // schedule is correctly treated as a return trip.
+      let statusNote = '';
+      if (schedule !== null) {
+        const scheduledBefore = hist.some(h => h && h.action === 'scheduled');
+        const wantTag = scheduledBefore ? 'returnschedule' : 'schedule';
+        const target = Object.keys(statusTags).find(s => statusTags[s] === wantTag);
+        if (target && o.status !== target) { next.status = target; statusNote = ' · status → ' + target; }
+      }
       const detail = schedule
-        ? (schedule.date + ' ' + schedule.start + ((tech || o.tech) ? ' · ' + (tech || o.tech) : ''))
+        ? (schedule.date + ' ' + schedule.start + ((tech || o.tech) ? ' · ' + (tech || o.tech) : '') + statusNote)
         : '';
-      next.history = [...(Array.isArray(o.history) ? o.history : []),
+      next.history = [...hist,
         { ts: Date.now(), action: schedule === null ? 'unscheduled' : 'scheduled', detail }];
       return next;
     });
-  }, [updateOrder]);
+  }, [updateOrder, statusTags]);
 
   // Commit the staged draft route to a tech's day (the "Send to Itinerary"
   // action in the Maps route panel). Route order -> sequential timeline slots.
@@ -4846,7 +4849,7 @@ function App() {
     const cols = [
       ['WO#',          o => o.id],
       ['Property ID',  o => o.propertyId || ''],
-      ['PM',           o => o.pm || ''],
+      ['Client',       o => o.pm || ''],
       ['Type',         o => o.type || ''],
       ['Address',      o => o.address || ''],
       ['City',         o => o.city || ''],
@@ -4990,6 +4993,15 @@ function App() {
       ...cur, notes: text,
       history: [...(Array.isArray(cur.history) ? cur.history : []),
                 { ts: Date.now(), action: 'more info edited', detail: '' }],
+    }));
+  }, [updateOrder]);
+
+  // B3: change a WO's Client (o.pm = code) inline from the command-center header.
+  const setClient = React.useCallback((id, code) => {
+    updateOrder(id, cur => ({
+      ...cur, pm: code,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action: 'client set to ' + code, detail: '' }],
     }));
   }, [updateOrder]);
 
@@ -5178,7 +5190,12 @@ function App() {
       // Surface new AND updated WOs (plus any warnings) in the review modal so
       // WOs flagged "with issue" can be examined, not just counted in the toast.
       const batch = [...newBatch, ...updatedBatch];
-      if (batch.length) setImportInspect({ batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated });
+      // Notification instead of an auto-popping modal so the scrape doesn't
+      // interrupt; click the item to open the review modal.
+      if (batch.length) pushNotif({ kind: 'capture', captureType: 'import',
+        title: 'AMH capture · ' + added + ' new, ' + updated + ' updated',
+        sub: 'Click to review' + (warned ? (' · ' + warned + ' warnings') : ''),
+        payload: { batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated } });
       toast('Captured ' + updated + ' updated, ' + added + ' new'
         + (warned ? (', ' + warned + ' with warnings') : '')
         + (trashedSkipped ? (', ' + trashedSkipped + ' cancelled skipped') : '')
@@ -5451,13 +5468,10 @@ function App() {
     root.style.colorScheme = theme === 'light' ? 'light' : 'dark';
   }, [theme, themeVars]);
 
+  // Attention view retired: notifications now live in the header bell dropdown.
+  // rightPane only carries the Settings popup content.
   let rightPane;
-  if (currentView === 'attention') {
-    rightPane = <Landing
-      alerts={alerts}
-      onSelectWO={(wo) => { setSelectedWO(wo); pushRecent(wo); setCurrentView('active'); }}
-    />;
-  } else if (currentView === 'settings') {
+  if (currentView === 'settings') {
     rightPane = <SettingsDrawer
       toast={toast}
       theme={theme}
@@ -5505,6 +5519,7 @@ function App() {
       initialSection={pendingSettingsSection || 'appearance'}
       pms={pms}
       setPms={setPms}
+      onRenameClientCode={renameClientCode}
       types={types}
       setTypes={setTypes}
       techs={techs}
@@ -5519,32 +5534,111 @@ function App() {
       onCheckUpdate={checkForUpdates}
       onInstallUpdate={() => window.updater && window.updater.install && window.updater.install()}
     />;
-  } else {
-    rightPane = <DetailPane
-      data={detailData}
-      onSendToInvoice={sendToInvoice}
-      onMarkComplete={markComplete}
-      onReopen={reopen}
-      onAddNote={addNote}
-      onEditNote={editNote}
-      onDeleteNote={deleteNote}
-      onPinNote={togglePinNote}
-      onSetMisc={setMisc}
-      onEdit={(id) => setModal({ kind: 'edit', id })}
-      onEditInvoice={openInvoiceEditor}
-      onAction={detailAction}
-      statuses={statuses}
-      moreInfoColor={moreInfoColor}
-      types={types}
-      techs={techs}
-      pms={pms}
-      inboxes={inboxes}
-      onWoAction={woAction}
-      onAddToInbox={onAddToInbox}
-      onAddToNewInbox={onAddToNewInbox}
-      onRemoveFromInbox={removeFromInbox}
-    />;
   }
+  // The WO module has no right column anymore (DetailPane -> CommandCenter overlay,
+  // Settings -> popup, Attention -> header bell). Settings renders as a centered popup.
+  const settingsOverlay = (currentView === 'settings') ? (
+    <SettingsOverlay onClose={() => { setCurrentView('active'); setPendingSettingsSection(null); }}>
+      {rightPane}
+    </SettingsOverlay>
+  ) : null;
+  // Command center never co-exists with the Settings popup.
+  const showCommandCenter = currentModule === 'work-orders' && currentView !== 'settings' && coOpen && !!detailData;
+  // Command-center nav aids (computed only while open). Siblings = same
+  // normalized address; nearby = same city AND trade set intersects (dual
+  // 'PH' matches both P and H). prev/next walk the list's visible order.
+  const ccTradeSet = (t) => t === 'PH' ? ['P', 'H'] : [t];
+  const ccAids = showCommandCenter && selectedRecord ? (() => {
+    const me = selectedRecord;
+    const myAddr = (splitAddress(me).addr || '').toLowerCase();
+    const myCity = (splitAddress(me).city || '').toLowerCase();
+    const mySet = ccTradeSet(typeLetter(me.type));
+    const siblings = (myAddr ? orders.filter(o => !o.deleted && o.id !== me.id && (splitAddress(o).addr || '').toLowerCase() === myAddr) : [])
+      .map(o => ({ id: o.id, sub: splitAddress(o).city || '' }));
+    const nearby = (myCity ? orders.filter(o => !o.deleted && o.id !== me.id
+        && (splitAddress(o).city || '').toLowerCase() === myCity
+        && ccTradeSet(typeLetter(o.type)).some(t => mySet.includes(t))) : [])
+      .map(o => ({ id: o.id, sub: (o.tech || splitAddress(o).city || '') }));
+    const recents = recentWOs.filter(id => id !== me.id).map(id => ({ id }));
+    const idx = visibleOrder.indexOf(me.id);
+    const phaseName = (phases.find(p => (p.statuses || []).includes(me.status)) || {}).name || null;
+    const canCapture = me.pm === 'AMH' && !!(window.scraper && window.scraper.captureWO);
+    return { siblings, nearby, recents, idx, phaseName, canCapture };
+  })() : null;
+  const ccGoRel = (delta) => {
+    const i = visibleOrder.indexOf(selectedWO);
+    if (i < 0) return;
+    const j = i + delta;
+    if (j < 0 || j >= visibleOrder.length) return;
+    openWO(visibleOrder[j]);
+  };
+  const commandCenter = showCommandCenter ? (
+    <CommandCenter
+      onClose={() => setCoOpen(false)}
+      topBar={ccAids ? (
+        <CCTopBar
+          index={ccAids.idx}
+          total={visibleOrder.length}
+          onPrev={() => ccGoRel(-1)}
+          onNext={() => ccGoRel(1)}
+          phases={phases}
+          phaseName={ccAids.phaseName}
+          siblings={ccAids.siblings}
+          nearby={ccAids.nearby}
+          recents={ccAids.recents}
+          onPick={openWO}
+          onEdit={(id) => setModal({ kind: 'edit', id })}
+          onAction={detailAction}
+          canCapture={ccAids.canCapture}
+          woId={selectedWO}
+        />
+      ) : null}
+      rightRail={<>
+        <MapInset
+          wo={selectedRecord}
+          geocache={geocache}
+          statusColors={statusColors}
+          statusTags={statusTags}
+          mapMarkerColors={settings.mapMarkerColors}
+          mapTypeColors={settings.mapTypeColors}
+          overdueCfg={overdueCfg}
+          onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
+        />
+        <DayTimeline
+          wo={selectedRecord}
+          activeOrders={activeOrders}
+          statusColors={statusColors}
+          statusTags={statusTags}
+          onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('itinerary'); }}
+        />
+      </>}
+      detail={<DetailPane
+        data={detailData}
+        onSendToInvoice={sendToInvoice}
+        onMarkComplete={markComplete}
+        onReopen={reopen}
+        onAddNote={addNote}
+        onEditNote={editNote}
+        onDeleteNote={deleteNote}
+        onPinNote={togglePinNote}
+        onSetMisc={setMisc}
+        onSetClient={setClient}
+        onEdit={(id) => setModal({ kind: 'edit', id })}
+        onEditInvoice={openInvoiceEditor}
+        onAction={detailAction}
+        statuses={statuses}
+        moreInfoColor={moreInfoColor}
+        types={types}
+        techs={techs}
+        pms={pms}
+        inboxes={inboxes}
+        onWoAction={woAction}
+        onAddToInbox={onAddToInbox}
+        onAddToNewInbox={onAddToNewInbox}
+        onRemoveFromInbox={removeFromInbox}
+      />}
+    />
+  ) : null;
 
   return (
     <PMsContext.Provider value={pms}>
@@ -5554,8 +5648,9 @@ function App() {
        <ModuleNavContext.Provider value={{ currentModule, onPick: switchModule, onHome: () => setCurrentModule('overview') }}>
         <HeaderActionsContext.Provider value={{
           onAddWO: handleAddWO,
-          onOpenAttention: () => { setCurrentModule('work-orders'); setCurrentView('attention'); },
-          attentionCount: alerts.length,
+          notifications,
+          onNotifClick,
+          onDismissNotif: dismissNotif,
           onExportCsv: exportViewCsv,
           onAddInbox: onAddInbox,
           onOpenSettings: () => { setCurrentModule('work-orders'); setCurrentView('settings'); },
@@ -5621,7 +5716,7 @@ function App() {
               techs={techs}
               onSendRoute={sendRouteToItinerary}
               progress={geocodeProgress}
-              onOpenWO={(id) => { setSelectedWO(id); pushRecent(id); setCurrentView('active'); setCurrentModule('work-orders'); }}
+              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); openWO(id); }}
               onWoAction={woAction}
               mapsHomeState={mapsHomeState}
               mapsHomeAddress={mapsHomeAddress}
@@ -5634,6 +5729,9 @@ function App() {
               statusTags={statusTags}
               statusColors={statusColors}
               techColors={techColors}
+              statuses={statuses}
+              hiddenTypes={mapsHiddenTypes}
+              setHiddenTypes={setMapsHiddenTypes}
             />
           ) : currentModule === 'invoices' ? (
             <InvoicesModule
@@ -5654,7 +5752,7 @@ function App() {
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
               onSetSchedule={setSchedule}
-              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); setSelectedWO(id); pushRecent(id); }}
+              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); openWO(id); }}
               statuses={statuses}
               types={types}
               pms={pms}
@@ -5697,6 +5795,7 @@ function App() {
             <div style={{ flex: 1, minHeight: 0, display: 'flex', minWidth: 0 }}>
               <Sidebar
                 activeView={currentView}
+                clients={pms}
                 presets={presets}
                 inboxes={inboxes}
                 onSelectView={selectView}
@@ -5721,12 +5820,16 @@ function App() {
                   isPresetView={!!activePreset || !!activeInbox}
                   isInboxView={!!activeInbox}
                   onSaveView={onSaveView}
-                  selectedWO={(currentView === 'attention' || currentView === 'settings') ? null : selectedWO}
+                  selectedWO={currentView === 'settings' ? null : selectedWO}
                   onSelectWO={(wo) => {
-                    setSelectedWO(wo);
-                    pushRecent(wo);
-                    if (currentView === 'settings' || currentView === 'attention') setCurrentView('active');
+                    openWO(wo);
+                    if (currentView === 'settings') setCurrentView('active');
                   }}
+                  onHighlightWO={(wo) => {
+                    highlightWO(wo);
+                    if (currentView === 'settings') setCurrentView('active');
+                  }}
+                  onVisibleRows={setVisibleOrder}
                   bulkActions={bulkActions}
                   selectedIds={selectedIds}
                   onCheck={handleCheck}
@@ -5745,9 +5848,6 @@ function App() {
                   alerts={alerts}
                 />
               </div>
-              <div style={{ flex: '1.2 1 0', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                {rightPane}
-              </div>
             </div>
           </div>
           )}
@@ -5755,6 +5855,14 @@ function App() {
         )}
         </div>{/* end module content (flex:1) */}
         </div>{/* end top-strip flex column */}
+        {commandCenter}
+        {settingsOverlay}
+        <QuickJump
+          open={quickJumpOpen}
+          orders={orders}
+          onClose={() => setQuickJumpOpen(false)}
+          onPick={(id) => { setQuickJumpOpen(false); setCurrentModule('work-orders'); setCurrentView('active'); openWO(id); }}
+        />
 
         {/* ImportInspectModal rendered before add/edit modals so when its
             per-row Edit button triggers the edit modal, the edit modal mounts

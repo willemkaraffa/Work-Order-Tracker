@@ -3,7 +3,7 @@
 import React from 'react';
 import {
   APP_VERSION, EDITABLE_THEME_VARS, DEFAULT_MORE_INFO_COLOR, LOCKED_STATUSES,
-  SYSTEM_TAGS, SYSTEM_TAG_LABELS, TYPE_COLORS, DEFAULT_MAP_MARKER_COLORS, normalizeHex,
+  SYSTEM_TAGS, SYSTEM_TAG_LABELS, TYPE_COLORS, DEFAULT_MAP_MARKER_COLORS, normalizeHex, acronymOf,
 } from './constants.js';
 import {
   SettingTitle, SettingRow, Seg, ActionBtn, InlineEdit, miniBtnStyle, ReorderBtns, swapAt,
@@ -27,7 +27,7 @@ const TT_SECTIONS = [
   { id: 'about',       label: 'About' },
 ];
 
-export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, techColors, setTechColors, routingWeights, setRoutingWeights, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
+export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, techColors, setTechColors, routingWeights, setRoutingWeights, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, onRenameClientCode, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
   const [section, setSection] = React.useState(initialSection || 'appearance');
   return (
     <section style={{
@@ -75,9 +75,13 @@ export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDe
         }}>Close {'✕'}</button>
       </nav>
 
-      <div style={{ padding: '28px 32px', overflow: 'auto', minHeight: 0 }}>
+      {/* Scroller is full-bleed (no horizontal padding) so its scrollbar always
+          rides the modal's right edge on every tab; the 28/32 padding lives on
+          the inner wrapper, regardless of a section's own max-width/centering. */}
+      <div style={{ overflow: 'auto', minHeight: 0 }}>
+        <div style={{ padding: '28px 32px' }}>
         {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
-        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} />}
+        {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} onRenameClientCode={onRenameClientCode} />}
         {section === 'trades'     && <TradesSection types={types} setTypes={setTypes} mapTypeColors={mapTypeColors} setMapTypeColors={setMapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} setTechs={setTechs} techColors={techColors} setTechColors={setTechColors} />}
         {section === 'routing'    && <RoutingSection weights={routingWeights} setWeights={setRoutingWeights} />}
         {section === 'library'    && <LibraryToolsSection subCats={librarySubCats} setSubCats={setLibrarySubCats} toast={toast} />}
@@ -87,6 +91,7 @@ export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDe
         {section === 'alerts'     && <AlertsSection thresholds={alertThresholds} setThresholds={setAlertThresholds} overdueCfg={overdueCfg} setOverdueCfg={setOverdueCfg} />}
         {section === 'tray'       && <TraySection trayEnabled={trayEnabled} setTrayEnabled={setTrayEnabled} trayBadgeSource={trayBadgeSource} setTrayBadgeSource={setTrayBadgeSource} />}
         {section === 'about'      && <AboutSection onResetSettings={onResetSettings} onRestoreBackup={onRestoreBackup} updateState={updateState} onCheckUpdate={onCheckUpdate} onInstallUpdate={onInstallUpdate} />}
+        </div>
       </div>
     </section>
   );
@@ -368,7 +373,7 @@ function AppearanceGroup({ eyebrow, children }) {
 
 // miniBtnStyle, ReorderBtns, swapAt moved to ./primitives.jsx (imported at top).
 
-function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, pms, setPms }) {
+function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, statusTags, setStatusTags, pms, setPms, onRenameClientCode }) {
   const [statusesOpen, setStatusesOpen] = React.useState(false);
   const [pmsOpen, setPmsOpen] = React.useState(false);
   const [editingId, setEditingId] = React.useState(null);
@@ -456,14 +461,16 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
                 : <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>tab-derived</span>}
             </span>
             <select
-              value={p.displayMode || 'pills'}
+              value={p.displayMode === 'hidden' ? 'hidden' : 'show'}
               onChange={e => setDisplayMode(uid, e.target.value)}
               title="Status display in the WO list"
               style={{ padding: '3px 6px', fontSize: 12, border: '1px solid var(--border-2)', borderRadius: 4,
                 background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit', cursor: 'pointer', maxWidth: 90, flexShrink: 0 }}
             >
-              <option value="pills">Pills</option>
-              <option value="single">Single</option>
+              {/* Post list-rework there is no pill in the list -- status renders as
+                  colored text + a status-colored left bar -- so the old Pills/Single
+                  split is gone. 'show' covers both legacy values; only 'hidden' hides. */}
+              <option value="show">Show</option>
               <option value="hidden">Hidden</option>
             </select>
             <button onClick={() => startRename(p)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px', flexShrink: 0 }}>{'✎'}</button>
@@ -478,7 +485,7 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
         <ActionBtn onClick={addPhase}>+ Add phase</ActionBtn>
         <ActionBtn onClick={() => setStatusesOpen(true)}>Manage statuses...</ActionBtn>
-        <ActionBtn onClick={() => setPmsOpen(true)}>Manage PMs...</ActionBtn>
+        <ActionBtn onClick={() => setPmsOpen(true)}>Manage Clients...</ActionBtn>
       </div>
       {statusesOpen && (
         <StatusesEditor
@@ -497,6 +504,7 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
         <PMsEditor
           pms={pms}
           setPms={setPms}
+          onRenameCode={onRenameClientCode}
           onClose={() => setPmsOpen(false)}
         />
       )}
@@ -508,6 +516,7 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [newName, setNewName] = React.useState('');
   const [insertAbove, setInsertAbove] = React.useState(''); // '' = append
+  useEditorEscClose(onClose);
   // Inline editing via the shared <InlineEdit>; editingIdx marks the open row.
 
   // Returns the phase id/name that owns this status, or '' if none.
@@ -785,33 +794,60 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
   );
 }
 
-function PMsEditor({ pms, setPms, onClose }) {
-  const [editingIdx, setEditingIdx] = React.useState(null);
-  const [newName, setNewName] = React.useState('');
-  const [newColor, setNewColor] = React.useState('#1a73e8');
+// Esc closes a nested settings editor (not the whole Settings popup). Capture
+// phase + stopImmediatePropagation so it runs before the SettingsOverlay's
+// bubble-phase Esc handler and prevents it from firing.
+function useEditorEscClose(onClose) {
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopImmediatePropagation(); onClose(); } };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+}
 
+function PMsEditor({ pms, setPms, onRenameCode, onClose }) {
+  const [editingIdx, setEditingIdx] = React.useState(null);
+  useEditorEscClose(onClose);
+  const [newCode, setNewCode] = React.useState('');
+  const [newFullName, setNewFullName] = React.useState('');
+  const [newColor, setNewColor] = React.useState('#1a73e8');
+  // Whether the user has manually edited the code in the add row. Until they do,
+  // the code auto-tracks the full name's acronym suggestion.
+  const codeTouched = React.useRef(false);
+
+  // Inline rename edits the CODE (o.pm key). Renaming the code is rare; the full
+  // name is the usual edit. Codes stay stable so existing WOs keep their Client.
   const commitRename = (idx, val) => {
     const trimmed = (val || '').trim();
-    if (trimmed) {
-      const next = pms.map((p, i) => i === idx ? { ...p, name: trimmed } : p);
-      setPms(next);
+    if (trimmed && trimmed !== pms[idx].name) {
+      // Cascade the code change to every WO so none orphan (B2). Fall back to a
+      // plain pms rename if the cascade handler wasn't provided.
+      if (onRenameCode) onRenameCode(pms[idx].name, trimmed);
+      else setPms(pms.map((p, i) => i === idx ? { ...p, name: trimmed } : p));
     }
     setEditingIdx(null);
   };
 
+  const setFullName = (idx, val) => setPms(pms.map((p, i) => i === idx ? { ...p, fullName: val } : p));
   const setColor = (idx, hex) => setPms(pms.map((p, i) => i === idx ? { ...p, color: hex } : p));
 
   const deletePm = (idx) => {
-    if (!window.confirm('Remove this PM?')) return;
+    if (!window.confirm('Remove this Client?')) return;
     setPms(pms.filter((_, i) => i !== idx));
   };
 
+  const onNewFullName = (val) => {
+    setNewFullName(val);
+    if (!codeTouched.current) setNewCode(acronymOf(val));
+  };
+
   const addPm = () => {
-    const n = newName.trim();
-    if (!n) return;
-    setPms([...pms, { name: n, color: newColor }]);
-    setNewName('');
-    setNewColor('#1a73e8');
+    const code = newCode.trim();
+    const full = newFullName.trim();
+    if (!code && !full) return;
+    setPms([...pms, { name: code || acronymOf(full), fullName: full || code, color: newColor }]);
+    setNewCode(''); setNewFullName(''); setNewColor('#1a73e8');
+    codeTouched.current = false;
   };
 
   const movePm = (idx, delta) => setPms(swapAt(pms, idx, idx + delta));
@@ -837,7 +873,7 @@ function PMsEditor({ pms, setPms, onClose }) {
           padding: '16px 22px', borderBottom: '1px solid var(--border-1)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <div style={{ fontSize: 16, fontWeight: 600 }}>Manage PMs</div>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>Manage Clients</div>
           <button onClick={onClose} style={{
             background: 'transparent', border: 'none', cursor: 'pointer',
             color: 'var(--text-3)', fontSize: 18, padding: 4,
@@ -858,51 +894,74 @@ function PMsEditor({ pms, setPms, onClose }) {
                 value={normalizeHex(pm.color)}
                 onChange={e => setColor(idx, e.target.value)}
                 style={{ width: 28, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }}
-                title="PM color"
+                title="Client color"
               />
-              {editingIdx === idx
-                ? <InlineEdit
-                    value={pm.name}
-                    onCommit={(val) => commitRename(idx, val)}
-                    onCancel={() => setEditingIdx(null)}
-                    style={{
-                      flex: 1, fontSize: 14,
-                      background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
-                      borderRadius: 4, padding: '3px 8px', color: 'var(--text-1)', fontFamily: 'inherit',
-                    }}
-                  />
-                : <span
-                    onDoubleClick={() => setEditingIdx(idx)}
-                    title="Double-click to rename"
-                    style={{ flex: 1, fontSize: 14, cursor: 'text' }}
-                  >{pm.name}</span>
-              }
-              <button onClick={() => setEditingIdx(idx)} title="Rename" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {editingIdx === idx
+                  ? <InlineEdit
+                      value={pm.name}
+                      onCommit={(val) => commitRename(idx, val)}
+                      onCancel={() => setEditingIdx(null)}
+                      title="Code shown on WOs (kept stable on rename)"
+                      style={{
+                        fontSize: 13, fontWeight: 700, letterSpacing: '0.02em',
+                        background: 'var(--bg-canvas)', border: '1px solid var(--accent)',
+                        borderRadius: 4, padding: '3px 8px', color: 'var(--text-1)', fontFamily: 'inherit',
+                      }}
+                    />
+                  : <span
+                      onDoubleClick={() => setEditingIdx(idx)}
+                      title="The code shown on work orders. Double-click to edit (rare — keep stable)."
+                      style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.02em', cursor: 'text' }}
+                    >{pm.name}</span>
+                }
+                <input
+                  value={pm.fullName || ''}
+                  onChange={e => setFullName(idx, e.target.value)}
+                  placeholder="Full name"
+                  style={{
+                    fontSize: 12, padding: '3px 6px', border: '1px solid var(--border-2)',
+                    borderRadius: 4, background: 'var(--bg-canvas)', color: 'var(--text-2)', fontFamily: 'inherit',
+                  }}
+                />
+              </div>
+              <button onClick={() => setEditingIdx(idx)} title="Edit code" style={{ ...miniBtnStyle, padding: '0 7px' }}>{'✎'}</button>
               <button
                 onClick={() => deletePm(idx)}
                 style={{ ...miniBtnStyle, color: 'var(--flag-emergency)', padding: '0 7px' }}
               >{'✕'}</button>
             </div>
           ))}
-          <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'flex-start' }}>
             <input
               type="color"
               value={newColor}
               onChange={e => setNewColor(e.target.value)}
-              style={{ width: 28, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent' }}
+              style={{ width: 28, height: 28, padding: 0, border: 'none', cursor: 'pointer', background: 'transparent', marginTop: 2 }}
             />
-            <input
-              value={newName}
-              onChange={e => setNewName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') addPm(); }}
-              placeholder="New PM name"
-              style={{
-                flex: 1, padding: '7px 10px',
-                border: '1px solid var(--border-2)', borderRadius: 6,
-                background: 'var(--bg-canvas)', color: 'var(--text-1)',
-                fontFamily: 'inherit', fontSize: 13,
-              }}
-            />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input
+                value={newFullName}
+                onChange={e => onNewFullName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') addPm(); }}
+                placeholder="New client full name (e.g. American Homes 4 Rent)"
+                style={{
+                  padding: '7px 10px', border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+                }}
+              />
+              <input
+                value={newCode}
+                onChange={e => { codeTouched.current = true; setNewCode(e.target.value); }}
+                onKeyDown={e => { if (e.key === 'Enter') addPm(); }}
+                placeholder="Code — auto, editable (e.g. AMH)"
+                style={{
+                  padding: '6px 10px', border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-canvas)', color: 'var(--text-1)', fontFamily: 'inherit',
+                  fontSize: 13, fontWeight: 700, letterSpacing: '0.02em',
+                }}
+              />
+            </div>
             <ActionBtn primary onClick={addPm}>Add</ActionBtn>
           </div>
         </div>
@@ -914,7 +973,7 @@ function PMsEditor({ pms, setPms, onClose }) {
 const ALERT_DEFS = [
   { key: 'emergencyUnscheduled',        label: 'Emergency unscheduled',          hint: 'WO with emergency flag still in "Open"' },
   { key: 'stale',                       label: 'Stale',                          hint: 'No status change' },
-  { key: 'bidOutNoResponse',            label: 'Bid out, no response',           hint: 'Status = Bid submitted, no PM movement' },
+  { key: 'bidOutNoResponse',            label: 'Bid out, no response',           hint: 'Status = Bid submitted, no Client movement' },
   { key: 'partsPastEta',                label: 'Parts past ETA',                 hint: 'Status = Parts pending' },
   { key: 'approvedUnscheduled',         label: 'Approved but unscheduled',       hint: 'Status = Bid approved - Return, no scheduled date' },
   { key: 'readyToClose',                label: 'Ready to close',                 hint: 'Status = Pending-complete' },

@@ -10,13 +10,14 @@ export function Dot() {
 
 export function PMChip({ pm }) {
   const pms = usePMs();
+  // o.pm is the stable Client CODE; resolve color + full-name tooltip by code.
   const entry = pms.find(p => p.name === pm);
   const hex = entry ? normalizeHex(entry.color) : '#6b7280';
   const bg = hexToRgba(hex, 0.18);
   return (
-    <span style={{
+    <span title={entry && entry.fullName ? entry.fullName : pm} style={{
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      width: 28, height: 22, borderRadius: 5,
+      minWidth: 28, height: 22, borderRadius: 5, padding: '0 4px',
       background: bg, color: hex,
       fontSize: 11, fontWeight: 700, letterSpacing: '0.02em',
       flexShrink: 0,

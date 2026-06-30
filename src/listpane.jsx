@@ -3,15 +3,15 @@
 // helpers import from app.jsx (live-binding cycle, eval-safe). App renders
 // ListPane.
 import React from 'react';
-import { densityFor } from './constants.js';
-import { usePMs } from './contexts.js';
-import { Dot, PMChip, TypeIcon, StatusPill, FlagGlyph, ReorderBtns, swapAt } from './primitives.jsx';
+import { densityFor, statusColor } from './constants.js';
+import { usePMs, useStatusColors } from './contexts.js';
+import { Dot, PMChip, TypeIcon, FlagGlyph, ReorderBtns, swapAt } from './primitives.jsx';
 import {
   FilterDropdown, SortDropdown, BulkBar, WOContextMenu, sortRows, TT_VIEW_DATA,
   isOverdueSched, OVERDUE_CFG, fmtSchedule,
 } from './app.jsx';
 
-export function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox, onSelectView, alerts = [] }) {
+export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox, onSelectView, alerts = [] }) {
   const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   // Search input + "/" focus shortcut live in WorkOrdersHeader (module-level
@@ -57,7 +57,8 @@ export function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases
       return String(a).localeCompare(String(b));
     });
   };
-  const pmOptions     = optsFor('pm', (pms || []).map(p => p.name));
+  // PM/Client pill removed: client filtering moved to the Gmail-style sidebar
+  // (cl: views). filters.pm is still honored (set by the sidebar) -- just no pill.
   const typeOptions   = optsFor('type', types);
   const statusOptions = optsFor('status', statuses);
   const techOptions   = optsFor('tech', techs);
@@ -138,10 +139,25 @@ export function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases
     return out;
   }, [sortedGroups, collapsed]);
 
+  // Report the current visible (post filter/sort/collapse) row order up so the
+  // command center's prev/next walk the exact same order the user sees. flatRows
+  // is a fresh array ref each render; only push when the CONTENT changes, else
+  // the parent setState would re-render us in a loop.
+  const lastRowsRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!onVisibleRows) return;
+    const key = flatRows.join('');
+    if (key === lastRowsRef.current) return;
+    lastRowsRef.current = key;
+    onVisibleRows(flatRows);
+  }, [flatRows, onVisibleRows]);
+
   React.useEffect(() => {
     const onKey = (e) => {
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      // Enter opens the command center for the highlighted row.
+      if (e.key === 'Enter') { if (selectedWO) { e.preventDefault(); onSelectWO(selectedWO); } return; }
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
       if (!flatRows.length) return;
       e.preventDefault();
@@ -149,11 +165,13 @@ export function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases
       let next;
       if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % flatRows.length;
       else                       next = idx <= 0 ? flatRows.length - 1 : idx - 1;
-      onSelectWO(flatRows[next]);
+      // Arrows highlight only (no overlay pop); when the overlay is already open
+      // changing selectedWO restacks it. Falls back to onSelectWO if no handler.
+      (onHighlightWO || onSelectWO)(flatRows[next]);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flatRows, selectedWO, onSelectWO]);
+  }, [flatRows, selectedWO, onSelectWO, onHighlightWO]);
 
   const visibleCount = sortedGroups.reduce((n, g) => n + g.rows.length, 0);
   const hasActiveFilter = !!(q || filters.pm || filters.type || filters.status || filters.tech);
@@ -181,7 +199,6 @@ export function ListPane({ selectedWO, onSelectWO, view = 'active', data, phases
       <div style={{ padding: '12px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
         {!isInboxView && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-          <FilterDropdown label="PM"     value={filters.pm}     options={pmOptions}     onChange={setF('pm')} />
           <FilterDropdown label="Type"   value={filters.type}   options={typeOptions}   onChange={setF('type')} />
           <FilterDropdown label="Status" value={filters.status} options={statusOptions} onChange={setF('status')} />
           <FilterDropdown label="Tech"   value={filters.tech}   options={techOptions}   onChange={setF('tech')} />
@@ -376,12 +393,19 @@ function PhaseHeader({ phase, count, dot, open, first, onToggle }) {
 }
 
 function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCheck, onContextMenu, statusMode = 'pills' }) {
+  const colors = useStatusColors();
+  const sc = statusColor(row.status, colors);
+  // Age moved from a row-background tint to a colored "Xd" counter. Escalating
+  // warmth by ageLevel; level 3 reuses the emergency hue.
   const ageHidden = hideAge || row.age == null;
-  const ageBg = ageHidden ? 'transparent' :
-    row.ageLevel === 1 ? 'var(--age-1)' :
-    row.ageLevel === 2 ? 'var(--age-2)' :
-    row.ageLevel === 3 ? 'var(--age-3)' : 'transparent';
+  const ageColor = ageHidden ? 'var(--text-2)' :
+    row.ageLevel === 3 ? 'var(--flag-emergency)' :
+    row.ageLevel === 2 ? '#e8843c' :
+    row.ageLevel === 1 ? '#d9a441' : 'var(--text-2)';
   const d = densityFor(density);
+  // Status-colored left bar replaces the in-row pill (kept in the modal). Sent
+  // rows (Invoices) drop it; that module renders status itself.
+  const showStatus = view !== 'sent' && statusMode !== 'hidden';
   return (
     <div
       data-wo-id={row.wo}
@@ -392,8 +416,9 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
       onContextMenu={onContextMenu ? (e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, row.wo, row.tab); } : undefined}
       style={{
         padding: `${d.rowPadY}px 14px`,
-        background: (checked || selected) ? 'var(--bg-row-sel)' : ageBg,
+        background: (checked || selected) ? 'var(--bg-row-sel)' : 'transparent',
         borderBottom: '1px solid var(--border-2)',
+        borderLeft: '4px solid ' + (showStatus ? sc : 'transparent'),
         cursor: 'pointer',
         display: 'flex', gap: 10, alignItems: 'flex-start',
       }}
@@ -419,7 +444,7 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             <div style={{ marginLeft: 'auto', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 8 }}>
               {row.city && <span style={{ color: 'var(--text-2)', fontSize: 14, fontWeight: 500, whiteSpace: 'nowrap' }}>{row.city}</span>}
               {row.age != null && (
-                <span style={{ fontSize: 13, color: 'var(--text-2)', fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
+                <span title="Days in stage" style={{ fontSize: 13, fontWeight: row.ageLevel ? 700 : 400, color: ageColor, fontVariantNumeric: 'tabular-nums' }}>{row.age}</span>
               )}
             </div>
           )}
@@ -427,12 +452,8 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
         {/* Meta row: status · PM · type · tech | WO# right-aligned.
             change11: Status pill hidden in sent (Invoices module shows it). */}
         <div style={{ fontSize: d.line2, color: 'var(--text-2)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {view !== 'sent' && statusMode !== 'single' && <>
-            <StatusPill status={row.status} size="sm" />
-            <Dot />
-          </>}
-          {view !== 'sent' && statusMode === 'single' && <>
-            <span style={{ fontWeight: 600 }}>{row.status}</span>
+          {showStatus && <>
+            <span style={{ color: sc, fontWeight: 600 }}>{row.status}</span>
             <Dot />
           </>}
           <PMChip pm={row.pm} />

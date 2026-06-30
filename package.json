@@ -6,6 +6,9 @@
   "scripts": {
     "build:renderer": "esbuild src/app.jsx --bundle --outfile=bundle/app.js --format=iife --jsx=automatic --target=chrome120 --loader:.jsx=jsx",
     "watch:renderer": "npm run build:renderer -- --watch",
+    "test": "node test/run.js",
+    "test:logic": "node test/run.js --logic",
+    "verify": "npm run build:renderer && node test/run.js",
     "start": "npm run build:renderer && electron .",
     "build-win": "npm run build:renderer && electron-builder --win --x64",
     "build-mac": "npm run build:renderer && electron-builder --mac",

@@ -68,6 +68,9 @@ export function useWorkOrders() {
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
         if (!parsed.settings.viewSorts || typeof parsed.settings.viewSorts !== 'object') parsed.settings.viewSorts = {};
         if (!Array.isArray(parsed.pms)   || !parsed.pms.length)   parsed.pms   = DEFAULT_PMS.slice();
+        // Client fullName backfill: older data has {name, color} only. name is the
+        // stable code; default fullName to the code so the editor has something.
+        parsed.pms = parsed.pms.map(p => (p && p.fullName != null) ? p : { ...p, fullName: (p && p.name) || '' });
         if (!Array.isArray(parsed.types) || !parsed.types.length) parsed.types = DEFAULT_TYPES.slice();
         parsed.types = parsed.types.filter(t => String(t).toLowerCase() !== 'other');
         if (!Array.isArray(parsed.techs) || !parsed.techs.length) parsed.techs = DEFAULT_TECHS.slice();

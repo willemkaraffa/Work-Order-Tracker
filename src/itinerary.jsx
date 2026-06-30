@@ -12,6 +12,106 @@ import {
   itinDayLabel, itinDayMonth,
 } from './app.jsx';
 
+// Read-only day timeline for the command-center right rail. Shows the WO's
+// assigned tech's full scheduled day (the WO's schedule date), auto-scrolled to
+// the WO's slot and ring-highlighted; "Open in Itinerary" jumps to the full
+// module to edit. Not scheduled -> a "Not Scheduled" placeholder + jump to
+// schedule. Ports the slot/snap mechanism from ItineraryModule (shared exported
+// helpers) but drops all drag/hover/menu state -> pure view.
+export function DayTimeline({ wo, activeOrders, statusColors, statusTags, onOpenItinerary }) {
+  const highlightRef = React.useRef(null);
+  const scheduled = !!(wo && wo.schedule && wo.schedule.date);
+  const tech = wo && wo.tech;
+  const date = scheduled ? wo.schedule.date : null;
+  const slots = React.useMemo(() => itinSlots(), []);
+  const tags = statusTags || {};
+  // Same filter as ItineraryModule.dayScheduled but pinned to this WO's tech.
+  // `visited`-tagged statuses drop off the day (visit done) just like the module.
+  const dayScheduled = React.useMemo(
+    () => (scheduled
+      ? (activeOrders || []).filter(o => o.schedule && o.schedule.date === date && o.tech === tech && tags[o.status] !== 'visited')
+      : []),
+    [activeOrders, date, tech, scheduled, tags]
+  );
+  const scheduledBySlot = React.useMemo(() => {
+    const map = {};
+    for (const o of dayScheduled) { const s = itinSnapSlot(o.schedule.start); (map[s] = map[s] || []).push(o); }
+    return map;
+  }, [dayScheduled]);
+  // Scroll the WO's card into view once it renders (the inset is the scroll parent).
+  React.useEffect(() => {
+    if (scheduled && highlightRef.current) highlightRef.current.scrollIntoView({ block: 'center' });
+  }, [wo && wo.id, scheduled, dayScheduled.length]);
+
+  const card = (o) => {
+    const { addr, city } = splitAddress(o);
+    const isHi = wo && o.id === wo.id;
+    return (
+      <div key={o.id} ref={isHi ? highlightRef : undefined} style={{
+        border: '1px solid var(--border-1)', borderLeft: '4px solid ' + statusColor(o.status, statusColors),
+        borderRadius: 8, background: 'var(--bg-surface)', padding: '6px 8px', fontSize: 12,
+        display: 'flex', flexDirection: 'column', gap: 2,
+        boxShadow: isHi ? '0 0 0 2px var(--accent)' : 'none',
+      }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
+          {o.emergency && <span style={{ color: 'var(--danger, #d9534f)', fontWeight: 700 }}>!</span>}
+          <TypeIcon kind={typeLetter(o.type)} />
+          {o.schedule && o.schedule.start && (
+            <span style={{ marginLeft: 'auto', fontVariantNumeric: 'tabular-nums',
+              color: isOverdueSched(o.schedule.date, o.schedule.start) ? OVERDUE_CFG.textColor : 'var(--text-2)' }}>
+              ◷ {itinFmtTime(o.schedule.start)}
+            </span>
+          )}
+        </div>
+        <div style={{ color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {addr || '(no address)'}{city ? ', ' + city : ''}
+        </div>
+      </div>
+    );
+  };
+
+  const labelStyle = { fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' };
+  const jumpBtn = onOpenItinerary && wo && (
+    <button onClick={() => onOpenItinerary(wo.id)} style={{
+      height: 22, padding: '0 8px', border: '1px solid var(--border-2)', borderRadius: 6,
+      background: 'var(--bg-surface-2)', color: 'var(--accent)', fontFamily: 'inherit',
+      fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+    }}>Open in Itinerary →</button>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 12px 12px', borderTop: '1px solid var(--border-1)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={labelStyle}>Schedule</span>
+        {jumpBtn}
+      </div>
+      {!scheduled ? (
+        <div style={{ height: 160, borderRadius: 8, border: '1px dashed var(--border-2)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-3)', fontSize: 13, fontWeight: 600 }}>
+          Not Scheduled
+        </div>
+      ) : (<>
+        <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{itinDayLabel(date)} · {tech || 'Unassigned'}</div>
+        <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid var(--border-1)', borderRadius: 8 }}>
+          {slots.map(slot => {
+            const blocks = scheduledBySlot[slot] || [];
+            return (
+              <div key={slot} style={{ display: 'flex', alignItems: 'stretch', borderTop: '1px solid var(--border-1)', minHeight: 30 }}>
+                <div style={{ width: 64, flexShrink: 0, padding: '4px 6px', fontSize: 11, color: 'var(--text-3)',
+                  textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{itinFmtTime(slot)}</div>
+                <div style={{ flex: 1, padding: '3px 8px 3px 4px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {blocks.map(card)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </>)}
+    </div>
+  );
+}
+
 export function ItineraryModule({ activeOrders, techs, phases, statusColors, statusTags, focus, tech, setTech, onClearFocus, onSetSchedule, onOpenWO, statuses, types, pms, inboxes, onWoAction, onAddToInbox, onAddToNewInbox, onRemoveFromInbox }) {
   // Unscheduled section collapse (controls + pool list share one state).
   const [poolOpen, togglePool] = useCollapsedSection('itin-unscheduled');

@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 
-const D = 'C:/Users/pvega/Downloads/';
+const D = path.join(__dirname, 'fixtures') + path.sep;
 const DUMPS = {
   general:        'wo-dump-AMH-1779987193120.json',
   conditions:     'wo-dump-AMH-1779987211685.json',
@@ -14,6 +14,9 @@ const DUMPS = {
   bid_0051543:    'wo-dump-AMH-1779987228527.json', // $269.06, toilet
   bid_0051517:    'wo-dump-AMH-1779987247270.json', // $223.63, shower
 };
+if (Object.values(DUMPS).some(f => !fs.existsSync(path.join(D, f)))) {
+  console.log('SKIP wo9718400: fixture set missing'); process.exit(2);
+}
 
 function withDom(file, fn) {
   const d = JSON.parse(fs.readFileSync(path.join(D, file), 'utf8'));

@@ -20,11 +20,15 @@ function run(dumpFile, label) {
   return r;
 }
 
-const a = run('C:/Users/pvega/Downloads/wo-dump-AMH-1779481024875.json', 'WO 9723779 (single contact)');
+const FIX = path.join(__dirname, 'fixtures');
+const fileA = path.join(FIX, 'wo-dump-AMH-1779481024875.json');
+if (!fs.existsSync(fileA)) { console.log('SKIP contacts: fixture missing'); process.exit(2); }
+
+const a = run(fileA, 'WO 9723779 (single contact)');
 if (!a.length || a[0].name !== 'ReShanda Alston' || a[0].phone !== '9843993844') { console.error('FAIL A'); process.exit(1); }
 
 try {
-  const b = run('C:/Users/pvega/Downloads/wo-dump-AMH-1779982058902.json', 'WO 9731934 (two contacts, concatenated role)');
+  const b = run(path.join(FIX, 'wo-dump-AMH-1779982058902.json'), 'WO 9731934 (two contacts, concatenated role)');
   if (b.length !== 2) { console.error('FAIL B: expected 2 contacts, got', b.length); process.exit(1); }
   if (!/PRIMARY CONTACT/.test(b[0].role) || b[0].name !== 'Donelle King' || b[0].phone !== '8572695684') { console.error('FAIL B primary'); process.exit(1); }
   if (b[1].name !== 'Damion King' || b[1].phone !== '4752807301') { console.error('FAIL B secondary'); process.exit(1); }
