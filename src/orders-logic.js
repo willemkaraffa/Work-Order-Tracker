@@ -275,6 +275,25 @@ export function wasVisited(o, statusTags) {
   return false;
 }
 
+// Does an incoming scraped WO match a WO the user already TRASHED/cancelled
+// in-app? If so the import paths should auto-reject it (don't re-create as a new
+// WO) and notify (round5 A4 / #13). Match by portal WO number / id only — NOT
+// address/phone: a genuinely new WO# at a trashed WO's address is a real new
+// job. Keyed off current `deleted` state, so a RESTORED WO is not rejected.
+export function isTrashedReimport(inc, deletedOrders) {
+  if (!inc || !Array.isArray(deletedOrders) || !deletedOrders.length) return false;
+  const woNum = (s) => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+  const incNum = woNum(inc.woId) || woNum(inc.id);
+  const incPortal = String(inc.woId || '').trim();
+  for (const o of deletedOrders) {
+    if (!o || !o.deleted) continue;
+    const oNum = woNum(o.woId) || woNum(o.id);
+    if (incNum && oNum && incNum === oNum) return true;
+    if (incPortal && (o.id === incPortal || o.woId === incPortal)) return true;
+  }
+  return false;
+}
+
 // Today as YYYY-MM-DD (local), for expired-schedule comparison.
 export function itinTodayStr() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');

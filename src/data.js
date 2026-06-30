@@ -9,6 +9,7 @@ import {
   DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, isCompletionStatusName,
 } from './constants.js';
 import { formatPhone, composeNotes } from './utils.js';
+import { isTrashedReimport } from './orders-logic.js';
 import { nextWOId, DEFAULT_STATUSES } from './app.jsx';
 
 // Returns [data, updateOrder]; data is null while loading.
@@ -309,13 +310,24 @@ export function useWorkOrders() {
 
     const idNum = (o) => parseInt(String(o.id || '').replace(/[^0-9]/g, ''), 10) || 0;
     let nextNum = Math.max(0, ...Array.from(byId.values()).map(idNum)) + 1;
-    let imported = 0, dupSkipped = 0;
+    let imported = 0, dupSkipped = 0, trashedSkipped = 0;
+    const trashedWos = [];                                  // WO#s auto-rejected (round5 A4 / #13)
+    const deletedOrders = (cur.orders || []).filter(o => o && o.deleted);
     const batch = []; // ids of WOs that were created or updated this call
     const techsSet = new Set(cur.techs || []);
     let techsChanged = false;
 
     for (const inc of incoming) {
       if (!inc) continue;
+
+      // round5 A4 / #13: auto-reject a re-import of a WO the user trashed/
+      // cancelled in-app (matched by WO# only). Notify via the returned counts.
+      if (isTrashedReimport(inc, deletedOrders)) {
+        trashedSkipped++;
+        const w = String(inc.woId || inc.id || '').trim();
+        if (w) trashedWos.push(w);
+        continue;
+      }
 
       const portalWo = String(inc.woId || '').trim();
       const incNum = woNum(portalWo);
@@ -437,7 +449,7 @@ export function useWorkOrders() {
     if (techsChanged) next.techs = Array.from(techsSet);
     dataRef.current = next; setData(next);
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
-    return { imported, dupSkipped, batch };
+    return { imported, dupSkipped, trashedSkipped, trashedWos, batch };
   }, []);
 
   const updateData = React.useCallback((patch) => {

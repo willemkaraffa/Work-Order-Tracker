@@ -24,7 +24,7 @@ const { loadEsm } = require('./_load.js');
 const {
   phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
-  wasVisited,
+  wasVisited, isTrashedReimport,
 } = loadEsm('src/orders-logic.js');
 const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
 const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
@@ -403,6 +403,33 @@ test('migrateOrders: active WO in a complete-flagged phase → tab=complete + un
 
 test('migrateOrders: non-array input passes through', () => {
   assert.strictEqual(migrateOrders(null), null);
+});
+
+// ─── isTrashedReimport (auto-reject, round5 A4 / #13) ────────────────────────
+
+test('isTrashedReimport: incoming WO# matches a trashed record → true', () => {
+  const deleted = [{ id: 'WO-007', woId: '03061113', deleted: true }];
+  assert.strictEqual(isTrashedReimport({ woId: '03061113' }, deleted), true);
+});
+
+test('isTrashedReimport: leading-zero / formatting differences still match', () => {
+  const deleted = [{ id: '3061113', deleted: true }];
+  assert.strictEqual(isTrashedReimport({ woId: '03061113' }, deleted), true);
+});
+
+test('isTrashedReimport: a NEW WO# not in trash → false (real new job)', () => {
+  const deleted = [{ id: 'WO-007', woId: '03061113', deleted: true }];
+  assert.strictEqual(isTrashedReimport({ woId: '09999999' }, deleted), false);
+});
+
+test('isTrashedReimport: matches a NON-deleted record → false (only trash rejects)', () => {
+  const active = [{ id: 'WO-007', woId: '03061113', deleted: false }];
+  assert.strictEqual(isTrashedReimport({ woId: '03061113' }, active), false);
+});
+
+test('isTrashedReimport: empty/no-deleted safe', () => {
+  assert.strictEqual(isTrashedReimport({ woId: '1' }, []), false);
+  assert.strictEqual(isTrashedReimport(null, [{ deleted: true, id: '1' }]), false);
 });
 
 // ─── wasVisited (return-trip predicate, round5 A2 / #12a) ────────────────────

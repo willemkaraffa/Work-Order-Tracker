@@ -3979,7 +3979,7 @@ function App() {
         // An import arriving clears the in-flight MSR capture banner.
         if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
         setCaptureStatus(null);
-        const { dupSkipped, batch } = upsertOrders(incoming);
+        const { dupSkipped, trashedSkipped, trashedWos, batch } = upsertOrders(incoming);
         // Existing WOs are updated SILENTLY (in place, no modal); only genuinely
         // new WOs are surfaced in the import-review modal.
         const arr = Array.isArray(batch) ? batch : [];
@@ -3989,6 +3989,8 @@ function App() {
         if (newBatch.length) parts.push(`${newBatch.length} new`);
         if (updated)         parts.push(`${updated} updated`);
         if (dupSkipped)      parts.push(`${dupSkipped} skipped`);
+        // round5 A4 / #13: tell the user which cancelled/trashed WOs were rejected.
+        if (trashedSkipped)  parts.push(`${trashedSkipped} rejected (in Trash${trashedWos && trashedWos.length ? ': ' + trashedWos.join(', ') : ''})`);
         if (parts.length) toast('Import: ' + parts.join(' · '));
         if (newBatch.length) {
           // Notification instead of an auto-popping modal (no work interruption);
