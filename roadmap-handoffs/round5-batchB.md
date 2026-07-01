@@ -17,17 +17,59 @@ Three issues, one commit:
 LIVE-VERIFIED PASS (user, 2026-06-30): dropdown above the map, rows = address +
 city, no tech names. isolation:isolate was the correct root fix.
 
-## Remaining Batch B (not started)
+## B/#6 — CC context menu not closing on click-off — DONE
 
-- #6 right-click menu not disappearing on click-off — likely missing/leaked
-  click-off listener (A6). Find the WO context menu; ensure a mousedown-outside
-  handler with stable cleanup.
-- #9 update banner not showing — UpdateBanner exists (app.jsx:2524), updateState
-  at ~4042. Debug why state stays null / banner not rendered.
-- #10 notes entry/edit fields don't scale to text height / not resizable — the
-  note textarea(s). Add autosize-on-input + allow resize.
-- #5 folder button -> dropdown (Create root / Create dated subfolder / View) —
-  extends shipped folder automation (v4.3-4.5; main.js IPC).
-- #3 service-library quick access from WO modal (+ invoice integration) — FEATURE.
+ROOT CAUSE: CommandCenter modal panel (app.jsx:733) has onClick stopPropagation
+(bubble). DetailPane's context-menu close listener was a BUBBLE-phase document
+`click` listener (detail.jsx:185) — a click-off inside the modal was swallowed by
+the panel before reaching document, so the menu never dismissed. Fix: moved the
+click-close to CAPTURE phase (`addEventListener('click', onClick, true)`), which
+runs top-down from document before the panel's bubble stopPropagation. Same
+mechanism ListPane already used for its contextmenu capture. Menu-item clicks
+still fire (React root dispatch is unaffected by native document capture), then
+close. Build + renderer-smoke gate: PASS. LIVE-VERIFY PENDING (reload app).
+
+## B/#9 — update banner not showing — PARTIAL (notif defect fixed)
+
+Banner render path (UpdateBanner app.jsx:2529, updater wiring 4037, preload
+bridge, main.js:181-199) is CORRECT and only validatable with a REAL packaged
+release (auto-check is gated by app.isPackaged; dev never checks). No code bug
+found in the banner. FIXED a concrete adjacent defect: the update NOTIFICATION
+(app.jsx:4393) checked status `'downloaded'`, which main NEVER emits — main emits
+`'ready'` (main.js:185). So the bell's "Ready to install" item never appeared and
+the notif vanished mid-download. Now matches vocab available/downloading/ready.
+If the banner still fails after a real release, look at the electron-updater feed
+(github publish config is present in package.json; check releases aren't drafts/
+prereleases — releaseType:'release').
+
+## B/#10 — note fields don't scale to text / not resizable — DONE
+
+Added `autosize(el)` helper in detail.jsx (height:auto -> scrollHeight). Wired
+into all three note textareas: NoteComposer (was resize:'none' -> 'vertical',
+minHeight floor for the focus-expand), NoteCard edit, MoreInfoCard edit. Grow-on-
+change via onChange; grow-on-open piggybacks the existing editing-focus effect
+(the mount signal — no A3/A4 chicken-egg). resize:'vertical' retained for manual
+drag. WO form's More-Info field (app.jsx:1226) already resized — left as-is.
+Gate: PASS. LIVE-VERIFY PENDING.
+
+## B/#5 — folder button -> dropdown — DONE
+
+New IPC `wo-create-subfolder` (main.js): mkdir recursive `<WO root>/<YYYY-MM-DD>`
++ open (creates root too if absent; no bid sheet). preload woFolder.subfolder.
+Renderer: createWoSubfolder callback + onWoAction case 'createSubfolder'.
+Surfaced in 3 places for consistency: CC top-bar FolderMenu dropdown (Create
+folder / Create dated subfolder / View folder), WOContextMenu folder submenu,
+DetailPane overflow menu. Gate: PASS. LIVE-VERIFY PENDING.
+
+## B/#3 — service-library from WO modal (start invoice) — DEFERRED (design locked)
+
+Chosen behavior (user, 2026-07-01): "Start invoice from WO". The library
+autocomplete integration ALREADY EXISTS inside InvoiceEditor (invoices.jsx:362,
+catalog-driven line items). And `openInvoiceEditor(id)` (app.jsx:4749) already
+loads the fresh service_library and opens the editor for a WO. So #3 reduces to:
+surface an "Invoice" action in the command-center WO modal that calls
+onAction('invoice') -> openInvoiceEditor(woId). Suggested placement: a button in
+CCTopBar (app.jsx:886-892, next to Edit/Folder) + wire an 'invoice' case in
+onWoAction. No new library plumbing needed. Own slice; not built this session.
 
 UI items are verified live (reload / electron), not by the test gate.

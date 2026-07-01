@@ -833,6 +833,40 @@ function CCDropdown({ label, items, onPick }) {
   );
 }
 
+// Command-center Folder action dropdown (#5). Same look as CCDropdown but fires
+// WO folder actions instead of swapping WOs: create the root folder (+bid sheet),
+// create a dated revisit subfolder, or open the existing folder.
+function FolderMenu({ onAction }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const item = (label, action) => (
+    <div onClick={() => { setOpen(false); onAction && onAction(action); }}
+      style={{ padding: '6px 12px', fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', color: 'var(--text-1)' }}>{label}</div>
+  );
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(o => !o)} style={ccBtnStyle()}>Folder ▾</button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, marginTop: 4, minWidth: 200,
+          background: 'var(--bg-surface)', border: '1px solid var(--border-2)', borderRadius: 8,
+          boxShadow: '0 12px 30px rgba(0,0,0,0.45)', padding: '4px 0', zIndex: 1000,
+        }}>
+          {item('Create folder', 'createFolder')}
+          {item('Create dated subfolder', 'createSubfolder')}
+          {item('View folder', 'openFolder')}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Horizontal workflow-phase stepper. Highlights the phase holding the WO's
 // status; phases before it read as done (accent connector), after as pending.
 function PhaseStepper({ phases, current }) {
@@ -888,7 +922,7 @@ function CCTopBar({ index, total, onPrev, onNext, phases, phaseName, siblings, n
         <CCDropdown label="Nearby" items={nearby} onPick={onPick} />
         <CCDropdown label="Recent" items={recents} onPick={onPick} />
         {onEdit && <button onClick={() => onEdit(woId)} style={ccBtnStyle()}>Edit</button>}
-        <button onClick={() => onAction && onAction('openFolder')} style={ccBtnStyle()}>Folder</button>
+        <FolderMenu onAction={onAction} />
         {canCapture && <button onClick={() => onAction && onAction('capture')} style={ccBtnStyle('var(--accent)')}>Capture</button>}
       </div>
     </div>
@@ -1424,6 +1458,7 @@ export function WOContextMenu({
     }
     if (key === 'folder') return [
       { label: 'Create folder', onClick: () => onWoAction && onWoAction(woId, 'createFolder') },
+      { label: 'Create dated subfolder', onClick: () => onWoAction && onWoAction(woId, 'createSubfolder') },
       { label: 'Go to folder', disabled: folderExists === false, onClick: () => onWoAction && onWoAction(woId, 'openFolder') },
     ];
     if (key === 'mark') return [
@@ -3570,8 +3605,10 @@ function App() {
   // newly-imported WOs before they vanish into the active list. Cleared
   // when user clicks Done.
   const [importInspect, setImportInspect] = React.useState(null);
+  // mapsDefaultView is always derived from the Settings office address (written
+  // by saveHome). The per-point "Set this point as default view" override was
+  // deprecated — the default is always the office.
   const mapsDefaultView = settings.mapsDefaultView || DEFAULT_MAPS_VIEW;
-  const setMapsDefaultView = React.useCallback((v) => updateSettings({ mapsDefaultView: v }), [updateSettings]);
   const mapsHomeState = settings.mapsHomeState || '';
   const mapsHomeZip = settings.mapsHomeZip || '';
   const mapsHomeAddress = settings.mapsHomeAddress || '';
@@ -4390,8 +4427,11 @@ function App() {
       }
     }
     for (const a of alerts) out.push({ id: 'alert-' + (a.wo || a.kind), kind: a.kind, title: (a.wo || a.kind), sub: a.blurb, wo: a.wo });
-    if (updateState && (updateState.status === 'available' || updateState.status === 'downloaded')) {
-      out.push({ id: 'update', kind: 'update', title: 'App update available', sub: updateState.status === 'downloaded' ? 'Ready to install' : 'Downloading…', update: true });
+    // Status vocab must match main.js update-status: available -> downloading -> ready.
+    // ('downloaded' is never emitted; using it dropped the notif mid-download and
+    // never surfaced the ready-to-install item.)
+    if (updateState && (updateState.status === 'available' || updateState.status === 'downloading' || updateState.status === 'ready')) {
+      out.push({ id: 'update', kind: 'update', title: 'App update available', sub: updateState.status === 'ready' ? 'Ready to install' : 'Downloading…', update: true });
     }
     for (const e of notifEvents) out.push(e);
     return out;
@@ -5127,6 +5167,18 @@ function App() {
     }).catch(e => toast('Folder error: ' + e.message));
   }, [orders, toast]);
 
+  // Create a dated subfolder under the WO root (revisit filing) and open it.
+  // mkdir is recursive in main, so the root is created too if absent.
+  const createWoSubfolder = React.useCallback((id) => {
+    const src = orders.find(o => o.id === id);
+    if (!src) return Promise.resolve();
+    if (!window.woFolder || !window.woFolder.subfolder) { toast('Folder creation is only available in the desktop app'); return Promise.resolve(); }
+    return window.woFolder.subfolder(src).then(res => {
+      if (!res || !res.ok) { toast('Subfolder failed: ' + ((res && res.error) || 'unknown error')); return; }
+      toast('Dated subfolder created');
+    }).catch(e => toast('Folder error: ' + e.message));
+  }, [orders, toast]);
+
   // Open the WO root folder in Explorer (no create). Missing folder -> toast.
   const openWoFolder = React.useCallback((id) => {
     const src = orders.find(o => o.id === id);
@@ -5351,6 +5403,9 @@ function App() {
       case 'createFolder':
         createFolder(id);
         break;
+      case 'createSubfolder':
+        createWoSubfolder(id);
+        break;
       case 'openFolder':
         openWoFolder(id);
         break;
@@ -5411,7 +5466,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, createFolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
+  }, [updateOrder, captureOrder, createFolder, createWoSubfolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -5566,12 +5621,16 @@ function App() {
     const mkItem = (o) => ({ id: o.id, primary: splitAddress(o).addr || o.id, sub: splitAddress(o).city || '' });
     const siblings = (myAddr ? orders.filter(o => !o.deleted && o.id !== me.id && (splitAddress(o).addr || '').toLowerCase() === myAddr) : [])
       .map(mkItem);
+    // Nearby + Recent: open/un-completed WOs ONLY (active tab). Completed/sent/
+    // trashed WOs are not actionable jump targets from the modal.
     const nearby = (myCity ? orders.filter(o => !o.deleted && o.id !== me.id
+        && (o.tab || 'active') === 'active'
         && (splitAddress(o).city || '').toLowerCase() === myCity
         && ccTradeSet(typeLetter(o.type)).some(t => mySet.includes(t))) : [])
       .map(mkItem);
     const recents = recentWOs.filter(id => id !== me.id)
-      .map(id => orders.find(o => o.id === id)).filter(Boolean).map(mkItem);
+      .map(id => orders.find(o => o.id === id)).filter(Boolean)
+      .filter(o => !o.deleted && (o.tab || 'active') === 'active').map(mkItem);
     const idx = visibleOrder.indexOf(me.id);
     const phaseName = (phases.find(p => (p.statuses || []).includes(me.status)) || {}).name || null;
     const canCapture = me.pm === 'AMH' && !!(window.scraper && window.scraper.captureWO);
@@ -5720,7 +5779,6 @@ function App() {
               activeOrders={mapOrders}
               geocache={geocache}
               defaultView={mapsDefaultView}
-              setDefaultView={setMapsDefaultView}
               selected={mapsSelected}
               setSelected={setMapsSelected}
               routeStops={routeStops}

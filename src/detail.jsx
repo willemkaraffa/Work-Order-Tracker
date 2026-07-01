@@ -12,6 +12,17 @@ import {
   WOContextMenu, Field, MenuItem, MenuDivider, MenuCaption, DEFAULT_STATUSES,
 } from './app.jsx';
 
+// Grow a note textarea to fit its content (#10: fields didn't scale to text).
+// Called on change and on edit-mode entry (piggybacks the existing focus
+// effect, which is the mount signal). resize:'vertical' still lets the user
+// drag taller; CSS minHeight holds a floor and clamps the rendered box up when
+// content is short. overflow:'hidden' avoids a transient scrollbar mid-grow.
+function autosize(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
 function PhoneField({ data }) {
   const [open, setOpen] = React.useState(false);
   const contacts = Array.isArray(data.contacts) ? data.contacts : [];
@@ -131,6 +142,7 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
               {onEditInvoice && <MenuItem onClick={doInvoice}>Edit invoice…</MenuItem>}
               {canCapture && <MenuItem onClick={doCap}>{capturing ? 'Capturing…' : 'Capture from portal'}</MenuItem>}
               <MenuItem onClick={act('createFolder')}>Create folder</MenuItem>
+              <MenuItem onClick={act('createSubfolder')}>Create dated subfolder</MenuItem>
               <MenuItem disabled={folderExists === false} onClick={act('openFolder')}>Go to folder</MenuItem>
               <MenuDivider />
               {tab === 'active' && (<>
@@ -178,17 +190,20 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     const onKey = (e) => { if (e.key === 'Escape') closeCtx(); };
     const onClick = () => closeCtx();
     const onCtx = () => closeCtx();
-    // Capture-phase contextmenu close: a right-click anywhere else (list
-    // row, header, sidebar) closes this detail menu before its element-
-    // level handler opens a new menu. Avoids stacked menus across panes.
+    // Capture-phase close for BOTH click and contextmenu: the CommandCenter
+    // modal panel stops click/contextmenu propagation at bubble (app.jsx), so a
+    // bubble-phase document listener never sees a click-off inside the modal and
+    // the menu wouldn't dismiss (#6). Capture runs top-down from document before
+    // the panel's bubble stopPropagation, so click-off closes here. Also closes
+    // this menu before another pane's element handler opens a new one.
     const id = setTimeout(() => {
-      document.addEventListener('click', onClick);
+      document.addEventListener('click', onClick, true);
       document.addEventListener('keydown', onKey);
       document.addEventListener('contextmenu', onCtx, true);
     }, 0);
     return () => {
       clearTimeout(id);
-      document.removeEventListener('click', onClick);
+      document.removeEventListener('click', onClick, true);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('contextmenu', onCtx, true);
     };
@@ -530,14 +545,14 @@ function NoteComposer({ onSave }) {
       </div>
       <textarea
         value={body}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={(e) => { setBody(e.target.value); autosize(e.target); }}
         onKeyDown={onKeyDown}
         onFocus={() => setOpen(true)}
-        rows={open || body ? 3 : 1}
         placeholder="Write a note…"
         style={{
           width: '100%', marginTop: 8,
-          background: 'transparent', border: 'none', outline: 'none', resize: 'none',
+          minHeight: open || body ? '4.2em' : '1.6em', overflow: 'hidden',
+          background: 'transparent', border: 'none', outline: 'none', resize: 'vertical',
           fontFamily: 'inherit', fontSize: 14,
           color: 'var(--text-1)', lineHeight: 1.5,
         }}
@@ -565,6 +580,7 @@ function MoreInfoCard({ value, onSave, color }) {
       taRef.current.focus();
       const n = taRef.current.value.length;
       try { taRef.current.setSelectionRange(n, n); } catch (_) {}
+      autosize(taRef.current);
     }
   }, [editing]);
 
@@ -619,14 +635,14 @@ function MoreInfoCard({ value, onSave, color }) {
           <textarea
             ref={taRef}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { setDraft(e.target.value); autosize(e.target); }}
             rows={3}
             placeholder="Alternate phone, contact names, access details..."
             style={{
               width: '100%', fontFamily: 'inherit', fontSize: 15,
               background: 'transparent', color: 'var(--text-1)',
               border: '1px solid var(--border-2)', borderRadius: 4,
-              padding: 6, resize: 'vertical',
+              padding: 6, resize: 'vertical', overflow: 'hidden',
             }}
           />
           <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>
@@ -666,6 +682,7 @@ export function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit,
       taRef.current.focus();
       const n = taRef.current.value.length;
       try { taRef.current.setSelectionRange(n, n); } catch (_) {}
+      autosize(taRef.current);
     }
   }, [editing]);
 
@@ -721,13 +738,13 @@ export function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit,
           <textarea
             ref={taRef}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { setDraft(e.target.value); autosize(e.target); }}
             rows={3}
             style={{
               width: '100%', fontFamily: 'inherit', fontSize: 15,
               background: 'transparent', color: 'var(--text-1)',
               border: '1px solid var(--border-2)', borderRadius: 4,
-              padding: 6, resize: 'vertical',
+              padding: 6, resize: 'vertical', overflow: 'hidden',
             }}
           />
           <div style={{ display: 'flex', gap: 8, marginTop: 6, justifyContent: 'flex-end' }}>

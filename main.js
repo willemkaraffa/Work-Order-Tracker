@@ -600,6 +600,23 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
   }
 });
 
+// Create a dated subfolder (YYYY-MM-DD) under the WO root and open it. mkdir is
+// recursive so the root is created too if it does not exist yet — a revisit can
+// be filed without first pressing Create folder. No bid sheet (that lives in the
+// root; revisit folders are for follow-up docs/photos).
+ipcMain.handle('wo-create-subfolder', (_e, rec) => {
+  try {
+    const r = resolveWoFolder(rec);
+    if (r.error) return { ok: false, error: r.error };
+    const d = new Date();
+    const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const sub = path.join(r.folder, stamp);
+    fs.mkdirSync(sub, { recursive: true });
+    shell.openPath(sub);
+    return { ok: true, path: sub };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.

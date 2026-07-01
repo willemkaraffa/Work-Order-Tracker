@@ -124,7 +124,7 @@ function NotesViewModal({ order, onClose }) {
   );
 }
 
-export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
+export function MapsModule({ activeOrders, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
   const [query, setQuery] = React.useState('');
   // WO id whose read-only notes modal is open, or null.
   const [notesWO, setNotesWO] = React.useState(null);
@@ -835,13 +835,6 @@ export function MapsModule({ activeOrders, geocache, defaultView, setDefaultView
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
-              {g && g.lat != null && item('Center map here', () => {
-                if (mapRef.current) mapRef.current.panTo([g.lat, g.lon]);
-              })}
-              {g && g.lat != null && setDefaultView && item('Set this point as default view', () => {
-                const z = mapRef.current ? mapRef.current.getZoom() : (defaultView && defaultView.zoom) || 10;
-                setDefaultView({ lat: +g.lat.toFixed(5), lon: +g.lon.toFixed(5), zoom: z });
-              })}
               {onWoAction && item('Re-geocode address', () => onWoAction(ctxMenu.woId, 'regeocode'))}
               {onWoAction && g && g.suspect && item('Dismiss suspect flag', () => onWoAction(ctxMenu.woId, 'dismissSuspect'))}
             </>)}
