@@ -3109,8 +3109,14 @@ export function HeaderChips() {
             background: 'var(--bg-surface)', border: '1px solid var(--border-2)',
             borderRadius: 10, boxShadow: '0 16px 40px rgba(0,0,0,0.5)', padding: '6px 0', zIndex: 60,
           }}>
-            <div style={{ padding: '6px 14px 8px', fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-              Notifications
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 14px 8px' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                Notifications
+              </span>
+              {a.notifications.length > 0 && a.onMarkAllRead && (
+                <span onClick={(e) => { e.stopPropagation(); a.onMarkAllRead(); }}
+                  title="Mark all read" style={{ fontSize: 11, color: 'var(--accent)', cursor: 'pointer', fontWeight: 600 }}>Mark all read</span>
+              )}
             </div>
             {a.notifications.length === 0 ? (
               <div style={{ padding: '14px', fontSize: 13, color: 'var(--text-3)', fontStyle: 'italic' }}>Nothing to report.</div>
@@ -3975,6 +3981,11 @@ function App() {
   // Notification events (capture/scraper results). Session-only; alerts + overdue
   // are derived live (see `notifications` memo), these are the non-derivable events.
   const [notifEvents, setNotifEvents] = React.useState([]);
+  // Read-state for the bell: id -> readAt(ms). Clicking (or Mark all read) marks
+  // a notification read so it drops off the counter. DERIVED notifs (overdue/
+  // alert) re-activate once the re-nag window elapses (overdue-threshold setting)
+  // so a stale WO is never lost; capture events are removed outright on click.
+  const [notifReads, setNotifReads] = React.useState({});
   const pushNotif = React.useCallback((ev) => {
     setNotifEvents(prev => [{ id: 'ev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), ts: Date.now(), ...ev }, ...prev].slice(0, 30));
   }, []);
@@ -4443,6 +4454,10 @@ function App() {
     if (!loading) {
       for (const o of orders) {
         if (o.deleted || (o.tab && o.tab !== 'active')) continue;
+        // 'onsite'-tagged status = tech actively working the job: schedule is
+        // immune to overdue (no overdue notification). 'visited' still clears
+        // the schedule elsewhere; onsite keeps it but silences the nag.
+        if (statusTags[o.status] === 'onsite') continue;
         if (o.schedule && o.schedule.date && isOverdueSched(o.schedule.date, o.schedule.start)) {
           out.push({ id: 'overdue-' + o.id, kind: 'overdue', title: 'Overdue · ' + o.id,
             sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''), wo: o.id });
@@ -4457,17 +4472,41 @@ function App() {
       out.push({ id: 'update', kind: 'update', title: 'App update available', sub: updateState.status === 'ready' ? 'Ready to install' : 'Downloading…', update: true });
     }
     for (const e of notifEvents) out.push(e);
-    return out;
-  }, [orders, alerts, notifEvents, updateState, overdueTick, loading]);
+    // Drop notifs the user has marked read. Updates always show; derived notifs
+    // (overdue/alert) re-surface once the re-nag window (overdue-threshold
+    // minutes) elapses so nothing is permanently lost.
+    const now = Date.now();
+    const renagMs = (overdueCfg.thresholdMinutes || 60) * 60000;
+    return out.filter(n => {
+      if (n.update) return true;
+      const readAt = notifReads[n.id];
+      return !readAt || (now - readAt) >= renagMs;
+    });
+  }, [orders, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg]);
   // Click a notification: WO items open the command center; capture items open
   // their review modal; the update item installs.
   const onNotifClick = React.useCallback((n) => {
     if (!n) return;
+    // Mark read so it drops off the counter. Capture events are removed outright
+    // (their payload is a point-in-time snapshot — avoid acting on stale data).
+    if (n.id) setNotifReads(r => ({ ...r, [n.id]: Date.now() }));
+    if (String(n.id).startsWith('ev-')) dismissNotif(n.id);
     if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
     else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
     else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
     else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
-  }, [openWO]);
+  }, [openWO, dismissNotif]);
+  // Mark all currently-shown notifications read (counter -> 0). Capture events
+  // are cleared entirely; derived notifs re-surface after the re-nag window.
+  const markAllNotifsRead = React.useCallback(() => {
+    const now = Date.now();
+    setNotifReads(r => {
+      const next = { ...r };
+      for (const n of notifications) next[n.id] = now;
+      return next;
+    });
+    setNotifEvents([]);
+  }, [notifications]);
 
   // Push tray state whenever relevant values change.
   React.useEffect(() => {
@@ -5750,6 +5789,7 @@ function App() {
           notifications,
           onNotifClick,
           onDismissNotif: dismissNotif,
+          onMarkAllRead: markAllNotifsRead,
           onExportCsv: exportViewCsv,
           onAddInbox: onAddInbox,
           onOpenSettings: () => { setCurrentModule('work-orders'); setCurrentView('settings'); },

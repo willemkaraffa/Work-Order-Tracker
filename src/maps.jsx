@@ -732,7 +732,10 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
             );
           })()}
         </aside>
-        <div style={{ minWidth: 0, position: 'relative' }}>
+        {/* isolation:isolate contains Leaflet's panes (z 200-700) in their own
+            stacking context so they can't hoist above the header's notification
+            dropdown (same fix as the command-center MapInset). */}
+        <div style={{ minWidth: 0, position: 'relative', isolation: 'isolate' }}>
           <div
             ref={containerRef}
             style={{ position: 'absolute', inset: 0, background: 'var(--bg-surface-2)' }}
