@@ -363,6 +363,9 @@ function toDisplayRow(o) {
     schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
     lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
+    // Change indicator: { kind:'new' } or { kind:'changed', fields:[...] }. Set by
+    // import/capture, cleared when the WO's command center is opened.
+    unseen: o.unseen || null,
   };
 }
 
@@ -3994,6 +3997,15 @@ function App() {
   // Keep the latest orders reachable from the one-time onFoundWos listener.
   React.useEffect(() => { ordersRef.current = orders; }, [orders]);
 
+  // Clear a WO's change indicator once its command center is opened ("highlight
+  // until clicked"). Keyed on the open signal (not orders) so it fires once per
+  // open, not on every order mutation.
+  React.useEffect(() => {
+    if (!coOpen || selectedWO == null) return;
+    const o = ordersRef.current.find(x => x.id === selectedWO);
+    if (o && o.unseen) updateOrder(selectedWO, cur => { const n = { ...cur }; delete n.unseen; return n; });
+  }, [coOpen, selectedWO]);
+
   // Phase 16: paint the tray icon with the Gamble brand. Renderer
   // rasterizes GambleMark, ships the PNG to main, main does
   // tray.setImage. Runs once per app launch. If anything fails the
@@ -5183,6 +5195,15 @@ function App() {
         hist.push({ ts: Date.now(), action: 'auto-flipped to Complete', detail: 'auto: Pending Validation' });
       }
       patch.history = hist;
+      // Change indicator: surface WHICH fields the portal re-capture changed, so
+      // an AMH WO flagged "changed" isn't opaque. Cleared when the WO is opened.
+      const cmp = { address: 'address', city: 'city', phone: 'phone', type: 'type', propertyId: 'prop ID', portalLink: 'link', contactName: 'contact', bidAmount: 'bid', status: 'status', notes: 'notes' };
+      const changedFields = [];
+      for (const [k, lbl] of Object.entries(cmp)) { if ((patch[k] || '') !== (cur[k] || '')) changedFields.push(lbl); }
+      if (JSON.stringify(patch.bidItems || []) !== JSON.stringify(cur.bidItems || [])) changedFields.push('bid items');
+      if (JSON.stringify(patch.contacts || []) !== JSON.stringify(cur.contacts || [])) changedFields.push('contacts');
+      if ((patch.tab || 'active') !== (cur.tab || 'active')) changedFields.push('tab');
+      if (changedFields.length) patch.unseen = { kind: 'changed', fields: changedFields };
       return patch;
     });
     return Array.isArray(res.warnings) ? res.warnings : [];

@@ -406,6 +406,11 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
   // Status-colored left bar replaces the in-row pill (kept in the modal). Sent
   // rows (Invoices) drop it; that module renders status itself.
   const showStatus = view !== 'sent' && statusMode !== 'hidden';
+  // Change indicator: new/changed WOs stay tinted + chipped until opened.
+  const unseen = row.unseen;
+  const unseenBg = !unseen ? null
+    : unseen.kind === 'new' ? 'color-mix(in srgb, var(--accent) 13%, transparent)'
+    : 'color-mix(in srgb, #d9a441 13%, transparent)';
   return (
     <div
       data-wo-id={row.wo}
@@ -416,7 +421,7 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
       onContextMenu={onContextMenu ? (e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, row.wo, row.tab); } : undefined}
       style={{
         padding: `${d.rowPadY}px 14px`,
-        background: (checked || selected) ? 'var(--bg-row-sel)' : 'transparent',
+        background: (checked || selected) ? 'var(--bg-row-sel)' : (unseenBg || 'transparent'),
         borderBottom: '1px solid var(--border-2)',
         borderLeft: '4px solid ' + (showStatus ? sc : 'transparent'),
         cursor: 'pointer',
@@ -439,6 +444,14 @@ function ListRow({ row, selected, onClick, hideAge, view, density, checked, onCh
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             letterSpacing: '-0.005em',
           }}>{row.addr}</span>
+          {unseen && (
+            <span title={unseen.kind === 'changed' && unseen.fields?.length ? 'Changed: ' + unseen.fields.join(', ') : 'New work order'}
+              style={{
+                flexShrink: 0, fontSize: 10, fontWeight: 700, letterSpacing: '0.04em',
+                padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap',
+                background: unseen.kind === 'new' ? 'var(--accent)' : '#d9a441', color: '#fff',
+              }}>{unseen.kind === 'new' ? 'NEW' : 'UPDATED'}</span>
+          )}
           {row.flags?.map((f) => <FlagGlyph key={f} kind={f} />)}
           {(row.city || row.age != null) && (
             <div style={{ marginLeft: 'auto', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 8 }}>

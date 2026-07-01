@@ -382,11 +382,14 @@ export function useWorkOrders() {
         // Silent update ONLY when something actually changed — no-op re-imports
         // add no history and are not reported.
         const scalars = ['pm', 'type', 'address', 'phone', 'status', 'priority', 'notes', 'propertyId', 'city', 'portalLink', 'contactName', 'bidAmount'];
-        const changed = scalars.some(k => (merged[k] || '') !== (old[k] || ''))
-          || JSON.stringify(merged.bidItems || []) !== JSON.stringify(old.bidItems || [])
-          || JSON.stringify(merged.contacts || []) !== JSON.stringify(old.contacts || []);
-        if (changed) {
-          merged.history = [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: '' }];
+        const labels = { pm: 'client', type: 'type', address: 'address', phone: 'phone', status: 'status', priority: 'priority', notes: 'notes', propertyId: 'prop ID', city: 'city', portalLink: 'link', contactName: 'contact', bidAmount: 'bid' };
+        const changedFields = scalars.filter(k => (merged[k] || '') !== (old[k] || '')).map(k => labels[k] || k);
+        if (JSON.stringify(merged.bidItems || []) !== JSON.stringify(old.bidItems || [])) changedFields.push('bid items');
+        if (JSON.stringify(merged.contacts || []) !== JSON.stringify(old.contacts || [])) changedFields.push('contacts');
+        if (changedFields.length) {
+          merged.history = [...(old.history || []), { ts: Date.now(), action: 'updated from import', detail: changedFields.join(', ') }];
+          // Change indicator: surface WHAT changed so re-imports aren't opaque.
+          merged.unseen = { kind: 'changed', fields: changedFields };
           byId.set(id, merged);
           batch.push({ id, isNew: false });
           imported++;
@@ -437,6 +440,8 @@ export function useWorkOrders() {
             ? [{ ts: Date.now(), action: 'imported', detail: '' },
                { ts: Date.now(), action: 'auto-flipped to Complete', detail: 'import status=' + incStatus + ' → Complete - Pending Approval' }]
             : [{ ts: Date.now(), action: 'imported', detail: '' }],
+          // Change indicator: new WO stays highlighted until its command center is opened.
+          unseen:        { kind: 'new' },
         };
         byId.set(id, wo);
         batch.push({ id, isNew: true });
