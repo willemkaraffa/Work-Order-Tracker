@@ -5559,7 +5559,7 @@ function App() {
     if (kind === 'setStatus' || kind === 'setType' || kind === 'setTech' ||
         kind === 'backToActive' || kind === 'softDelete' ||
         kind === 'toggleEmergency' || kind === 'toggleWarranty' ||
-        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder' || kind === 'openFolder') {
+        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder' || kind === 'createSubfolder' || kind === 'openFolder') {
       woAction(id, kind, payload);
       return;
     }
