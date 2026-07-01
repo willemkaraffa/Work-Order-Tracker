@@ -4086,14 +4086,23 @@ function App() {
       });
     }
     if (window.updater && window.updater.onStatus) {
-      // Sticky: once a real update is in flight (available/downloading/ready),
-      // ignore a later transient 'none'/'error' so the banner can't flash away
-      // mid-update. A fresh 'checking' or real status still overrides.
-      window.updater.onStatus((d) => setUpdateState(prev => {
-        const inFlight = prev && (prev.status === 'available' || prev.status === 'downloading' || prev.status === 'ready');
-        if (inFlight && d && (d.status === 'none' || d.status === 'error')) return prev;
-        return d;
-      }));
+      window.updater.onStatus((d) => {
+        // Toast the two meaningful, rare transitions so the user gets popup
+        // feedback even if the in-flow banner isn't noticed. (available/ready
+        // only ever fire in a packaged build with a real newer release.) The
+        // Settings "Check for updates" button already toasts checking/failure.
+        const tt = toastRef.current;
+        if (tt && d && d.status === 'available') tt('Update available' + (d.version ? ' v' + d.version : '') + ' — downloading…');
+        if (tt && d && d.status === 'ready')     tt('Update ready' + (d.version ? ' v' + d.version : '') + ' — restart to install');
+        // Sticky: once a real update is in flight (available/downloading/ready),
+        // ignore a later transient 'none'/'error' so the banner can't flash away
+        // mid-update. A fresh 'checking' or real status still overrides.
+        setUpdateState(prev => {
+          const inFlight = prev && (prev.status === 'available' || prev.status === 'downloading' || prev.status === 'ready');
+          if (inFlight && d && (d.status === 'none' || d.status === 'error')) return prev;
+          return d;
+        });
+      });
     }
   }, []);
 
