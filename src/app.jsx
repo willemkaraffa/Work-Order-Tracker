@@ -922,6 +922,7 @@ function CCTopBar({ index, total, onPrev, onNext, phases, phaseName, siblings, n
         <CCDropdown label="Nearby" items={nearby} onPick={onPick} />
         <CCDropdown label="Recent" items={recents} onPick={onPick} />
         {onEdit && <button onClick={() => onEdit(woId)} style={ccBtnStyle()}>Edit</button>}
+        <button onClick={() => onAction && onAction('invoice')} style={ccBtnStyle()}>Invoice</button>
         <FolderMenu onAction={onAction} />
         {canCapture && <button onClick={() => onAction && onAction('capture')} style={ccBtnStyle('var(--accent)')}>Capture</button>}
       </div>
@@ -5486,7 +5487,8 @@ function App() {
     const id = selectedWO;
     if (!id) return;
     // Delegate shared cases to woAction.
-    if (kind === 'setStatus' || kind === 'backToActive' || kind === 'softDelete' ||
+    if (kind === 'setStatus' || kind === 'setType' || kind === 'setTech' ||
+        kind === 'backToActive' || kind === 'softDelete' ||
         kind === 'toggleEmergency' || kind === 'toggleWarranty' ||
         kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder' || kind === 'openFolder') {
       woAction(id, kind, payload);
@@ -5527,9 +5529,13 @@ function App() {
       }
       case 'capture':
         return captureOrder(id);
+      case 'invoice':
+        // #3: start/edit the invoice for this WO from the command center. The
+        // editor loads the service library fresh and autocompletes line items.
+        return openInvoiceEditor(id);
       default: break;
     }
-  }, [selectedWO, woAction, captureOrder, orders, updateOrder, deleteOrderHard, addOrder, toast]);
+  }, [selectedWO, woAction, captureOrder, openInvoiceEditor, orders, updateOrder, deleteOrderHard, addOrder, toast]);
 
   // change10 queue #5: customTheme overrides merge over the base theme.
   // Only entries with hex values overwrite. The picker UI is scoped to a

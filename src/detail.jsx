@@ -216,6 +216,8 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     e.preventDefault();
     setCtxMenu({ woId: data.wo, x: e.clientX, y: e.clientY, tab: data.tab });
   };
+  const [typeMenuOpen, setTypeMenuOpen] = React.useState(false);
+  const [techMenuOpen, setTechMenuOpen] = React.useState(false);
   const [statusMenuOpen, setStatusMenuOpen] = React.useState(false);
   const [clientMenuOpen, setClientMenuOpen] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
@@ -246,6 +248,24 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
   }, [clientMenuOpen]);
 
+  React.useEffect(() => {
+    if (!typeMenuOpen) return;
+    const close = () => setTypeMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [typeMenuOpen]);
+
+  React.useEffect(() => {
+    if (!techMenuOpen) return;
+    const close = () => setTechMenuOpen(false);
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const t = setTimeout(() => document.addEventListener('click', close), 0);
+    document.addEventListener('keydown', onKey);
+    return () => { clearTimeout(t); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  }, [techMenuOpen]);
+
   if (!data) {
     return (
       <section style={{
@@ -262,6 +282,13 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
     if (data.nextAction === 'Send to Invoice' && onSendToInvoice) onSendToInvoice(data.wo);
     else if (data.nextAction === 'Mark Complete' && onMarkComplete) onMarkComplete(data.wo);
     else if (data.nextAction === 'Reopen'        && onReopen)       onReopen(data.wo);
+  };
+  // Shared dropdown box for the inline Type/Tech field editors (#7).
+  const fieldMenuBox = {
+    position: 'absolute', top: '100%', left: 0, marginTop: 4,
+    minWidth: 200, maxHeight: 260, overflowY: 'auto',
+    background: 'var(--bg-surface)', border: '1px solid var(--border-2)',
+    borderRadius: 8, boxShadow: '0 12px 30px rgba(0,0,0,0.45)', padding: '4px 0', zIndex: 60,
   };
   return (
     <section
@@ -375,10 +402,38 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
             </span>
           } />
           <Field label="Type" value={
-            <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span
+              onClick={onAction ? (e) => { e.stopPropagation(); setTypeMenuOpen(o => !o); } : undefined}
+              style={{ position: 'relative', display: 'inline-flex', gap: 6, alignItems: 'center', cursor: onAction ? 'pointer' : 'default' }}
+            >
               <TypeIcon kind={data.type} />{data.typeLabel}
+              {onAction && <span style={{ fontSize: 9, color: 'var(--text-3)' }}>{'▾'}</span>}
+              {typeMenuOpen && (
+                <div style={fieldMenuBox}>
+                  <MenuCaption>Set type</MenuCaption>
+                  {(types || []).map(t => (
+                    <MenuItem key={t} onClick={(e) => { e.stopPropagation(); setTypeMenuOpen(false); onAction('setType', t); }}>{t}</MenuItem>
+                  ))}
+                </div>
+              )}
             </span>} />
-          <Field label="Tech" value={data.tech} />
+          <Field label="Tech" value={
+            <span
+              onClick={onAction ? (e) => { e.stopPropagation(); setTechMenuOpen(o => !o); } : undefined}
+              style={{ position: 'relative', display: 'inline-flex', gap: 4, alignItems: 'center', cursor: onAction ? 'pointer' : 'default' }}
+            >
+              {data.tech || '—'}
+              {onAction && <span style={{ fontSize: 9, color: 'var(--text-3)' }}>{'▾'}</span>}
+              {techMenuOpen && (
+                <div style={fieldMenuBox}>
+                  <MenuCaption>Set tech</MenuCaption>
+                  <MenuItem onClick={(e) => { e.stopPropagation(); setTechMenuOpen(false); onAction('setTech', ''); }}>Unassigned</MenuItem>
+                  {(techs || []).map(t => (
+                    <MenuItem key={t} onClick={(e) => { e.stopPropagation(); setTechMenuOpen(false); onAction('setTech', t); }}>{t}</MenuItem>
+                  ))}
+                </div>
+              )}
+            </span>} />
           <Field label="Created" value={data.created} />
           <Field label="Prop ID" value={data.propId} />
           <Field label="Bid" value={data.bid} />
