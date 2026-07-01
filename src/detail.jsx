@@ -502,6 +502,7 @@ function NoteComposer({ onSave }) {
   const [open, setOpen] = React.useState(false);
   const [type, setType] = React.useState('Note');
   const [body, setBody] = React.useState('');
+  const taRef = React.useRef(null);
 
   const save = React.useCallback(() => {
     const trimmed = body.trim();
@@ -509,6 +510,10 @@ function NoteComposer({ onSave }) {
     if (onSave) onSave({ type, body: trimmed });
     setBody('');
     setOpen(false);
+    // autosize() set an inline height imperatively; React doesn't own it, so
+    // clearing body alone leaves the field tall. Reset it to fall back to the
+    // collapsed CSS minHeight.
+    if (taRef.current) taRef.current.style.height = '';
   }, [body, type, onSave]);
 
   const onKeyDown = (e) => {
@@ -544,6 +549,7 @@ function NoteComposer({ onSave }) {
         </span>
       </div>
       <textarea
+        ref={taRef}
         value={body}
         onChange={(e) => { setBody(e.target.value); autosize(e.target); }}
         onKeyDown={onKeyDown}

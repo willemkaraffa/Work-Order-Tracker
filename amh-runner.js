@@ -27,6 +27,12 @@ function runAmhCapture(woNumbers, creds) {
   return new Promise((resolve, reject) => {
     const { python, script } = pythonPaths();
     const env = { ...process.env };
+    // Electron injects CHROME_CRASHPAD_PIPE_NAME into its own env. It leaks
+    // through the Python child into Selenium's spawned Edge, which then crashes
+    // ("Chrome instance exited" / GetHandleVerifier) — but ONLY while a
+    // BrowserWindow is open, so a bare CLI run passes and the real app fails.
+    // Strip it so the child Edge starts its own crash handler cleanly.
+    delete env.CHROME_CRASHPAD_PIPE_NAME;
     if (creds) {
       if (creds.username) env.AMH_EMAIL    = creds.username;
       if (creds.password) env.AMH_PASSWORD = creds.password;

@@ -1398,8 +1398,13 @@ export function WOContextMenu({
     tab === 'complete' ? 'sendToInvoice' :
     tab === 'sent'     ? 'reopen'        : null;
 
-  const showEditDetails = !bulk && tab !== 'trash';
-  const showInvoice     = !bulk && invoiceLabel;
+  // In the WO command-center modal (source 'detail') the field-editing items
+  // (Edit details, the Mark/Invoice action, and the Set status/PM/type/tech
+  // submenus) are deprecated: the modal owns those via its primary button and
+  // the coming inline editing. Keep them for the list + maps menus.
+  const inWoModal       = source === 'detail';
+  const showEditDetails = !bulk && tab !== 'trash' && !inWoModal;
+  const showInvoice     = !bulk && invoiceLabel && !inWoModal;
   const showViewDetails = source === 'list' && !bulk;
   const showSchedule    = tab === 'active' && !bulk;
   const showMark        = tab === 'active' && !bulk;
@@ -1570,10 +1575,10 @@ export function WOContextMenu({
 
         {(showEditDetails || showInvoice || showViewDetails) && <MenuDivider />}
 
-        {parentRow('status', bulk ? 'Set status (' + bulkCount + ')' : 'Set status')}
-        {!bulk && parentRow('pm', 'Set PM')}
-        {!bulk && parentRow('type', 'Set type')}
-        {!bulk && parentRow('tech', 'Set tech')}
+        {!inWoModal && parentRow('status', bulk ? 'Set status (' + bulkCount + ')' : 'Set status')}
+        {!inWoModal && !bulk && parentRow('pm', 'Set PM')}
+        {!inWoModal && !bulk && parentRow('type', 'Set type')}
+        {!inWoModal && !bulk && parentRow('tech', 'Set tech')}
 
         {(showSchedule || tab !== 'trash') && <MenuDivider />}
 
@@ -4052,23 +4057,31 @@ function App() {
         setCaptureStatus(null);
         const arr = Array.isArray(items) ? items : [];
         const normNum = s => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+        // Split known (active) from trashed (deleted). Trashed WOs were
+        // intentionally cancelled — a scan must NOT resurface them as "new"
+        // (same class as the AMH captureAllAMH deleted-skip; ref v4.5.0).
         const known = new Set();
+        const trashed = new Set();
         for (const o of ordersRef.current) {
-          if (o.deleted) continue;
           const n = normNum(o.woId) || normNum(o.id);
-          if (n) known.add(n);
+          if (!n) continue;
+          if (o.deleted) trashed.add(n); else known.add(n);
         }
         const seen = new Set();
         const fresh = [];
+        let trashedSkipped = 0;
         for (const it of arr) {
           const n = normNum(it.num);
           if (!n || known.has(n) || seen.has(n)) continue;
-          seen.add(n); fresh.push({ num: it.num, url: it.url });
+          seen.add(n);
+          if (trashed.has(n)) { trashedSkipped++; continue; }
+          fresh.push({ num: it.num, url: it.url });
         }
         // Notification instead of auto-popping the modal; click opens the list.
         pushNotif({ kind: 'capture', captureType: 'msr', title: fresh.length ? (fresh.length + ' new MSR WO' + (fresh.length === 1 ? '' : 's')) : 'MSR scan: no new WOs',
           sub: fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'), payload: { items: fresh, scanned: arr.length } });
-        toast(fresh.length ? (fresh.length + ' new MSR WO(s) found') : 'No new MSR WOs on this list');
+        toast(fresh.length ? (fresh.length + ' new MSR WO(s) found' + (trashedSkipped ? ', ' + trashedSkipped + ' cancelled skipped' : ''))
+                           : (trashedSkipped ? trashedSkipped + ' cancelled skipped; no new MSR WOs' : 'No new MSR WOs on this list'));
       });
     }
     if (window.updater && window.updater.onStatus) {
