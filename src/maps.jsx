@@ -10,6 +10,7 @@ import {
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
+import { orderNumberMatches } from './orders-logic.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
 // render loop so the command-center MapInset draws an identical marker (single
@@ -237,7 +238,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       .filter(o => {
         if (!q) return true;
         const { addr, city } = splitAddress(o);
-        return String(o.id).toLowerCase().includes(q)
+        return orderNumberMatches(o, q)
           || (addr || '').toLowerCase().includes(q)
           || (city || '').toLowerCase().includes(q);
       })

@@ -5,13 +5,14 @@
 import React from 'react';
 import { densityFor, statusColor } from './constants.js';
 import { usePMs, useStatusColors } from './contexts.js';
+import { orderNumberMatches, findOtherViewMatches } from './orders-logic.js';
 import { Dot, PMChip, TypeIcon, FlagGlyph, ReorderBtns, swapAt } from './primitives.jsx';
 import {
   FilterDropdown, SortDropdown, BulkBar, WOContextMenu, sortRows, TT_VIEW_DATA,
-  isOverdueSched, OVERDUE_CFG, fmtSchedule,
+  isOverdueSched, OVERDUE_CFG, fmtSchedule, OtherTabMatches,
 } from './app.jsx';
 
-export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows, view = 'active', data, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox, onSelectView, alerts = [] }) {
+export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows, view = 'active', data, allOrders, onNavigateWO, phases, density, sort, setSort, query, setQuery, filters, setFilters, isPresetView, isInboxView, onSaveView, bulkActions, selectedIds, onCheck, onClearSelection, statuses, onWoAction, onBulkSetStatus, types, techs, inboxes, onAddToNewInbox, onAddToInbox, onRemoveFromInbox, onReorderInbox, onSelectView, alerts = [] }) {
   const pms = usePMs();
   const [collapsed, setCollapsed] = React.useState({});
   // Search input + "/" focus shortcut live in WorkOrdersHeader (module-level
@@ -113,9 +114,9 @@ export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows,
         rows: g.rows.filter(r =>
           matchesFilters(r) &&
           (!q ||
+            orderNumberMatches(r, q) ||
             (r.addr  || '').toLowerCase().includes(q) ||
             (r.city  || '').toLowerCase().includes(q) ||
-            (r.wo    || '').toLowerCase().includes(q) ||
             (r.tech  || '').toLowerCase().includes(q) ||
             (r.pm    || '').toLowerCase().includes(q) ||
             (r.status|| '').toLowerCase().includes(q))
@@ -138,6 +139,15 @@ export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows,
     });
     return out;
   }, [sortedGroups, collapsed]);
+
+  // search-ux Part 4: WOs matching the query that live in a DIFFERENT tab.
+  // Only for the base tabs (not preset/inbox/settings views, where search is
+  // fixed/disabled). Shown under the list, click navigates via onNavigateWO.
+  const otherMatches = React.useMemo(() => {
+    if (isPresetView || isInboxView) return [];
+    if (view !== 'active' && view !== 'complete' && view !== 'trash') return [];
+    return findOtherViewMatches(allOrders, query, [view]);
+  }, [allOrders, query, view, isPresetView, isInboxView]);
 
   // Report the current visible (post filter/sort/collapse) row order up so the
   // command center's prev/next walk the exact same order the user sees. flatRows
@@ -328,6 +338,11 @@ export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows,
             </React.Fragment>
           );
         })}
+        {otherMatches.length > 0 && (
+          <div style={{ padding: '0 12px 16px' }}>
+            <OtherTabMatches matches={otherMatches} onNavigate={onNavigateWO} />
+          </div>
+        )}
       </div>
       {ctxMenu && (() => {
         const ctxBulk = selectedIds && selectedIds.size > 1 && selectedIds.has(ctxMenu.woId);

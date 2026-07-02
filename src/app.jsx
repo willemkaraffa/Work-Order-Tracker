@@ -10,7 +10,7 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
-  clearsScheduleOnSet,
+  clearsScheduleOnSet, orderNumberMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -347,6 +347,7 @@ function toDisplayRow(o) {
   const ageDays = ageDaysFor(o);
   return {
     wo: o.id,
+    woId: o.woId || '',
     addr,
     city,
     flags,
@@ -949,7 +950,7 @@ function QuickJump({ open, orders, onClose, onPick }) {
   const query = q.trim().toLowerCase();
   const results = query ? (orders || []).filter(o => !o.deleted).filter(o => {
     const { addr, city } = splitAddress(o);
-    return String(o.id).toLowerCase().includes(query)
+    return orderNumberMatches(o, query)
       || (addr || '').toLowerCase().includes(query)
       || (city || '').toLowerCase().includes(query);
   }).slice(0, 8) : [];
@@ -1997,6 +1998,46 @@ export const TT_VIEW_DATA = {
 // Paid/Trash, hidden in preset/inbox views which don't fit the tab model), the
 // subtitle, and the search box. Filter chips, count chips, and sort live in
 // the ListPane's smaller top strip below.
+// search-ux Part 4: secondary list under a module's search results. Lists WOs
+// matching the query that live in a different tab/module, GROUPED by location
+// (Active / Complete / Sent / Trash) with a per-group header; click navigates
+// there (onNavigate). Rendered by the Work Orders (ListPane) and Invoices
+// modules. matches come from findOtherViewMatches. Renders nothing when empty.
+const OTHER_TAB_ORDER = ['active', 'complete', 'sent', 'trash'];
+export function OtherTabMatches({ matches, onNavigate }) {
+  if (!matches || !matches.length) return null;
+  const groups = OTHER_TAB_ORDER
+    .map(tab => ({ tab, rows: matches.filter(m => m.tab === tab) }))
+    .filter(g => g.rows.length);
+  return (
+    <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px dashed var(--border-1)' }}>
+      {groups.map(g => (
+        <div key={g.tab} style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+            {TAB_LABELS[g.tab] || String(g.tab || '').toUpperCase()} · {g.rows.length}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {g.rows.map(m => (
+              <button key={m.id} onClick={() => onNavigate && onNavigate(m.id)} title={'Go to ' + m.id} style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+                padding: '6px 8px', borderRadius: 7, cursor: 'pointer',
+                border: '1px solid var(--border-1)', background: 'var(--bg-surface)',
+                color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+              }}>
+                <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, flexShrink: 0 }}>{m.id}</span>
+                {m.pm && <span style={{ color: 'var(--text-3)', flexShrink: 0 }}>{m.pm}</span>}
+                <span style={{ color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+                  {m.address}{m.city ? ', ' + m.city : ''}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function WorkOrdersHeader({ query, setQuery, view, onSelectView, isPresetView, isInboxView, headerRight }) {
   const inputRef = React.useRef(null);
   React.useEffect(() => {
@@ -3585,6 +3626,16 @@ function App() {
          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
+  // search-ux Part 4: jump to a WO in whatever tab/module it lives (used by the
+  // "In other tabs" search list). active/complete/trash -> Work Orders module;
+  // sent -> Invoices module. Select + scroll, no forced command center.
+  const navigateToWO = React.useCallback((id) => {
+    const o = orders.find(x => x.id === id);
+    if (!o) return;
+    const loc = locationOfOrder(o);
+    if (loc === 'sent') { setCurrentModule('invoices'); setSelectedWO(id); pushRecent(id); }
+    else { setCurrentModule('work-orders'); setCurrentView(loc); highlightWO(id); }
+  }, [orders, highlightWO, pushRecent]);
   // Auto-switch Itinerary tech when entering Itinerary with a scheduled
   // selected WO whose tech differs from the current Itinerary tech. Sticks
   // otherwise. Fires only on the transition INTO Itinerary, not while there.
@@ -5895,6 +5946,8 @@ function App() {
           ) : currentModule === 'invoices' ? (
             <InvoicesModule
               sentOrders={sentOrders}
+              allOrders={orders}
+              onNavigateWO={navigateToWO}
               selectedId={selectedWO}
               onOpenInvoice={openInvoiceEditor}
               onWoAction={woAction}
@@ -5968,6 +6021,8 @@ function App() {
                 <ListPane
                   view={currentView}
                   data={viewData}
+                  allOrders={orders}
+                  onNavigateWO={navigateToWO}
                   phases={phases}
                   density={density}
                   sort={effectiveSort}

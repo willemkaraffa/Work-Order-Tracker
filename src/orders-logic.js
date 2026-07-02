@@ -416,3 +416,101 @@ export function reconcileChange11(orders, storedPhases) {
   return { orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
     hardcodedCancelled, revertedFromComplete, expiredCleared };
 }
+
+/* ---------- WO search number match ---------- */
+
+// Match a query against a WO's number(s): the minted id (or a display-row's `wo`
+// field) AND the real portal number `woId`. MSR/captured WOs keep the portal
+// number in `woId` while `id` is a minted 'WO-###', so searching by the real
+// number must check woId too -- omitting it was the "search returns nothing on a
+// pasted number" bug. Case-insensitive substring. Empty query -> true. Accepts
+// either an order ({id,woId}) or a display row ({wo,woId}).
+export function orderNumberMatches(row, q) {
+  const needle = String(q == null ? '' : q).trim().toLowerCase();
+  if (!needle) return true;
+  const id = (row && (row.id != null ? row.id : row.wo)) || '';
+  const woId = (row && row.woId) || '';
+  return String(id).toLowerCase().includes(needle)
+      || String(woId).toLowerCase().includes(needle);
+}
+
+/* ---------- cross-tab search (search-ux Part 4) ---------- */
+
+// A WO's "location" = the tab it lives in. Modules are views of tabs:
+// active/complete/trash -> Work Orders module; sent -> Invoices module.
+export function locationOfOrder(o) {
+  if (!o) return 'active';
+  if (o.deleted || o.tab === 'trash') return 'trash';
+  return o.tab || 'active';
+}
+
+// Badge labels for a location. `sent` reads as "Sent to invoice" in-app.
+export const TAB_LABELS = { active: 'ACTIVE', complete: 'COMPLETE', sent: 'SENT', trash: 'TRASH' };
+
+// Superset search predicate for the cross-tab "found elsewhere" list: the WO
+// number(s) OR address/city/pm/tech substring. Empty query -> false (the off-view
+// list only appears when there IS a query).
+export function orderMatchesQuery(o, q) {
+  const needle = String(q == null ? '' : q).trim().toLowerCase();
+  if (!needle || !o) return false;
+  if (orderNumberMatches(o, needle)) return true;
+  const has = (v) => String(v || '').toLowerCase().includes(needle);
+  return has(o.address) || has(o.city) || has(o.pm) || has(o.tech);
+}
+
+// Orders matching q whose location is NOT in shownLocations (the tab(s) the
+// current module already shows). Returns lightweight rows for the badge list.
+export function findOtherViewMatches(orders, q, shownLocations) {
+  const needle = String(q == null ? '' : q).trim();
+  if (!needle) return [];
+  const shown = new Set(shownLocations || []);
+  const out = [];
+  for (const o of (orders || [])) {
+    if (!o) continue;
+    const loc = locationOfOrder(o);
+    if (shown.has(loc)) continue;
+    if (!orderMatchesQuery(o, needle)) continue;
+    out.push({ id: o.id, woId: o.woId || '', address: o.address || '', city: o.city || '', pm: o.pm || '', tab: loc });
+  }
+  return out;
+}
+
+/* ---------- invoice line normalization (Build A) ---------- */
+
+// Turn a WO's scraped bidItems into InvoiceEditor line items. The SCRAPERS
+// (scrape_amh.py / scrape_amh_bids.py) emit bidItems as { name, qty, price }
+// where `name` HOLDS THE DESCRIPTION -- there is no `desc` field. Match that
+// description against the service library (by item name OR desc, case-insensitive);
+// on a hit the library entry drives price/taxable, on a miss keep the bid
+// description and pick the Labor!/Materials! sentinel from a "material" keyword so
+// the item name follows the invoicing convention. Pure: (bidItems, catalog,
+// agreement) -> line[]. Empty/invalid bidItems -> []. Fixes the b.desc/b.name
+// field-drift bug (scraped lines got prices but no descriptions; WO 9767507).
+export function bidItemsToInvoiceLines(bidItems, catalog, agreement) {
+  const bid = Array.isArray(bidItems) ? bidItems : [];
+  if (!bid.length) return [];
+  const cat = Array.isArray(catalog) ? catalog : [];
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const findCatalog = (desc) => {
+    const q = norm(desc);
+    if (!q) return null;
+    for (const it of cat) {
+      if (it && (norm(it.name) === q || norm(it.desc) === q)) return it;
+    }
+    return null;
+  };
+  const priceOf = (p) => (typeof p === 'number' ? p : (parseFloat(p) || 0));
+  return bid.map((b) => {
+    const qty = Number(b && b.qty) > 0 ? Number(b.qty) : 1;
+    const desc = String((b && b.name) || '').trim();
+    const hit = findCatalog(desc);
+    if (hit) {
+      return { name: hit.name, desc, qty, unitPrice: priceOf(hit.price),
+        category: 'labor', taxable: !!hit.taxable, agreement };
+    }
+    const isMaterial = /material/i.test(desc);
+    return { name: isMaterial ? 'Materials!' : 'Labor!', desc, qty,
+      unitPrice: priceOf(b && b.price), category: isMaterial ? 'material' : 'labor',
+      taxable: false, agreement };
+  });
+}

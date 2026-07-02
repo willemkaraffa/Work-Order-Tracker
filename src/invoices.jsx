@@ -5,8 +5,9 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import {
-  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips,
+  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches,
 } from './app.jsx';
+import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches } from './orders-logic.js';
 
 // ── Invoice tax model (slice 2) ───────────────────────────────────────────────
 // TAX_RATE is the tax-INCLUSIVE multiplier (1 + 0.0725). MSR library/quoted
@@ -382,50 +383,13 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
     if (existing && Array.isArray(existing.lineItems) && existing.lineItems.length) {
       return existing.lineItems.map(li => ({ ...blankLine(), ...li }));
     }
-    // No saved invoice yet — pre-populate from the WO's scraped bid items if
-    // present. Bid items come from scraper.js as {name=remedy, desc, qty, price}.
-    // The remedy (b.name) is DROPPED. b.desc is matched (case-insensitive) to a
-    // catalog item by name OR desc; on hit the library entry drives the line.
-    // On miss the line falls back to name='Labor!' with desc=b.desc so the user
-    // sees the bid description for context and can swap to 'Materials!' if needed.
-    const bid = order && Array.isArray(order.bidItems) ? order.bidItems : [];
-    if (bid.length) {
-      const norm = (s) => String(s || '').trim().toLowerCase();
-      const findCatalog = (bidDesc) => {
-        const q = norm(bidDesc);
-        if (!q) return null;
-        for (const it of catalog) {
-          if (it && (norm(it.name) === q || norm(it.desc) === q)) return it;
-        }
-        return null;
-      };
-      return bid.map(b => {
-        const qty = Number(b.qty) > 0 ? Number(b.qty) : 1;
-        const bidDesc = String(b.desc || '').trim();
-        const hit = findCatalog(bidDesc);
-        // line.desc ALWAYS comes from the bid description so the user sees
-        // AMH's context regardless of whether the library matched.
-        if (hit) {
-          return {
-            ...blankLine(),
-            name: hit.name,
-            desc: bidDesc,
-            qty,
-            unitPrice: typeof hit.price === 'number' ? hit.price : (parseFloat(hit.price) || 0),
-            taxable: !!hit.taxable,
-            agreement: tabName,
-          };
-        }
-        return {
-          ...blankLine(),
-          name: 'Labor!',
-          desc: bidDesc,
-          qty,
-          unitPrice: Number(b.price) || 0,
-          agreement: tabName,
-        };
-      });
-    }
+    // No saved invoice yet -> pre-populate from the WO's scraped bidItems.
+    // bidItemsToInvoiceLines (orders-logic.js) reads the description from
+    // bidItem.name (scrapers put it there, no desc field), matches the service
+    // library, and falls back to a Labor!/Materials! sentinel keeping the bid
+    // description. blankLine spread keeps forward-compatible line defaults.
+    const built = bidItemsToInvoiceLines(order && order.bidItems, catalog, tabName);
+    if (built.length) return built.map(li => ({ ...blankLine(), ...li }));
     return [blankLine()];
   });
 
@@ -624,7 +588,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
 // ── Invoices module (slice 3) ─────────────────────────────────────────────────
 // change11: Billing-queue view shows tab='sent' WOs only. Row click opens the
 // invoice editor for that WO. Shows recorded invoice # + grand total when present.
-export function InvoicesModule({ sentOrders, selectedId, onOpenInvoice, onWoAction }) {
+export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId, onOpenInvoice, onWoAction }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [query, setQuery] = React.useState('');
   // change11: status filter dropped (only 'sent' exists now). Aging filter
@@ -634,12 +598,18 @@ export function InvoicesModule({ sentOrders, selectedId, onOpenInvoice, onWoActi
   React.useEffect(() => {
     if (selRef.current) selRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [selectedId]);
+  // search-ux Part 4: WOs matching the query that are NOT in the Sent queue
+  // (Active/Complete/Trash). Shown under the list, click navigates via onNavigateWO.
+  const otherMatches = React.useMemo(
+    () => findOtherViewMatches(allOrders, query, ['sent']),
+    [allOrders, query]
+  );
   const q = query.trim().toLowerCase();
   const matches = (o) => {
     if (!q) return true;
     const inv = o.invoice;
     return (
-      String(o.id || '').toLowerCase().includes(q) ||
+      orderNumberMatches(o, q) ||
       String(o.address || '').toLowerCase().includes(q) ||
       String(o.city || '').toLowerCase().includes(q) ||
       String(o.pm || '').toLowerCase().includes(q) ||
@@ -830,6 +800,9 @@ export function InvoicesModule({ sentOrders, selectedId, onOpenInvoice, onWoActi
                 })}
               </tbody>
             </table>
+          )}
+          {otherMatches.length > 0 && (
+            <OtherTabMatches matches={otherMatches} onNavigate={onNavigateWO} />
           )}
         </div>
       </div>

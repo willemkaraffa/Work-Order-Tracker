@@ -4,6 +4,7 @@
 import React from 'react';
 import { statusColor } from './constants.js';
 import { formatPhone } from './utils.js';
+import { orderNumberMatches } from './orders-logic.js';
 import { Dot, PMChip, TypeIcon } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG, fmtSchedule,
@@ -240,7 +241,7 @@ export function ItineraryModule({ activeOrders, techs, phases, statusColors, sta
       if (cityFilter && cityOf(o) !== cityFilter) return false;
       if (!q) return true;
       const { addr, city } = splitAddress(o);
-      return String(o.id).toLowerCase().includes(q)
+      return orderNumberMatches(o, q)
         || (addr || '').toLowerCase().includes(q)
         || (city || '').toLowerCase().includes(q);
     });
