@@ -509,8 +509,11 @@ export function bidItemsToInvoiceLines(bidItems, catalog, agreement) {
         category: 'labor', taxable: !!hit.taxable, agreement };
     }
     const isMaterial = /material/i.test(desc);
+    // Non-AMH labor/service is TAXABLE (materials + AMH premier are not). Without
+    // this the miss-path left every line non-taxable, so tax was never applied and
+    // the invoice total came in under the bid.
     return { name: isMaterial ? 'Materials!' : 'Labor!', desc, qty,
       unitPrice: priceOf(b && b.price), category: isMaterial ? 'material' : 'labor',
-      taxable: false, agreement };
+      taxable: (agreement === 'AMH' || isMaterial) ? false : true, agreement };
   });
 }

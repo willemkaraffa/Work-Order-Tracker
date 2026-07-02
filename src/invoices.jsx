@@ -427,7 +427,9 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
   const isDup = !!String(number).trim() && usedNumbers.has(normInvoiceNum(number));
 
   const save = () => {
-    if (!String(number).trim()) { onSave && onSave(null, 'Invoice # is required'); return; }
+    // Invoice # is OPTIONAL: the AMH number only arrives on the remittance form,
+    // so line items are saved first and the number filled in later. Duplicate
+    // guard only applies when a number IS entered.
     if (isDup) { onSave && onSave(null, `Invoice # ${String(number).trim()} is already used by another work order`); return; }
     const clean = lines
       .filter(l => String(l.name).trim() || Number(l.unitPrice))

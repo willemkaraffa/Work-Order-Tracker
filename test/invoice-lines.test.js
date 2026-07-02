@@ -87,6 +87,26 @@ test('string price parses to number', () => {
   assert.strictEqual(lines[0].unitPrice, 250.5);
 });
 
+test('non-AMH labor miss -> taxable true; material miss -> false', () => {
+  const lines = bidItemsToInvoiceLines(WO9767507, [], 'General');
+  assert.strictEqual(lines[0].name, 'Labor!');
+  assert.strictEqual(lines[0].taxable, true);         // service/labor taxable
+  assert.strictEqual(lines[3].name, 'Materials!');
+  assert.strictEqual(lines[3].taxable, false);        // material not taxable
+});
+
+test('AMH miss stays non-taxable (premier all-inclusive)', () => {
+  const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
+  assert.strictEqual(lines[0].taxable, false);
+  assert.strictEqual(lines[3].taxable, false);
+});
+
+test('catalog hit taxable flag still wins over the miss inference', () => {
+  const catalog = [{ name: 'Clear condensate drain line', price: 120, taxable: false }];
+  const lines = bidItemsToInvoiceLines(WO9767507, catalog, 'General');
+  assert.strictEqual(lines[1].taxable, false);        // library says non-taxable
+});
+
 console.log('invoice-lines test');
 console.log('==================');
 let pass = 0, fail = 0;
