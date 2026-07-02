@@ -398,6 +398,30 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
     return [blankLine()];
   });
 
+  // MSR (non-AMH) line items live in the bid sheet xlsx, not in order.bidItems
+  // (that is AMH API data). On opening an un-invoiced non-AMH WO with no scraped
+  // bidItems, read the OTHER section of the newest bid/CO sheet and pre-fill the
+  // lines. Sentinel name (mapping to the library comes later); MSR service items
+  // are taxable (reproduces the bid total: price/1.0725 then +tax = face). Once.
+  React.useEffect(() => {
+    if (existing) return;
+    if (String(pm).toUpperCase() === 'AMH') return;
+    if (order && Array.isArray(order.bidItems) && order.bidItems.length) return;
+    if (!order || !window.woFolder || !window.woFolder.readBidLineItems) return;
+    let cancelled = false;
+    window.woFolder.readBidLineItems(order).then(res => {
+      if (cancelled || !res || !res.ok || !Array.isArray(res.items) || !res.items.length) return;
+      // Route through bidItemsToInvoiceLines (shape {name=desc, qty, price}) so
+      // materials are detected (taxable=false) and any service-library match
+      // applies -- instead of everything defaulting to taxable Labor.
+      const asBid = res.items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice }));
+      const built = bidItemsToInvoiceLines(asBid, catalog, tabName);
+      if (built.length) setLines(built.map(li => ({ ...blankLine(), ...li })));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setLine = (idx, patch) => setLines(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
   const removeLine = (idx) => setLines(ls => ls.length > 1 ? ls.filter((_, i) => i !== idx) : ls);
   const addLine = () => setLines(ls => [...ls, blankLine()]);

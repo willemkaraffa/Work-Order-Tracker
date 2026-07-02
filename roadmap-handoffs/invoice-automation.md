@@ -29,6 +29,37 @@ Remittance PDF (settlement) -> pdf-parse (new) ------> invoice #/date/paid + rec
 
 Remittance is NOT a line-item source. It is settlement + reconciliation ON TOP.
 
+## AS-BUILT 2026-07-02: MSR bid-sheet line-item capture (the spreadsheet source)
+MSR line items live in the bid xlsx OTHER section, NOT order.bidItems (=AMH API), so
+MSR invoices auto-filled blank. KEY structure (verified across ~10 real bids): each
+OTHER row's Item Description cell PACKS several sub-items, newline-separated, each
+"$<amount> <description>" (e.g. "$85 Service Call\n$145 Labor to clean coil"). And
+bids are DELTAS -> line items are spread across every bid/CO sheet in the WO. Built:
+- main.js `parseOtherCell(text)`: split newlines, regex `^\$?\s*([\d,.]+)\s+(.+)$`
+  -> [{desc, unitPrice}]. The $amount is the price (the Total Price column formula
+  excludes the HVAC service call, so parse amounts, don't read that column).
+- `readSheetOtherItems(file, sheet)`: OTHER header + "Item Description" column by
+  label (Plumbing +1 col vs HVAC), flatMap parseOtherCell over the rows.
+- `allBidCoSheets(root)`: recursive list of every bid/CO xlsx in the WO tree.
+- IPC `read-bid-lineitems`: read OTHER items from ALL sheets, dedup exact
+  (desc+price). preload `woFolder.readBidLineItems`.
+- InvoiceEditor: on open of an un-invoiced NON-AMH WO with empty bidItems, async
+  read + pre-fill ONE LINE PER SUB-ITEM, routed through bidItemsToInvoiceLines so
+  material vs labor is inferred from the desc (materials non-taxable, labor/service
+  taxable) and any service-library match applies.
+- Validated in node vs real WO 03307717 tree: 9 distinct line items across 5 sheets.
+SERVICE CALL (corrected): it IS a legit billed line (dedicated qty-1 cell on the
+sheet; also listed in the OTHER text, which is what we parse). The HVAC vs Plumbing
+difference is ONLY whether the service call feeds the sheet's internal LABOR-HOURS
+formula (Plumbing yes, HVAC no) -- it does NOT change that the service call is
+billed. So capturing it as a line is correct; no total discrepancy. (Earlier
+"HVAC over by service call" caveat was a misread of the OTHER-only total cell.)
+KNOWN GAPS (the "mapping" still deferred, flagged to user):
+- Near-duplicate items (case/space diffs e.g. "0.5 lbs" vs "0.5lbs") not deduped.
+- Library mapping (parsed item -> service-library item) still TODO. AMH remedy->
+  service-item mapping also TODO.
+Runtime needs an Electron RESTART (main.js + preload changed).
+
 ## VERIFIED data facts (read before coding; do not re-derive)
 - Data file: `%APPDATA%\work-order-tracker\wo-data.json`, key `wo_data` is a
   JSON string; parse it to get `{ orders, pms, ... }`. Path const `main.js:27`.

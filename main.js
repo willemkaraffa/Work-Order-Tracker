@@ -677,6 +677,114 @@ ipcMain.handle('wo-create-subfolder', async (_e, rec) => {
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
+// Parse one OTHER-cell description into individual line items. Each packed cell is
+// newline-separated "$<amount> <description>" sub-items (e.g. "$85 Service Call\n
+// $145 Labor to clean coil"). Lines without a leading dollar amount are skipped.
+// The $amount is the per-item price (the sheet's Total Price column is a formula
+// that already excludes the HVAC service call, so parse the amounts instead).
+// -> [{desc, unitPrice}].
+function parseOtherCell(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^\$?\s*([\d,]+(?:\.\d+)?)\s+(.+?)\s*$/);
+    if (!m) continue;
+    const price = parseFloat(m[1].replace(/,/g, ''));
+    if (!Number.isFinite(price) || price <= 0) continue;
+    out.push({ desc: m[2].trim(), unitPrice: Math.round(price * 100) / 100 });
+  }
+  return out;
+}
+
+// Read + parse the OTHER-section line items from one bid/CO sheet. Locate the
+// "OTHER" header, find the "Item Description" column by label (Plumbing is offset
+// one column from HVAC), then split each OTHER row's packed description into
+// individual sub-items via parseOtherCell. Defensive cell access (exceljs `.text`
+// can throw on some cell types). -> [{desc, unitPrice, qty}].
+async function readSheetOtherItems(file, sheetName) {
+  const ExcelJS = require('exceljs');
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(file);
+  const ws = wb.getWorksheet(sheetName) || wb.worksheets[0];
+  if (!ws) return [];
+  const cellText = (row, c) => {
+    try {
+      const v = row.getCell(c); let t = v.text; if (t == null) t = v.value;
+      if (t == null) return '';
+      if (typeof t === 'object') {
+        if (t.richText) return t.richText.map(x => (x && x.text) || '').join('');
+        if ('result' in t) return t.result == null ? '' : String(t.result);
+        return '';
+      }
+      return String(t);
+    } catch (_) { return ''; }
+  };
+  let otherRow = 0; const last = ws.rowCount;
+  for (let rn = 1; rn <= last; rn++) {
+    const row = ws.getRow(rn);
+    for (let c = 1; c <= 12; c++) { if (cellText(row, c).trim().toUpperCase() === 'OTHER') { otherRow = rn; break; } }
+    if (otherRow) break;
+  }
+  if (!otherRow) return [];
+  const hdr = ws.getRow(otherRow + 1);
+  let cDesc = 0;
+  for (let c = 1; c <= 12; c++) { if (cellText(hdr, c).trim().toLowerCase() === 'item description') { cDesc = c; break; } }
+  if (!cDesc) return [];
+  const items = [];
+  for (let rn = otherRow + 2; rn <= last; rn++) {
+    const row = ws.getRow(rn);
+    let stop = false;
+    for (let c = 1; c <= 12; c++) { const u = cellText(row, c).toUpperCase(); if (u.includes('TOTAL OTHER') || u.includes('BID TOTAL')) { stop = true; break; } }
+    if (stop) break;
+    const desc = cellText(row, cDesc).trim();
+    if (!desc) continue;
+    for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: 1 });
+  }
+  return items;
+}
+
+// All bid/CO .xlsx anywhere under `root` (recursive), skipping temp locks (~$).
+function allBidCoSheets(root) {
+  const out = [];
+  const walk = (dir) => {
+    let ents; try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!/\.xlsx$/i.test(e.name) || /^~\$/.test(e.name)) continue;
+      if (/bid/i.test(e.name) || /\bCO\b/.test(e.name)) out.push(p);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+// Capture invoice line items for an MSR WO. MSR line items live in the bid xlsx
+// OTHER section, not in order.bidItems (that is AMH API data). Bids are DELTAS, so
+// items are spread across every bid/CO sheet in the WO -- read them ALL and dedup
+// exact (desc+price) repeats (the copied CO duplicates the sheet it came from).
+ipcMain.handle('read-bid-lineitems', async (_e, rec) => {
+  try {
+    rec = rec || {};
+    const r = resolveWoFolder(rec);
+    if (r.error) return { ok: false, error: r.error };
+    const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
+    const sheetName = BID_CELLS[trade].sheet;
+    const seen = new Set(); const items = [];
+    for (const f of allBidCoSheets(r.folder)) {
+      let rows = [];
+      try { rows = await readSheetOtherItems(f, sheetName); } catch (_) { rows = []; }
+      for (const it of rows) {
+        const k = it.desc.toLowerCase() + '|' + it.unitPrice;
+        if (seen.has(k)) continue;
+        seen.add(k); items.push(it);
+      }
+    }
+    return { ok: true, items, count: items.length };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.

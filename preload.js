@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('woFolder', {
   subfolder: (record) => ipcRenderer.invoke('wo-create-subfolder', record),
   open:      (record) => ipcRenderer.invoke('wo-open-folder', record),
   exists:    (record) => ipcRenderer.invoke('wo-folder-exists', record),
+  readBidLineItems: (record) => ipcRenderer.invoke('read-bid-lineitems', record),
 });
 
 // Credentials bridge — safeStorage-encrypted PM credentials
