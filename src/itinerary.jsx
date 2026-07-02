@@ -5,6 +5,7 @@ import React from 'react';
 import { statusColor } from './constants.js';
 import { formatPhone } from './utils.js';
 import { orderNumberMatches } from './orders-logic.js';
+import { useTypeToSearch } from './search-hook.js';
 import { Dot, PMChip, TypeIcon } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG, fmtSchedule,
@@ -148,6 +149,10 @@ export function ItineraryModule({ activeOrders, techs, phases, statusColors, sta
   const [popId, setPopId] = React.useState(null);
   const [poolQuery, setPoolQuery] = React.useState('');
   const [cityFilter, setCityFilter] = React.useState('');
+  const poolSearchRef = React.useRef(null);
+  // Type-to-search only when the unscheduled pool is expanded (its search is
+  // hidden otherwise).
+  useTypeToSearch({ setValue: setPoolQuery, inputRef: poolSearchRef, disabled: !poolOpen });
   const [highlightId, setHighlightId] = React.useState(null);
   const [suggestFor, setSuggestFor] = React.useState(null); // scheduled WO id whose nearby list is open
   const [hoverInfo, setHoverInfo] = React.useState(null);   // { id, rect } — hovered card mini-detail anchor
@@ -419,6 +424,7 @@ export function ItineraryModule({ activeOrders, techs, phases, statusColors, sta
             {poolOpen && (
               <React.Fragment>
                 <input
+                  ref={poolSearchRef}
                   value={poolQuery}
                   onChange={(e) => setPoolQuery(e.target.value)}
                   placeholder="Search WO #, address, city..."

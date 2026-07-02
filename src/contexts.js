@@ -15,3 +15,9 @@ export function useToast() { return React.useContext(ToastContext); }
 
 export const PMsContext = React.createContext(DEFAULT_PMS);
 export function usePMs() { return React.useContext(PMsContext); }
+
+// Configurable key that clears a focused/active search bar (type-to-search).
+// Default Backspace. Provided from settings.clearSearchKey at the app root so
+// useTypeToSearch can read it without prop-threading through every module.
+export const ClearSearchKeyContext = React.createContext('Backspace');
+export function useClearSearchKey() { return React.useContext(ClearSearchKeyContext); }

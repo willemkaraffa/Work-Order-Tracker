@@ -27,7 +27,7 @@ const TT_SECTIONS = [
   { id: 'about',       label: 'About' },
 ];
 
-export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, techColors, setTechColors, routingWeights, setRoutingWeights, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, onRenameClientCode, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
+export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDensity, clearSearchKey, setClearSearchKey, alertThresholds, setAlertThresholds, overdueCfg, setOverdueCfg, librarySubCats, setLibrarySubCats, techJobTypes, setTechJobTypes, techColors, setTechColors, routingWeights, setRoutingWeights, statusTags, setStatusTags, phases, setPhases, statuses, setStatuses, statusColors, setStatusColors, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme, mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity, saveHome, onClearGeocache, geocacheCount, locationIqKey, setLocationIqKey, mapMarkerColors, setMapMarkerColors, mapTypeColors, setMapTypeColors, pms, setPms, onRenameClientCode, types, setTypes, techs, setTechs, trayEnabled, setTrayEnabled, trayBadgeSource, setTrayBadgeSource, onResetSettings, onRestoreBackup, updateState, onCheckUpdate, onInstallUpdate, initialSection }) {
   const [section, setSection] = React.useState(initialSection || 'appearance');
   return (
     <section style={{
@@ -80,7 +80,7 @@ export function SettingsDrawer({ onClose, toast, theme, setTheme, density, setDe
           the inner wrapper, regardless of a section's own max-width/centering. */}
       <div style={{ overflow: 'auto', minHeight: 0 }}>
         <div style={{ padding: '28px 32px' }}>
-        {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
+        {section === 'appearance' && <AppearanceSection theme={theme} setTheme={setTheme} density={density} setDensity={setDensity} clearSearchKey={clearSearchKey} setClearSearchKey={setClearSearchKey} moreInfoColor={moreInfoColor} setMoreInfoColor={setMoreInfoColor} customTheme={customTheme} setCustomTheme={setCustomTheme} />}
         {section === 'workflow'   && <WorkflowSection phases={phases} setPhases={setPhases} statuses={statuses} setStatuses={setStatuses} statusColors={statusColors} setStatusColors={setStatusColors} statusTags={statusTags} setStatusTags={setStatusTags} pms={pms} setPms={setPms} onRenameClientCode={onRenameClientCode} />}
         {section === 'trades'     && <TradesSection types={types} setTypes={setTypes} mapTypeColors={mapTypeColors} setMapTypeColors={setMapTypeColors} techJobTypes={techJobTypes} setTechJobTypes={setTechJobTypes} techs={techs} setTechs={setTechs} techColors={techColors} setTechColors={setTechColors} />}
         {section === 'routing'    && <RoutingSection weights={routingWeights} setWeights={setRoutingWeights} />}
@@ -167,7 +167,7 @@ function CredentialsSection() {
 
 // SettingTitle, SettingRow, Seg moved to ./primitives.jsx (imported at top).
 
-function AppearanceSection({ theme, setTheme, density, setDensity, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme }) {
+function AppearanceSection({ theme, setTheme, density, setDensity, clearSearchKey, setClearSearchKey, moreInfoColor, setMoreInfoColor, customTheme, setCustomTheme }) {
   const baseTheme = theme === 'light' ? TT_LIGHT : TT_DARK;
   const ct = customTheme || {};
   const setVar = (key, hex) => setCustomTheme && setCustomTheme({ ...ct, [key]: hex });
@@ -229,6 +229,37 @@ function AppearanceSection({ theme, setTheme, density, setDensity, moreInfoColor
           />
           <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
             Tighter density fits more rows; generous is easier on the eyes.
+          </div>
+        </div>
+      </AppearanceGroup>
+
+      <AppearanceGroup eyebrow="Search clear key">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <input
+              readOnly
+              value={clearSearchKey || 'Backspace'}
+              onKeyDown={(e) => {
+                e.preventDefault();
+                if (e.key === 'Escape' || e.key === 'Tab') return;   // let the user leave without binding
+                if (setClearSearchKey) setClearSearchKey(e.key);
+                e.currentTarget.blur();
+              }}
+              title="Click, then press the key to bind"
+              style={{
+                width: 160, height: 32, padding: '0 10px', textAlign: 'center', borderRadius: 8,
+                border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+                fontFamily: 'inherit', fontSize: 13, cursor: 'pointer',
+              }}
+            />
+            <button onClick={() => setClearSearchKey && setClearSearchKey('Backspace')} style={{
+              height: 32, padding: '0 12px', borderRadius: 7, border: '1px solid var(--border-1)',
+              background: 'var(--bg-surface)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13, cursor: 'pointer',
+            }}>Reset</button>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
+            Click the box and press a key. When a list or module is focused (not a text field or dialog),
+            typing jumps into the search bar and this key clears it. Default Backspace.
           </div>
         </div>
       </AppearanceGroup>

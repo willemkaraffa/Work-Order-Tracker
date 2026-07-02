@@ -16,8 +16,9 @@ import {
 export { DEFAULT_STATUSES };
 import {
   PhasesContext, usePhases, StatusColorsContext, useStatusColors,
-  ToastContext, useToast, PMsContext, usePMs,
+  ToastContext, useToast, PMsContext, usePMs, ClearSearchKeyContext,
 } from './contexts.js';
+import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 import {
   Dot, PMChip, TypeIcon, FlagGlyph, StatusPill, ActionBtn, FilterChip,
   InlineEdit, SettingTitle, SettingRow, Seg, miniBtnStyle, ReorderBtns, swapAt,
@@ -657,6 +658,7 @@ function computeAlerts(orders, thresholds) {
 /* ---------- modal + form primitives ---------- */
 
 export function Modal({ open, onClose, title, children, width = 560 }) {
+  useModalOpenFlag(open);
   // Intentionally NO backdrop-click or Escape close: modals hold entered data
   // (imports, edits) and must close only via X / Cancel / Create-Done so an
   // accidental outside click can't discard the user's work.
@@ -720,6 +722,7 @@ function FormField({ label, children, span = 1 }) {
 // the later Leaflet inset has exactly one live instance. `detail`/`rightRail` are
 // passed as elements so this shell stays presentational.
 function CommandCenter({ onClose, topBar, detail, rightRail }) {
+  useModalOpenFlag(true);
   // Esc closes. Arrow-key prev/next is owned by ListPane's window-level handler
   // (it holds the visible order and stays mounted under the overlay), which
   // restacks selectedWO; duplicating it here would double-step. The top bar's
@@ -774,6 +777,7 @@ function CommandCenter({ onClose, topBar, detail, rightRail }) {
 // editors (PMsEditor etc.) are their own z-400 overlays rendered inside -> paint
 // above this one.
 function SettingsOverlay({ onClose, children }) {
+  useModalOpenFlag(true);
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
@@ -940,6 +944,7 @@ function CCTopBar({ index, total, onPrev, onNext, phases, phaseName, siblings, n
 function QuickJump({ open, orders, onClose, onPick }) {
   const [q, setQ] = React.useState('');
   const inputRef = React.useRef(null);
+  useModalOpenFlag(open);
   React.useEffect(() => {
     if (!open) return;
     setQ('');
@@ -2040,16 +2045,10 @@ export function OtherTabMatches({ matches, onNavigate }) {
 
 function WorkOrdersHeader({ query, setQuery, view, onSelectView, isPresetView, isInboxView, headerRight }) {
   const inputRef = React.useRef(null);
-  React.useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-        e.preventDefault();
-        inputRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  // Type-to-search: any printable key focuses + appends here; clear key clears.
+  // Disabled in preset/inbox views (search is fixed there). Replaces the old
+  // '/'-only focus shortcut.
+  useTypeToSearch({ setValue: setQuery, inputRef, disabled: isPresetView || isInboxView });
   return (
     <div style={{ flexShrink: 0, padding: '14px 18px 10px', borderBottom: '1px solid var(--border-1)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -3294,6 +3293,7 @@ export const navBtnStyle = {
 // Scheduling form launched from the WO context menu. Assign a technician + a
 // timeframe (day + 30-min start). Prefills from any existing schedule.
 function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick }) {
+  useModalOpenFlag(true);
   const slots = React.useMemo(() => itinSlots(), []);
   const [tech, setTech] = React.useState(order.tech || techs[0] || '');
   const [date, setDate] = React.useState((order.schedule && order.schedule.date) || itinTodayStr());
@@ -3786,6 +3786,9 @@ function App() {
   }, [currentModule, lastModule, updateSettings]);
   const theme = (settings && settings.theme) || 'dark';
   const setTheme = React.useCallback((t) => updateSettings({ theme: t }), [updateSettings]);
+  // Type-to-search clear key (search-ux Part 3). Default Backspace.
+  const clearSearchKey = (settings && settings.clearSearchKey) || 'Backspace';
+  const setClearSearchKey = React.useCallback((k) => updateSettings({ clearSearchKey: k || 'Backspace' }), [updateSettings]);
   const density = (settings && settings.density) || 'balanced';
   const setDensity = React.useCallback((d) => updateSettings({ density: d }), [updateSettings]);
   const alertThresholds = (settings && settings.alertThresholds) || DEFAULT_ALERT_THRESHOLDS;
@@ -5680,6 +5683,8 @@ function App() {
       setTheme={setTheme}
       density={density}
       setDensity={setDensity}
+      clearSearchKey={clearSearchKey}
+      setClearSearchKey={setClearSearchKey}
       alertThresholds={alertThresholds}
       setAlertThresholds={setAlertThresholds}
       overdueCfg={overdueCfg}
@@ -5852,6 +5857,7 @@ function App() {
 
   return (
     <PMsContext.Provider value={pms}>
+    <ClearSearchKeyContext.Provider value={clearSearchKey}>
     <PhasesContext.Provider value={phases}>
      <StatusColorsContext.Provider value={statusColors}>
       <ToastContext.Provider value={toast}>
@@ -6217,6 +6223,7 @@ function App() {
       </ToastContext.Provider>
      </StatusColorsContext.Provider>
     </PhasesContext.Provider>
+    </ClearSearchKeyContext.Provider>
     </PMsContext.Provider>
   );
 }

@@ -1,0 +1,60 @@
+// search-ux Part 2/3: type-to-search + configurable clear key. Generalized from
+// the WorkOrders '/'-to-focus handler. React-only. Two hooks:
+//
+// useModalOpenFlag(active): while `active`, bumps a window-level ref-count so
+//   useTypeToSearch stays quiet behind full-screen overlays (Modal, CommandCenter,
+//   InvoiceEditor, QuickJump, FullScreenLanding call this).
+//
+// useTypeToSearch({ setValue, inputRef, disabled }): when the module is on screen
+//   and the user is NOT already typing in a field or behind a modal, a printable
+//   keystroke focuses the module's search input and appends the char; the
+//   configurable clear key (default Backspace, from ClearSearchKeyContext) clears
+//   it. Once focus moves into the input, later keys edit natively (this global
+//   handler only acts when NOT already in a field), so the clear key doubles as a
+//   normal Backspace while editing.
+import React from 'react';
+import { useClearSearchKey } from './contexts.js';
+
+export function useModalOpenFlag(active) {
+  React.useEffect(() => {
+    if (!active) return undefined;
+    if (typeof window === 'undefined') return undefined;
+    window.__modalOpen = (window.__modalOpen || 0) + 1;
+    return () => { window.__modalOpen = Math.max(0, (window.__modalOpen || 1) - 1); };
+  }, [active]);
+}
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
+
+export function useTypeToSearch({ setValue, inputRef, disabled = false }) {
+  const clearKey = useClearSearchKey();
+  // Read mutable config via refs so the listener binds once (stable handler).
+  const clearRef = React.useRef(clearKey);
+  clearRef.current = clearKey;
+  const disabledRef = React.useRef(disabled);
+  disabledRef.current = disabled;
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (disabledRef.current) return;
+      if (typeof window !== 'undefined' && window.__modalOpen > 0) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isTypingTarget(document.activeElement)) return;
+      if (e.key === clearRef.current) {
+        e.preventDefault();
+        if (setValue) setValue('');
+        return;
+      }
+      if (e.key && e.key.length === 1) {
+        e.preventDefault();
+        if (inputRef && inputRef.current) inputRef.current.focus();
+        if (setValue) setValue((v) => (v || '') + e.key);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [setValue, inputRef]);
+}

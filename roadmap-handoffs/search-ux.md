@@ -122,10 +122,24 @@ Orders/Active with 9767507 selected.
 
 ## Slices (separate commits; verify each)
 S1. Part 1 woId class fix + test. (small, fixes the report) - DONE
-S2. Part 2 useTypeToSearch hook + modal guard + wire all modules.
-S3. Part 3 clearSearchKey setting + Settings UI + thread clearKey.
+S2. Part 2 useTypeToSearch hook + modal guard + wire all modules. - DONE
+S3. Part 3 clearSearchKey setting + Settings UI + thread clearKey. - DONE
 S4. Part 4 cross-tab matches: pure logic + test, OtherTabMatches, navigateToWO,
-    wire Work Orders + Invoices.
+    wire Work Orders + Invoices. - DONE (grouped by location)
+
+## S2/S3 as-built notes
+- Hooks in src/search-hook.js: useTypeToSearch + useModalOpenFlag. clearKey read
+  from ClearSearchKeyContext (contexts.js), provided from settings.clearSearchKey.
+- Modal guard = window.__modalOpen ref-count. Instrumented: Modal, CommandCenter,
+  QuickJump, SettingsOverlay, InvoiceEditor, ScheduleModal. Transitive coverage:
+  any dialog inside SettingsOverlay is already behind its flag; maps notes modal
+  uses <Modal>. RESIDUAL (uninstrumented, low-risk, autofocus usually covers):
+  itinerary-internal popovers (itinerary.jsx ~506/540). Only one module's search
+  hook is mounted at a time (module render is a ternary), so no cross-module clash.
+- Wired inputs: WorkOrdersHeader (replaced the '/'-focus effect), InvoicesModule,
+  ServiceLibrary, MapsModule, Itinerary pool (disabled unless poolOpen).
+- NOT runtime-tested (keyboard behavior); build + renderer-smoke green, logic
+  traced. Live-verify: type on a list -> search fills; clear key empties it.
 
 ## Open questions
 - clearKey capture UI: single key only, or allow chords? (default single key.)

@@ -11,6 +11,7 @@ import {
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
 import { orderNumberMatches } from './orders-logic.js';
+import { useTypeToSearch } from './search-hook.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
 // render loop so the command-center MapInset draws an identical marker (single
@@ -127,6 +128,8 @@ function NotesViewModal({ order, onClose }) {
 
 export function MapsModule({ activeOrders, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
   const [query, setQuery] = React.useState('');
+  const searchRef = React.useRef(null);
+  useTypeToSearch({ setValue: setQuery, inputRef: searchRef });
   // WO id whose read-only notes modal is open, or null.
   const [notesWO, setNotesWO] = React.useState(null);
   // Slice 5 (#10): route polylines track one day at a time. Default today.
@@ -521,6 +524,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
         }}>
           <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
             <input
+              ref={searchRef}
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}

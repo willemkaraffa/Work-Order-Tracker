@@ -8,6 +8,7 @@ import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches } from './orders-logic.js';
+import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // ── Invoice tax model (slice 2) ───────────────────────────────────────────────
 // TAX_RATE is the tax-INCLUSIVE multiplier (1 + 0.0725). MSR library/quoted
@@ -136,6 +137,8 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
   const [q, setQ] = React.useState('');
   const [adding, setAdding] = React.useState(false);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  const searchRef = React.useRef(null);
+  useTypeToSearch({ setValue: setQ, inputRef: searchRef });
 
   const items = (lib && lib[tab]) || [];
   const filtered = React.useMemo(() => {
@@ -228,6 +231,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
+            ref={searchRef}
             value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search items..."
             style={{
               flex: 1, height: 30, padding: '0 10px', borderRadius: 7,
@@ -361,6 +365,7 @@ function blankLine() {
 }
 const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
 export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose }) {
+  useModalOpenFlag(true);   // full-screen overlay: silence type-to-search underneath
   const pm = (order && order.pm) || '';
   const isMSR = String(pm).toUpperCase() === 'MSR';
   // Invoice numbers already used by OTHER work orders (duplicate guard).
@@ -604,6 +609,8 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     () => findOtherViewMatches(allOrders, query, ['sent']),
     [allOrders, query]
   );
+  const searchRef = React.useRef(null);
+  useTypeToSearch({ setValue: setQuery, inputRef: searchRef });
   const q = query.trim().toLowerCase();
   const matches = (o) => {
     if (!q) return true;
@@ -674,6 +681,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
             display: 'flex', alignItems: 'center', gap: 6,
           }}>
             <input
+              ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search WO, invoice, address..."
