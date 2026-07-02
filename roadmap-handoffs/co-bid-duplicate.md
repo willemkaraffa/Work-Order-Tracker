@@ -32,6 +32,42 @@ original filled bid, then have CO lines added. Today a dated subfolder is empty.
   trade pick `/hvac|heat|cool|furnace/i.test(rec.type) ? 'HVAC' : 'Plumbing'`
   (../main.js:579). BID sheets exist for MSR ONLY (AMH/other have none).
 
+## AS-BUILT (2026-07-02) - real-data corrections + CO-merge requirement
+Sampling real folders (WO 03307717) drove several corrections; user confirmed each:
+- CO sheets are CUMULATIVE (each carries bid + all prior COs). So NO line-item
+  merge: the newest existing Bid/CO already reflects the WO total -> copy THAT.
+- Source = newest Bid/CO `.xlsx` anywhere in the WO folder tree (RECURSIVE; COs
+  live in Visit N / dated subfolders), name contains "Bid" or "CO", excl ~$ temp.
+- Ranked by CREATION time (birthtime), NOT mtime: mtime is bumped by OneDrive/edits;
+  birthtime reflects when each CO was made and sidesteps inconsistent filename date
+  formats (some MM-DD, some DD-MM). Windows populates birthtime; mtime fallback.
+- "Older than the current date" = birthtime < start-of-today, so a same-day bid
+  edit or a CO made earlier today is not picked. (Verified: picks Visit 3 CO 06-30,
+  not today's Bid 02-07.) Helper: `latestBidOrCoSheet(root, skipDir, beforeMs)`.
+- Dest `<addr> CO DD-MM.xlsx` in the new dated folder; copyFileSync + patchBidSheet
+  (date=today, address kept). No-clobber guard. patch failure -> coSkip, copy kept.
+- Renderer (createWoSubfolder, app.jsx) toasts co/coSkip.
+NOT GUI-run (main-process change needs an Electron RESTART, not Ctrl+R); discovery
++ birthtime pick validated in node against the real WO tree. Live-verify after
+`npm start`: MSR WO, Create dated subfolder -> newest cumulative CO copied, re-dated.
+
+## DECISION (2026-07-02): copy-newest is FINAL; line-item merge DROPPED
+Legacy CO sheets are DELTAS, so copy-newest does not reflect the WO total for old
+WOs. User accepted this: copy-newest is correct GOING FORWARD (future COs generated
+by this app are cumulative by construction). The full cross-sheet line-item MERGE
+(union all bid/CO items) is NOT built - too big/risky (row-insertion into the
+template) for the payoff. Ship copy-newest as-is.
+
+### FUTURE IDEA (not built) - calculation helper bot
+Instead of merging files, a helper that reads the OPEN bid/CO sheet and computes the
+CO math live. Domain facts captured for whoever builds it:
+- The OTHER section is where ALL service items go (free-form rows).
+- Service-call fee: EXCLUDED from the HVAC total calc, INCLUDED in the Plumbing total.
+- Total mechanic: sum(line item prices) / hourly labor price -> written into the
+  Labor Hours cell -> the sheet's own formula turns that into the total (= sum of
+  line items). So the tool sets Labor Hours, not the total directly.
+See [[project_amh_completion_bot]] for the human-triggered-bot pattern.
+
 ## Change spec (in wo-create-subfolder ONLY)
 After `mkdirSync(sub)` and before `openPath`, add: if `pm === 'MSR'`, find the
 original bid in the WO ROOT and duplicate it into the dated subfolder as a CO file.

@@ -5312,7 +5312,10 @@ function App() {
     if (!window.woFolder || !window.woFolder.subfolder) { toast('Folder creation is only available in the desktop app'); return Promise.resolve(); }
     return window.woFolder.subfolder(src).then(res => {
       if (!res || !res.ok) { toast('Subfolder failed: ' + ((res && res.error) || 'unknown error')); return; }
-      toast('Dated subfolder created');
+      // MSR CO folders duplicate the original bid (main returns co/coSkip).
+      if (res.coSkip) toast('CO folder created; bid copy needs a manual date (' + res.coSkip + ')');
+      else if (res.co) toast('CO folder created with the bid duplicated');
+      else toast('Dated subfolder created');
     }).catch(e => toast('Folder error: ' + e.message));
   }, [orders, toast]);
 

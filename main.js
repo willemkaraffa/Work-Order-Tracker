@@ -600,20 +600,80 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
   }
 });
 
+// Newest Bid/CO .xlsx anywhere under `root` (recursive), skipping `skipDir` and
+// Excel temp locks (~$). Matches names containing "Bid" (any case) or "CO"
+// (uppercase word = change order). CO sheets are cumulative, so the newest one is
+// the current running total. Ranked by CREATION time (birthtime) not mtime, which
+// OneDrive/edits bump -- birthtime reflects when each CO was actually made and
+// dodges the inconsistent filename date formats. `beforeMs` (start of today)
+// excludes files created today, honoring "older than the current date" so a CO
+// made earlier today or a same-day bid edit is not the source. Path or null.
+function latestBidOrCoSheet(root, skipDir, beforeMs) {
+  let best = null;
+  const walk = (dir) => {
+    let ents;
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (p !== skipDir) walk(p); continue; }
+      if (!/\.xlsx$/i.test(e.name) || /^~\$/.test(e.name)) continue;
+      if (!(/bid/i.test(e.name) || /\bCO\b/.test(e.name))) continue;
+      let t; try { const st = fs.statSync(p); t = st.birthtimeMs || st.mtimeMs; } catch (_) { continue; }
+      if (beforeMs != null && t >= beforeMs) continue;   // older than the current date
+      if (!best || t > best.t) best = { p, t };
+    }
+  };
+  walk(root);
+  return best ? best.p : null;
+}
+
 // Create a dated subfolder (YYYY-MM-DD) under the WO root and open it. mkdir is
 // recursive so the root is created too if it does not exist yet — a revisit can
-// be filed without first pressing Create folder. No bid sheet (that lives in the
-// root; revisit folders are for follow-up docs/photos).
-ipcMain.handle('wo-create-subfolder', (_e, rec) => {
+// be filed without first pressing Create folder.
+//
+// For MSR, this folder is a CHANGE ORDER: duplicate the FILLED original bid from
+// the WO root into it as a CO sheet, re-dated today ("CO" not "Bid", address
+// preserved). MSR now requires CO bids to reflect the WO TOTAL, not just the CO
+// amount, so the CO must start from the original bid's line items. Non-MSR, or no
+// original bid found, leaves an empty dated folder (docs/photos).
+ipcMain.handle('wo-create-subfolder', async (_e, rec) => {
   try {
+    rec = rec || {};
     const r = resolveWoFolder(rec);
     if (r.error) return { ok: false, error: r.error };
     const d = new Date();
     const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const sub = path.join(r.folder, stamp);
     fs.mkdirSync(sub, { recursive: true });
+
+    let co = null, coSkip = null;
+    if (String(rec.pm || '').toUpperCase() === 'MSR') {
+      // MSR change order. CO sheets are CUMULATIVE (each carries the full running
+      // total = bid + all prior COs), so the NEWEST existing Bid/CO sheet anywhere
+      // in the WO folder tree already reflects the WO total -- copy that one, no
+      // line-item merge. Skip the folder we just made and anything created today.
+      const startOfToday = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      const source = latestBidOrCoSheet(r.folder, sub, startOfToday);
+      if (source) {
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const fileDate = `${dd}-${mm}`;
+        const cellDate = `${mm}/${dd}/${String(d.getFullYear()).slice(-2)}`;
+        const dest = path.join(sub, sanitizeName(rec.address) + ' CO ' + fileDate + '.xlsx');
+        if (!fs.existsSync(dest)) {              // never clobber an edited CO
+          fs.copyFileSync(source, dest);         // preserves line items + formatting
+          const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
+          const map   = BID_CELLS[trade];
+          const err   = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate);
+          if (err) coSkip = err;                 // copy kept (uncorrupted) for manual date edit
+        }
+        co = dest;
+      }
+      require('electron-log').info('[wo-create-subfolder] MSR CO source=' + source + ' co=' + co + (coSkip ? ' skip=' + coSkip : ''));
+    }
+
     shell.openPath(sub);
-    return { ok: true, path: sub };
+    return { ok: true, path: sub, co, coSkip };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
