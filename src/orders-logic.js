@@ -477,8 +477,8 @@ export function findOtherViewMatches(orders, q, shownLocations) {
 
 /* ---------- invoice line normalization (Build A) ---------- */
 
-// Turn a WO's scraped bidItems into InvoiceEditor line items. The SCRAPERS
-// (scrape_amh.py / scrape_amh_bids.py) emit bidItems as { name, qty, price }
+// Turn a WO's scraped bidItems into InvoiceEditor line items. The scraper
+// (scrape_amh.py) emits bidItems as { name, qty, price }
 // where `name` HOLDS THE DESCRIPTION -- there is no `desc` field. Match that
 // description against the service library (by item name OR desc, case-insensitive);
 // on a hit the library entry drives price/taxable, on a miss keep the bid

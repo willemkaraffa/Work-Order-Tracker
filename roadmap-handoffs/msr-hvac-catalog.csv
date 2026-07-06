@@ -1,0 +1,99 @@
+name,price,taxable
+Diagnostic Fee,85.00,TRUE
+Emergency or After Hours Diagnostic Fee,135.00,TRUE
+Clean Drain Pan and Drain Line,145.00,TRUE
+Clean Evaporator Coil In Place,145.00,TRUE
+Clean Condenser,150.00,TRUE
+Distribution Box Replacement,225.00,TRUE
+Filter Replacement,20.00,TRUE
+Flex Duct Vent Replacement (per line),225.00,FALSE
+Evacuate Refrigerant System,99.00,TRUE
+Leak Check,149.00,TRUE
+Line Set Replacement (no refrigerant),600.00,TRUE
+R22,50.00,TRUE
+R410a,50.00,TRUE
+R32,50.00,TRUE
+R454b,50.00,TRUE
+1.5 Ton Heat Pump System Full Replacement,4608.32,FALSE
+2.5 Ton Heat Pump System Full Replacement,4951.94,FALSE
+3 Ton Heat Pump System Full Replacement,5321.76,FALSE
+3.5 Ton Heat Pump System Full Replacement,5534.34,FALSE
+5 Ton Heat Pump System Full Replacement,6378.82,FALSE
+1.5 Ton Straight Cool System Full Replacement,4241.57,FALSE
+2.5 Ton Straight Cool System Full Replacement,4443.95,FALSE
+3 Ton Straight Cool System Full Replacement,4715.50,FALSE
+3.5 Ton Straight Cool System Full Replacement,4964.47,FALSE
+5 Ton Straight Cool System Full Replacement,5586.18,FALSE
+1.5 Ton Gas Split System Full Replacement,4578.22,FALSE
+2.5 Ton Gas Split System Full Replacement,4867.24,FALSE
+3 Ton Gas Split System Full Replacement,5079.09,FALSE
+4 Ton Gas Split System Full Replacement,5694.98,FALSE
+5 Ton Gas Split System Full Replacement,5968.70,FALSE
+2.5 Ton AC Pacakaged System - Downflow/Horizontal,5369.12,FALSE
+3 Ton AC Pacakaged System - Downflow/Horizontal,5416.44,FALSE
+3.5 Ton AC Pacakaged System - Downflow/Horizontal,5567.14,FALSE
+4 Ton AC Pacakaged System - Downflow/Horizontal,5778.26,FALSE
+2 Ton Heat Pump Pacakaged System - Downflow/Horizontal,4894.46,FALSE
+2.5 Ton Heat Pump Pacakaged System - Downflow/Horizontal,5234.44,FALSE
+3 Ton Heat Pump Pacakaged System - Downflow/Horizontal,6316.25,FALSE
+4 Ton Heat Pump Pacakaged System - Downflow/Horizontal,5599.17,FALSE
+5 Ton Heat Pump Pacakaged System - Downflow/Horizontal,6300.96,FALSE
+1.5 Ton Air Handler,1961.96,FALSE
+2.5 Ton Air Handler,2004.91,FALSE
+3 Ton Air Handler,2103.19,FALSE
+3.5 Ton Air Handler,2144.69,FALSE
+4 Ton Air Handler,2182.54,FALSE
+1.5 Ton 80% Furnace,1736.79,FALSE
+2 Ton 80% Furnace,1736.79,FALSE
+2.5 Ton 80% Furnace,1813.96,FALSE
+3.5 Ton 80% Furnace,1924.62,FALSE
+4 Ton 80% Furnace,1988.68,FALSE
+5 Ton 80% Furnace,1988.68,FALSE
+1.5 Ton 92% Furnace,2039.64,FALSE
+2.5 Ton 92% Furnace,2111.71,FALSE
+3 Ton 92% Furnace,2111.71,FALSE
+3.5 Ton 92% Furnace,2367.97,FALSE
+4 Ton 92% Furnace,2461.15,FALSE
+1.5 Ton Evaporator Coil,951.82,FALSE
+2 Ton Evaporator Coil,988.95,FALSE
+2.5 Ton Evaporator Coil,1004.24,FALSE
+3 Ton Evaporator Coil,1042.82,FALSE
+4 Ton Evaporator Coil,1131.64,FALSE
+5 Ton Evaporator Coil,1131.64,FALSE
+1.5 Ton AC Condenser,1939.61,FALSE
+2 Ton AC Condenser,2040.80,FALSE
+3 Ton AC Condenser,2272.30,FALSE
+3.5 Ton AC Condenser,2479.78,FALSE
+4 Ton AC Condenser,2624.66,FALSE
+1.5 Ton Heat Pump Condenser,2406.36,FALSE
+2 Ton Heat Pump Condenser,2458.78,FALSE
+2.5 Ton Heat Pump Condenser,2707.02,FALSE
+3.5 Ton Heat Pump Condenser,3149.65,FALSE
+4 Ton Heat Pump Condenser,3365.14,FALSE
+5 Ton Heat Pump Condenser,3791.02,FALSE
+1.5 Ton Heat Kit Replacement,409.14,FALSE
+2.5 Ton Heat Kit Replacement,423.30,FALSE
+3 Ton Heat Kit Replacement,428.85,FALSE
+3.5 Ton Heat Kit Replacement,428.85,FALSE
+4 Ton Heat Kit Replacement,512.01,FALSE
+5 Ton Heat Kit Replacement,534.80,FALSE
+1.5 Ton Condenser Fan Replacement,745.16,FALSE
+2 Ton Condenser Fan Replacement,745.16,FALSE
+2.5 Ton Condenser Fan Replacement,728.33,FALSE
+3 Ton Condenser Fan Replacement,801.78,FALSE
+4 Ton Condenser Fan Replacement,801.78,FALSE
+5 Ton Condenser Fan Replacement,801.78,FALSE
+Air Handler Sequencer Replacement,125.82,FALSE
+Blower Motor Replacement,554.35,FALSE
+Capacitor Replacement,124.58,FALSE
+Condenser Contactor Replacement,125.66,FALSE
+Condenser Fan Motor Replacement,391.47,FALSE
+Defrost Control Board Replacement,258.23,TRUE
+Draft Inducer Replacement,450.39,FALSE
+Flame Sensor Replacement,225.75,FALSE
+Gas Valve Replacement,375.35,FALSE
+Igniter Replacement,275.05,FALSE
+Limit Switch Replacement,124.97,FALSE
+Main Control Board Replacement,406.34,FALSE
+Thermostat Replacement,134.50,TRUE
+Crane Fee,500.00,TRUE

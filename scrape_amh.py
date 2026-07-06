@@ -7,9 +7,8 @@ token from the network performance log, then calls AMH's REST API
 (app.amh.com/services-api/api/Order/Query) directly for structured JSON. Tiny
 browser surface (login + one list load); all WO data comes from the API.
 
-Mechanism ported from scrape_amh_bids.py (Chrome -> Edge); extraction widened
-from bids-only to a full tracker WO object per WO. Field map verified live
-2026-06-22 (see ref-amh-orderquery-api memory).
+Selenium/Edge login + token capture; extraction builds a full tracker WO object
+per WO. Field map verified live 2026-06-22 (see ref-amh-orderquery-api memory).
 
 stdin : JSON array of WO numbers  e.g. ["9765734","9762158"]
 stdout: JSON object { "<woNum>": { ok, wo, warnings } }
@@ -67,6 +66,12 @@ def make_driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-extensions")
+    # Persistent Edge profile so the AMH auth cookie survives runs — without it
+    # every capture is a fresh profile and pays the full ~30s iframe login. The
+    # packaged app passes EDGE_PROFILE (a writable userData dir); dev falls back
+    # to a repo-local dir.
+    profile_dir = os.environ.get("EDGE_PROFILE") or str(SCRIPT_DIR / ".edge-amh-profile")
+    opts.add_argument(f"--user-data-dir={profile_dir}")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.set_capability("ms:loggingPrefs", {"performance": "ALL"})
@@ -83,7 +88,7 @@ def make_driver():
     return webdriver.Edge(options=opts)
 
 
-# ── login + token capture (ported from scrape_amh_bids.py) ─────────────────────
+# ── login + token capture ──────────────────────────────────────────────────────
 
 def login_and_get_token(driver) -> str:
     print("[LOGIN] Navigating to AMH login page...", file=sys.stderr)
@@ -197,12 +202,15 @@ def service_display_name(service: dict, remedy_map: dict) -> str:
 
 
 def extract_bids(order: dict, remedy_map: dict):
-    """Return (bidItems, bidTotal). Approved bid first, else first available;
-    line items deduped by name. Ported from scrape_amh_bids.py."""
+    """Return (bidItems, bidTotal) from the APPROVED bid only (no approved bid ->
+    empty); line items deduped by name."""
     bids = order.get("bids") or []
     approved = [b for b in bids
                 if normalize_text(b.get("statusName")).lower() == "approved"]
-    bid = approved[0] if approved else (bids[0] if bids else None)
+    # Approved-only: never fall back to a Draft/Pending/Rejected bid. Importing a
+    # non-approved amount silently mismatched the eventual approved total; no
+    # approved bid -> empty items -> the "no bid items" warning surfaces the WO.
+    bid = approved[0] if approved else None
 
     items: List[Dict] = []
     total = 0.0

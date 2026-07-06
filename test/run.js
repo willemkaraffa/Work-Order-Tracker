@@ -12,11 +12,9 @@ const DIR = __dirname;
 const onlyLogic = process.argv.includes('--logic');
 
 // Tests that read DOM dumps from test/fixtures/. They self-SKIP (exit 2) when
-// fixtures are absent; --logic excludes them up front.
-const FIXTURE_TESTS = new Set([
-  'extract.test.js', 'full-flow.test.js', 'contacts.test.js',
-  'expand-static.test.js', 'wo9718400.test.js',
-]);
+// fixtures are absent; --logic excludes them up front. (Empty since the legacy
+// DOM-scraper extract tests were removed with the dead scraper.js path.)
+const FIXTURE_TESTS = new Set([]);
 
 const files = fs.readdirSync(DIR)
   .filter(f => f.endsWith('.test.js'))

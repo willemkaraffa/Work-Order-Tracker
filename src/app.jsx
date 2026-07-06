@@ -2811,8 +2811,8 @@ function ToastHost({ toasts }) {
 // Generic source-of-truth library. Tabs are SOURCE-scoped (General / AMH), not
 // PM agreements. Persists to storage key 'service_library' independent of wo_data.
 // xlsx seed/import/export delegated to window.library (main process, exceljs).
-export const LIBRARY_TABS = ['General', 'AMH'];
-export function emptyLibrary() { return { General: [], AMH: [] }; }
+export const LIBRARY_TABS = ['General', 'AMH', 'MSR'];
+export function emptyLibrary() { return { General: [], AMH: [], MSR: [] }; }
 
 // Invoice tax model (TAX_RATE/money/computeInvoiceTotals) carved out to ./invoices.jsx.
 
@@ -2857,6 +2857,16 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
+  const seedMsr = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const r = await window.library.seedMsr();
+      if (!r || !r.ok) { toast((r && r.error) || 'MSR seed failed', 'err'); return; }
+      if (replaceTab('MSR', r.items, 'MSR HVAC price list')) toast(`MSR seeded: ${r.items.length} items`);
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
   const importBackup = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -2883,7 +2893,7 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-  return { busy, seedGeneral, seedAmh, importBackup, exportBackup };
+  return { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup };
 }
 
 // Loads + persists the service_library file. Shared by ServiceLibrary (module)
@@ -3018,7 +3028,7 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular }) 
 // management, moved off the module header to declutter it.
 export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
-  const { busy, seedGeneral, seedAmh, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
+  const { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
   const counts = LIBRARY_TABS.map(t => t + ': ' + (((lib && lib[t]) || []).length)).join(' · ');
   const tool = (label, onClick, primary) => (
@@ -3037,6 +3047,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
         <div style={{ display: 'flex', gap: 8 }}>
           {tool('Seed General', seedGeneral)}
           {tool('Seed AMH', seedAmh)}
+          {tool('Seed MSR', seedMsr)}
         </div>
       </SettingRow>
       <SettingRow label="Backup" hint={'Round-trip xlsx. ' + (lib === null ? '' : counts)}>
@@ -4890,8 +4901,11 @@ function App() {
   const saveInvoice = React.useCallback((id, invoice, errMsg) => {
     if (!invoice) { if (errMsg) toast(errMsg, 'err'); return; }
     // Authoritative duplicate-number guard (editor also blocks, this is the backstop).
+    // Empty invoice # is valid (the AMH number arrives later on the remittance
+    // form). Only a non-empty number can collide, so skip the guard when blank —
+    // otherwise every "no number yet" WO reads as a duplicate of the last one.
     const wanted = String(invoice.number || '').trim().toLowerCase();
-    const dup = orders.some(o => o.id !== id && !o.deleted && o.invoice
+    const dup = wanted && orders.some(o => o.id !== id && !o.deleted && o.invoice
       && String(o.invoice.number || '').trim().toLowerCase() === wanted);
     if (dup) { toast(`Invoice # ${invoice.number} is already used by another work order`, 'err'); return; }
     updateOrder(id, cur => ({

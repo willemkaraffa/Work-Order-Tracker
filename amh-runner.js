@@ -2,8 +2,7 @@
 // AMH capture runner: spawns scrape_amh.py (headless Edge, token+API) and
 // returns its { "<woNum>": { ok, wo, warnings } } result map. Replaces the old
 // in-app Electron BrowserWindow scraper (AMH now blocks Chromium-engine
-// browsers; the Python path drives real Edge). Spawn mechanism ported from
-// scrape-existing-amh.js.
+// browsers; the Python path drives real Edge).
 const path = require('path');
 const { spawn } = require('child_process');
 const { app } = require('electron');
@@ -20,10 +19,20 @@ function pythonPaths() {
            script: path.join(__dirname, 'scrape_amh.py') };
 }
 
+// Single-flight: captures now share ONE persistent Edge profile (see
+// EDGE_PROFILE below). Two concurrent Edge on the same --user-data-dir hit the
+// profile SingletonLock and the second crashes, so serialize — reject a second
+// capture while one is running rather than corrupt the profile.
+let captureInFlight = false;
+
 // Run the scraper for an array of WO numbers in ONE login. creds =
 // { username, password } | null. Resolves the parsed result map; rejects on
 // spawn / non-zero exit / unparseable output.
 function runAmhCapture(woNumbers, creds) {
+  if (captureInFlight) {
+    return Promise.reject(new Error('An AMH capture is already running; wait for it to finish.'));
+  }
+  captureInFlight = true;
   return new Promise((resolve, reject) => {
     const { python, script } = pythonPaths();
     const env = { ...process.env };
@@ -33,6 +42,11 @@ function runAmhCapture(woNumbers, creds) {
     // BrowserWindow is open, so a bare CLI run passes and the real app fails.
     // Strip it so the child Edge starts its own crash handler cleanly.
     delete env.CHROME_CRASHPAD_PIPE_NAME;
+    // Persistent Edge profile in a writable dir so the AMH session cookie
+    // survives runs (SCRIPT_DIR is read-only under resources/ when packaged).
+    // scrape_amh.py reads EDGE_PROFILE and passes it as --user-data-dir.
+    try { env.EDGE_PROFILE = path.join(app.getPath('userData'), 'edge-amh-profile'); }
+    catch (_) { /* app not ready — script falls back to its repo-local dir */ }
     if (creds) {
       if (creds.username) env.AMH_EMAIL    = creds.username;
       if (creds.password) env.AMH_PASSWORD = creds.password;
@@ -51,9 +65,12 @@ function runAmhCapture(woNumbers, creds) {
       try { resolve(JSON.parse(out)); }
       catch (e) { reject(new Error('Could not parse Python output: ' + out.slice(0, 200))); }
     });
+    // Python may exit (import error, profile lock) before reading stdin; the
+    // 'close' handler reports the real cause, so swallow the write-side EPIPE.
+    proc.stdin.on('error', () => {});
     proc.stdin.write(JSON.stringify(woNumbers));
     proc.stdin.end();
-  });
+  }).finally(() => { captureInFlight = false; });
 }
 
 module.exports = { runAmhCapture };

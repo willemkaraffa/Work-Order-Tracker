@@ -276,11 +276,15 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
             {items.length === 0 ? `No items in ${tab}. Use "+ Add item", or seed/import from Settings > Service Library.` : 'No matches.'}
           </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          // table-layout:fixed so declared column widths are honored. Under the
+          // default auto layout the greedy 44%/30% Name+Description columns overflow
+          // the row on tabs that add Sub-category + Taxable, crushing the Price column
+          // to ~3 chars so 4-digit prices (e.g. 4608.32) render as "460".
+          <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-canvas)', zIndex: 1 }}>
-                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '44%' }}>Item Name</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '30%' }}>Description</th>
+                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '54%' }}>Item Name</th>
+                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '20%' }}>Description</th>
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Price</th>
                 {showSubCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 130 }}>Sub-category</th>}
                 {tab !== 'AMH' && <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Taxable</th>}
@@ -367,13 +371,14 @@ const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
 export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose }) {
   useModalOpenFlag(true);   // full-screen overlay: silence type-to-search underneath
   const pm = (order && order.pm) || '';
-  const isMSR = String(pm).toUpperCase() === 'MSR';
+  const pmUpper = String(pm).toUpperCase();
+  const isMSR = pmUpper === 'MSR';
   // Invoice numbers already used by OTHER work orders (duplicate guard).
   const usedNumbers = React.useMemo(
     () => new Set((existingNumbers || []).map(normInvoiceNum)),
     [existingNumbers]
   );
-  const tabName = String(pm).toUpperCase() === 'AMH' ? 'AMH' : 'General';
+  const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : 'General';
   const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
   const catalogByName = React.useMemo(() => {
     const m = new Map();
@@ -402,10 +407,11 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
   // (that is AMH API data). On opening an un-invoiced non-AMH WO with no scraped
   // bidItems, read the OTHER section of the newest bid/CO sheet and pre-fill the
   // lines. Sentinel name (mapping to the library comes later); MSR service items
-  // are taxable (reproduces the bid total: price/1.0725 then +tax = face). Once.
+  // taxable per the catalog match (MSR items carry their own tax-inclusive flag;
+  // for a taxable MSR line the isMSR divide-out reproduces the face total). Once.
   React.useEffect(() => {
     if (existing) return;
-    if (String(pm).toUpperCase() === 'AMH') return;
+    if (pmUpper === 'AMH') return;
     if (order && Array.isArray(order.bidItems) && order.bidItems.length) return;
     if (!order || !window.woFolder || !window.woFolder.readBidLineItems) return;
     let cancelled = false;
@@ -530,11 +536,13 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
           </label>
         </div>
 
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        {/* table-layout:fixed so the Unit price column keeps its width and 4-digit
+            prices are not clipped to their leading 3 chars (same bug as the library). */}
+        <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr>
-              {th('Item', 'left', '34%')}
-              {th('Description', 'left', '26%')}
+              {th('Item', 'left', '44%')}
+              {th('Description', 'left', '16%')}
               {th('Category', 'left', 110)}
               {th('Qty', 'right', 60)}
               {th('Unit price', 'right', 110)}

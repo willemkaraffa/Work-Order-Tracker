@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('library', {
   chooseFile:       ()           => ipcRenderer.invoke('library-choose-file'),
   seedGeneral:      (path)       => ipcRenderer.invoke('library-seed-general', path || ''),
   seedAmh:          (path)       => ipcRenderer.invoke('library-seed-amh', path || ''),
+  seedMsr:          ()           => ipcRenderer.invoke('library-seed-msr'),
   importRoundtrip:  (path)       => ipcRenderer.invoke('library-import-roundtrip', path || ''),
   export:           (tabs)       => ipcRenderer.invoke('library-export', tabs),
 });

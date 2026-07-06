@@ -816,6 +816,12 @@ ipcMain.handle('library-seed-amh', async (_e, overridePath) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
+ipcMain.handle('library-seed-msr', async () => {
+  // Fixed embedded price list -- no file to resolve or validate.
+  try { return { ok: true, items: libraryIO.parseMsr() }; }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
 ipcMain.handle('library-import-roundtrip', async (_e, filePath) => {
   try {
     if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'File not found.' };
