@@ -13,6 +13,15 @@ function test(name, fn) {
   catch (e) { results.push({ name, ok: false, err: e.message }); }
 }
 
+// Catalog matching is IDF-weighted (Slice 1b) so a candidate needs a corpus to score
+// against -- a lone-item catalog gives every token idf 0 and nothing matches. Seed the
+// tested item into a realistically sized catalog (item + inert filler), exactly as it
+// sits in the 250-item live library. Also: matching is NAME-only now (item desc is the
+// scope-tab label for AMH and is deliberately ignored).
+const filler = (n) => Array.from({ length: n }, (_, i) => (
+  { name: `Zzq${i} Wodget${i}`, desc: '', price: 1000 + i, taxable: false }));
+const withFiller = (item) => [item, ...filler(24)];
+
 // WO 9767507 real bidItems (from wo-data.json) — the reported example.
 const WO9767507 = [
   { name: 'HVAC - Service Call', qty: 1, price: 90 },
@@ -44,28 +53,37 @@ test('material-keyword line -> Materials! sentinel + material category', () => {
   assert.strictEqual(lines[3].category, 'material');
 });
 
-test('non-material line -> Labor! sentinel + labor category', () => {
+test('action-verb line -> Labor! sentinel + labor category', () => {
   const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
-  assert.strictEqual(lines[0].name, 'Labor!');
-  assert.strictEqual(lines[0].category, 'labor');
+  // lines[2] = "Labor replace the indoor unit condensate drain pan" (verb "replace").
+  assert.strictEqual(lines[2].name, 'Labor!');
+  assert.strictEqual(lines[2].category, 'labor');
 });
 
-test('catalog hit drives name/price/taxable; desc still from bid; agreement set', () => {
-  const catalog = [{ name: 'Clear condensate drain line', desc: 'Flush AC drain', price: 120, taxable: true }];
+test('verbless service line -> Materials! (user rule: no action verb = material)', () => {
+  const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
+  // lines[0] = "HVAC - Service Call" has no action verb -> Materials! per the rule.
+  // (Real service calls are catalog items, so they hit before reaching this fallback.)
+  assert.strictEqual(lines[0].name, 'Materials!');
+});
+
+test('catalog hit (keyword + confirming price) drives name/price/taxable; desc from bid', () => {
+  // Price MUST equal the bid price (90) to CONFIRM identity; keyword picks the candidate.
+  const catalog = withFiller({ name: 'Clear condensate drain line', desc: 'Flush AC drain', price: 90, taxable: true });
   const lines = bidItemsToInvoiceLines(WO9767507, catalog, 'MSR');
   const hit = lines[1];
   assert.strictEqual(hit.name, 'Clear condensate drain line');
-  assert.strictEqual(hit.unitPrice, 120);
+  assert.strictEqual(hit.unitPrice, 90);
   assert.strictEqual(hit.taxable, true);
   assert.strictEqual(hit.desc, 'Clear condensate drain line');
   assert.strictEqual(hit.agreement, 'MSR');
 });
 
-test('catalog match is case-insensitive and matches item desc too', () => {
-  const catalog = [{ name: 'SVC', desc: 'clear condensate DRAIN line', price: 55, taxable: false }];
+test('keyword match is fuzzy + case-insensitive (on the item NAME)', () => {
+  const catalog = withFiller({ name: 'Clear Condensate DRAIN Line', desc: '', price: 90, taxable: false });
   const lines = bidItemsToInvoiceLines(WO9767507, catalog, 'AMH');
-  assert.strictEqual(lines[1].name, 'SVC');
-  assert.strictEqual(lines[1].unitPrice, 55);
+  assert.strictEqual(lines[1].name, 'Clear Condensate DRAIN Line');
+  assert.strictEqual(lines[1].unitPrice, 90);
 });
 
 test('empty / non-array bidItems -> []', () => {
@@ -89,8 +107,8 @@ test('string price parses to number', () => {
 
 test('non-AMH labor miss -> taxable true; material miss -> false', () => {
   const lines = bidItemsToInvoiceLines(WO9767507, [], 'General');
-  assert.strictEqual(lines[0].name, 'Labor!');
-  assert.strictEqual(lines[0].taxable, true);         // service/labor taxable
+  assert.strictEqual(lines[2].name, 'Labor!');        // "Labor replace..." (verb)
+  assert.strictEqual(lines[2].taxable, true);         // General labor taxable
   assert.strictEqual(lines[3].name, 'Materials!');
   assert.strictEqual(lines[3].taxable, false);        // material not taxable
 });
@@ -102,7 +120,7 @@ test('AMH miss stays non-taxable (premier all-inclusive)', () => {
 });
 
 test('catalog hit taxable flag still wins over the miss inference', () => {
-  const catalog = [{ name: 'Clear condensate drain line', price: 120, taxable: false }];
+  const catalog = withFiller({ name: 'Clear condensate drain line', price: 90, taxable: false });
   const lines = bidItemsToInvoiceLines(WO9767507, catalog, 'General');
   assert.strictEqual(lines[1].taxable, false);        // library says non-taxable
 });

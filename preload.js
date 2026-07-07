@@ -69,10 +69,9 @@ contextBridge.exposeInMainWorld('shell', {
 // WO folder bridge — create the OneDrive folder tree for a WO (+ MSR bid sheet)
 // and reveal it in Explorer. Record = the order { id, pm, type, address }.
 contextBridge.exposeInMainWorld('woFolder', {
+  // create = ensure-then-open (creates the tree + MSR bid sheet if missing, then opens).
   create:    (record) => ipcRenderer.invoke('wo-create-folder', record),
   subfolder: (record) => ipcRenderer.invoke('wo-create-subfolder', record),
-  open:      (record) => ipcRenderer.invoke('wo-open-folder', record),
-  exists:    (record) => ipcRenderer.invoke('wo-folder-exists', record),
   readBidLineItems: (record) => ipcRenderer.invoke('read-bid-lineitems', record),
 });
 

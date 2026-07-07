@@ -78,17 +78,6 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
   const doEdit    = (e) => { e.stopPropagation(); setOpen(false); onEdit && onEdit(data.wo); };
   const doInvoice = (e) => { e.stopPropagation(); setOpen(false); onEditInvoice && onEditInvoice(data.wo); };
   const doCap     = (e) => { e.stopPropagation(); setOpen(false); onCapture && onCapture(); };
-  // Folder-exists drives the "Go to folder" gray-out; refreshed each time the
-  // menu opens so a folder created this session enables it. null = unknown (enabled).
-  const [folderExists, setFolderExists] = React.useState(null);
-  React.useEffect(() => {
-    if (!open || !window.woFolder || !window.woFolder.exists) return;
-    let alive = true;
-    window.woFolder.exists({ pm: data.pm, id: data.wo, address: data.addr })
-      .then(r => { if (alive) setFolderExists(!!(r && r.exists)); })
-      .catch(() => { if (alive) setFolderExists(null); });
-    return () => { alive = false; };
-  }, [open, data.wo]);
   React.useEffect(() => {
     if (!open) return;
     const close = () => { setOpen(false); setStatusOpen(false); };
@@ -141,9 +130,8 @@ function DetailOverflow({ data, onAction, statuses, onEdit, onEditInvoice, canCa
               <MenuItem onClick={doEdit}>Edit details…</MenuItem>
               {onEditInvoice && <MenuItem onClick={doInvoice}>Edit invoice…</MenuItem>}
               {canCapture && <MenuItem onClick={doCap}>{capturing ? 'Capturing…' : 'Capture from portal'}</MenuItem>}
-              <MenuItem onClick={act('createFolder')}>Create folder</MenuItem>
+              <MenuItem onClick={act('openFolder')}>Go to folder</MenuItem>
               <MenuItem onClick={act('createSubfolder')}>Create dated subfolder</MenuItem>
-              <MenuItem disabled={folderExists === false} onClick={act('openFolder')}>Go to folder</MenuItem>
               <MenuDivider />
               {tab === 'active' && (<>
                 <MenuItem onClick={(e) => { e.stopPropagation(); setStatusOpen(true); }}>Change status…</MenuItem>

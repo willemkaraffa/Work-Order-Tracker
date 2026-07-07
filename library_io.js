@@ -81,124 +81,36 @@ async function parseAmh(filePath) {
   return items;
 }
 
-// ── MSR: fixed HVAC bid-sheet pricing (embedded, not a user file) ─────────────
-// MSR (Main Street Renewal) issues a signed, fixed HVAC price list; effective
-// 2026-07-02 (see roadmap-handoffs/msr-pricing-update.md). THIS ARRAY IS THE
-// AUTHORITATIVE runtime source; roadmap-handoffs/msr-hvac-catalog.{json,csv} are a
-// provenance snapshot only -- on a price revision, edit HERE. Unlike General/AMH,
-// there is no local workbook to read -- the 98 line items are the FIRST bid-sheet
-// table (Item -> Total Price), embedded here so Seed MSR is one click.
-// taxable is per-item, set from each line's PDF description: items whose scope text
-// states the price includes tax ("applicable taxes" / "tax") are tax-FINAL ->
-// taxable:false (used as-is, no tax added or divided). Items with no tax mention
-// (labor/diagnostic/cleaning) stay taxable:true, so the invoice MSR divide-out
-// (invoices.jsx computeInvoiceTotals) breaks the embedded tax back out. A handful
-// of materials with no explicit tax wording (refrigerants, thermostat, defrost
-// board, filter, line set, distribution box) are left taxable:true for the user to
-// adjust at their discretion. Descriptions dropped by request. Source name spellings
-// kept verbatim ("Pacakaged") so invoice autofill matches MSR-scraped bid descriptions.
-const MSR_ITEMS = [
-  { name: 'Diagnostic Fee', desc: '', price: 85.0, taxable: true },
-  { name: 'Emergency or After Hours Diagnostic Fee', desc: '', price: 135.0, taxable: true },
-  { name: 'Clean Drain Pan and Drain Line', desc: '', price: 145.0, taxable: true },
-  { name: 'Clean Evaporator Coil In Place', desc: '', price: 145.0, taxable: true },
-  { name: 'Clean Condenser', desc: '', price: 150.0, taxable: true },
-  { name: 'Distribution Box Replacement', desc: '', price: 225.0, taxable: true },
-  { name: 'Filter Replacement', desc: '', price: 20.0, taxable: true },
-  { name: 'Flex Duct Vent Replacement (per line)', desc: '', price: 225.0, taxable: false },
-  { name: 'Evacuate Refrigerant System', desc: '', price: 99.0, taxable: true },
-  { name: 'Leak Check', desc: '', price: 149.0, taxable: true },
-  { name: 'Line Set Replacement (no refrigerant)', desc: '', price: 600.0, taxable: true },
-  { name: 'R22', desc: '', price: 50.0, taxable: true },
-  { name: 'R410a', desc: '', price: 50.0, taxable: true },
-  { name: 'R32', desc: '', price: 50.0, taxable: true },
-  { name: 'R454b', desc: '', price: 50.0, taxable: true },
-  { name: '1.5 Ton Heat Pump System Full Replacement', desc: '', price: 4608.32, taxable: false },
-  { name: '2.5 Ton Heat Pump System Full Replacement', desc: '', price: 4951.94, taxable: false },
-  { name: '3 Ton Heat Pump System Full Replacement', desc: '', price: 5321.76, taxable: false },
-  { name: '3.5 Ton Heat Pump System Full Replacement', desc: '', price: 5534.34, taxable: false },
-  { name: '5 Ton Heat Pump System Full Replacement', desc: '', price: 6378.82, taxable: false },
-  { name: '1.5 Ton Straight Cool System Full Replacement', desc: '', price: 4241.57, taxable: false },
-  { name: '2.5 Ton Straight Cool System Full Replacement', desc: '', price: 4443.95, taxable: false },
-  { name: '3 Ton Straight Cool System Full Replacement', desc: '', price: 4715.5, taxable: false },
-  { name: '3.5 Ton Straight Cool System Full Replacement', desc: '', price: 4964.47, taxable: false },
-  { name: '5 Ton Straight Cool System Full Replacement', desc: '', price: 5586.18, taxable: false },
-  { name: '1.5 Ton Gas Split System Full Replacement', desc: '', price: 4578.22, taxable: false },
-  { name: '2.5 Ton Gas Split System Full Replacement', desc: '', price: 4867.24, taxable: false },
-  { name: '3 Ton Gas Split System Full Replacement', desc: '', price: 5079.09, taxable: false },
-  { name: '4 Ton Gas Split System Full Replacement', desc: '', price: 5694.98, taxable: false },
-  { name: '5 Ton Gas Split System Full Replacement', desc: '', price: 5968.7, taxable: false },
-  { name: '2.5 Ton AC Pacakaged System - Downflow/Horizontal', desc: '', price: 5369.12, taxable: false },
-  { name: '3 Ton AC Pacakaged System - Downflow/Horizontal', desc: '', price: 5416.44, taxable: false },
-  { name: '3.5 Ton AC Pacakaged System - Downflow/Horizontal', desc: '', price: 5567.14, taxable: false },
-  { name: '4 Ton AC Pacakaged System - Downflow/Horizontal', desc: '', price: 5778.26, taxable: false },
-  { name: '2 Ton Heat Pump Pacakaged System - Downflow/Horizontal', desc: '', price: 4894.46, taxable: false },
-  { name: '2.5 Ton Heat Pump Pacakaged System - Downflow/Horizontal', desc: '', price: 5234.44, taxable: false },
-  { name: '3 Ton Heat Pump Pacakaged System - Downflow/Horizontal', desc: '', price: 6316.25, taxable: false },
-  { name: '4 Ton Heat Pump Pacakaged System - Downflow/Horizontal', desc: '', price: 5599.17, taxable: false },
-  { name: '5 Ton Heat Pump Pacakaged System - Downflow/Horizontal', desc: '', price: 6300.96, taxable: false },
-  { name: '1.5 Ton Air Handler', desc: '', price: 1961.96, taxable: false },
-  { name: '2.5 Ton Air Handler', desc: '', price: 2004.91, taxable: false },
-  { name: '3 Ton Air Handler', desc: '', price: 2103.19, taxable: false },
-  { name: '3.5 Ton Air Handler', desc: '', price: 2144.69, taxable: false },
-  { name: '4 Ton Air Handler', desc: '', price: 2182.54, taxable: false },
-  { name: '1.5 Ton 80% Furnace', desc: '', price: 1736.79, taxable: false },
-  { name: '2 Ton 80% Furnace', desc: '', price: 1736.79, taxable: false },
-  { name: '2.5 Ton 80% Furnace', desc: '', price: 1813.96, taxable: false },
-  { name: '3.5 Ton 80% Furnace', desc: '', price: 1924.62, taxable: false },
-  { name: '4 Ton 80% Furnace', desc: '', price: 1988.68, taxable: false },
-  { name: '5 Ton 80% Furnace', desc: '', price: 1988.68, taxable: false },
-  { name: '1.5 Ton 92% Furnace', desc: '', price: 2039.64, taxable: false },
-  { name: '2.5 Ton 92% Furnace', desc: '', price: 2111.71, taxable: false },
-  { name: '3 Ton 92% Furnace', desc: '', price: 2111.71, taxable: false },
-  { name: '3.5 Ton 92% Furnace', desc: '', price: 2367.97, taxable: false },
-  { name: '4 Ton 92% Furnace', desc: '', price: 2461.15, taxable: false },
-  { name: '1.5 Ton Evaporator Coil', desc: '', price: 951.82, taxable: false },
-  { name: '2 Ton Evaporator Coil', desc: '', price: 988.95, taxable: false },
-  { name: '2.5 Ton Evaporator Coil', desc: '', price: 1004.24, taxable: false },
-  { name: '3 Ton Evaporator Coil', desc: '', price: 1042.82, taxable: false },
-  { name: '4 Ton Evaporator Coil', desc: '', price: 1131.64, taxable: false },
-  { name: '5 Ton Evaporator Coil', desc: '', price: 1131.64, taxable: false },
-  { name: '1.5 Ton AC Condenser', desc: '', price: 1939.61, taxable: false },
-  { name: '2 Ton AC Condenser', desc: '', price: 2040.8, taxable: false },
-  { name: '3 Ton AC Condenser', desc: '', price: 2272.3, taxable: false },
-  { name: '3.5 Ton AC Condenser', desc: '', price: 2479.78, taxable: false },
-  { name: '4 Ton AC Condenser', desc: '', price: 2624.66, taxable: false },
-  { name: '1.5 Ton Heat Pump Condenser', desc: '', price: 2406.36, taxable: false },
-  { name: '2 Ton Heat Pump Condenser', desc: '', price: 2458.78, taxable: false },
-  { name: '2.5 Ton Heat Pump Condenser', desc: '', price: 2707.02, taxable: false },
-  { name: '3.5 Ton Heat Pump Condenser', desc: '', price: 3149.65, taxable: false },
-  { name: '4 Ton Heat Pump Condenser', desc: '', price: 3365.14, taxable: false },
-  { name: '5 Ton Heat Pump Condenser', desc: '', price: 3791.02, taxable: false },
-  { name: '1.5 Ton Heat Kit Replacement', desc: '', price: 409.14, taxable: false },
-  { name: '2.5 Ton Heat Kit Replacement', desc: '', price: 423.3, taxable: false },
-  { name: '3 Ton Heat Kit Replacement', desc: '', price: 428.85, taxable: false },
-  { name: '3.5 Ton Heat Kit Replacement', desc: '', price: 428.85, taxable: false },
-  { name: '4 Ton Heat Kit Replacement', desc: '', price: 512.01, taxable: false },
-  { name: '5 Ton Heat Kit Replacement', desc: '', price: 534.8, taxable: false },
-  { name: '1.5 Ton Condenser Fan Replacement', desc: '', price: 745.16, taxable: false },
-  { name: '2 Ton Condenser Fan Replacement', desc: '', price: 745.16, taxable: false },
-  { name: '2.5 Ton Condenser Fan Replacement', desc: '', price: 728.33, taxable: false },
-  { name: '3 Ton Condenser Fan Replacement', desc: '', price: 801.78, taxable: false },
-  { name: '4 Ton Condenser Fan Replacement', desc: '', price: 801.78, taxable: false },
-  { name: '5 Ton Condenser Fan Replacement', desc: '', price: 801.78, taxable: false },
-  { name: 'Air Handler Sequencer Replacement', desc: '', price: 125.82, taxable: false },
-  { name: 'Blower Motor Replacement', desc: '', price: 554.35, taxable: false },
-  { name: 'Capacitor Replacement', desc: '', price: 124.58, taxable: false },
-  { name: 'Condenser Contactor Replacement', desc: '', price: 125.66, taxable: false },
-  { name: 'Condenser Fan Motor Replacement', desc: '', price: 391.47, taxable: false },
-  { name: 'Defrost Control Board Replacement', desc: '', price: 258.23, taxable: true },
-  { name: 'Draft Inducer Replacement', desc: '', price: 450.39, taxable: false },
-  { name: 'Flame Sensor Replacement', desc: '', price: 225.75, taxable: false },
-  { name: 'Gas Valve Replacement', desc: '', price: 375.35, taxable: false },
-  { name: 'Igniter Replacement', desc: '', price: 275.05, taxable: false },
-  { name: 'Limit Switch Replacement', desc: '', price: 124.97, taxable: false },
-  { name: 'Main Control Board Replacement', desc: '', price: 406.34, taxable: false },
-  { name: 'Thermostat Replacement', desc: '', price: 134.5, taxable: true },
-  { name: 'Crane Fee', desc: '', price: 500.0, taxable: true },
-];
-// Return a fresh copy each call so callers can't mutate the shared constant.
-function parseMsr() { return MSR_ITEMS.map(it => ({ ...it })); }
+// ── MSR: HVAC bid-sheet pricing (read from the live MSR bid sheet) ────────────
+// MSR (Main Street Renewal) requires all bids on THEIR designated Excel bid sheet,
+// which they revise over time. That same sheet is our WO-folder automation skeleton
+// (main.js BID_SKELETON.HVAC) AND the price source, so parseMsr reads it directly:
+// re-seeding the MSR catalog picks up MSR's latest prices with zero hand edits (the
+// old embedded array had drifted -- 98 items vs the sheet's 120, missing several
+// tonnages). Catalog = the first table on the 'Vendor HVAC Bid Sheet' tab: col B =
+// Item, col G = Total Price (fully burdened / tax-INCLUSIVE per the master agreement).
+// Rows with no numeric Total Price are section headers or the trailing OTHER
+// placeholder -> skipped. ALL items taxable:true: MSR prices are tax-inclusive, so
+// the invoices.jsx isMSR divide-out shows a broken-out 7.25% line while the grand
+// total equals the sheet price (roadmap-handoffs/msr-pricing-update.md WS1/WS2).
+// Source name spellings kept verbatim ("Pacakaged") so invoice autofill matches the
+// MSR-scraped bid descriptions.
+const MSR_SHEET = 'Vendor HVAC Bid Sheet';
+async function parseMsr(filePath) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(filePath);
+  const ws = wb.getWorksheet(MSR_SHEET);
+  if (!ws) throw new Error(`Sheet "${MSR_SHEET}" not found in ${filePath}`);
+  const items = [];
+  ws.eachRow((row, n) => {
+    if (n <= 13) return; // title + instructions + header (Item header = row 13)
+    const name = toStr(cellVal(row.getCell(2)));    // col B = Item
+    const price = toPrice(cellVal(row.getCell(7)));  // col G = Total Price
+    if (!name || price == null) return;              // section header / OTHER placeholder
+    items.push({ name, desc: '', price, taxable: true });
+  });
+  return items;
+}
 
 // ── Round-trip restore: Service Library.xlsx (our own export) ─────────────────
 // One sheet per tab, header row [Item Name, Description, Price, Taxable].

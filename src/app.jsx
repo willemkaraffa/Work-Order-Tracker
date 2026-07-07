@@ -842,8 +842,8 @@ function CCDropdown({ label, items, onPick }) {
 }
 
 // Command-center Folder action dropdown (#5). Same look as CCDropdown but fires
-// WO folder actions instead of swapping WOs: create the root folder (+bid sheet),
-// create a dated revisit subfolder, or open the existing folder.
+// WO folder actions instead of swapping WOs: View folder (creates the root folder +
+// bid sheet if missing, then opens) or create a dated revisit subfolder.
 function FolderMenu({ onAction }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef(null);
@@ -866,9 +866,8 @@ function FolderMenu({ onAction }) {
           background: 'var(--bg-surface)', border: '1px solid var(--border-2)', borderRadius: 8,
           boxShadow: '0 12px 30px rgba(0,0,0,0.45)', padding: '4px 0', zIndex: 1000,
         }}>
-          {item('Create folder', 'createFolder')}
-          {item('Create dated subfolder', 'createSubfolder')}
           {item('View folder', 'openFolder')}
+          {item('Create dated subfolder', 'createSubfolder')}
         </div>
       )}
     </div>
@@ -1421,20 +1420,6 @@ export function WOContextMenu({
   const showCapture     = !bulk && ctxRow?.pm === 'AMH' && window.scraper && window.scraper.captureWO;
   const showRemoveInbox = isInboxView && inboxId && !bulk;
 
-  // Folder-exists drives the "Go to folder" gray-out. null = unknown (fail-open,
-  // stays enabled); the open handler still guards a missing folder with a toast.
-  // address is normalized: itinerary passes the full order (address), list rows
-  // carry addr. Re-checks per WO when the menu opens.
-  const [folderExists, setFolderExists] = React.useState(null);
-  React.useEffect(() => {
-    if (bulk || tab === 'trash' || !window.woFolder || !window.woFolder.exists) { setFolderExists(null); return; }
-    let alive = true;
-    window.woFolder.exists({ pm: ctxRow?.pm, id: woId, address: ctxRow?.address || ctxRow?.addr })
-      .then(r => { if (alive) setFolderExists(!!(r && r.exists)); })
-      .catch(() => { if (alive) setFolderExists(null); });
-    return () => { alive = false; };
-  }, [woId, bulk, tab]);
-
   // Build submenu item list lazily.
   const buildSub = (key) => {
     // v4.0.1: hide LOCKED_STATUSES from the Set status submenu — they are
@@ -1472,9 +1457,8 @@ export function WOContextMenu({
       return items;
     }
     if (key === 'folder') return [
-      { label: 'Create folder', onClick: () => onWoAction && onWoAction(woId, 'createFolder') },
+      { label: 'Go to folder', onClick: () => onWoAction && onWoAction(woId, 'openFolder') },
       { label: 'Create dated subfolder', onClick: () => onWoAction && onWoAction(woId, 'createSubfolder') },
-      { label: 'Go to folder', disabled: folderExists === false, onClick: () => onWoAction && onWoAction(woId, 'openFolder') },
     ];
     if (key === 'mark') return [
       {
@@ -5306,13 +5290,15 @@ function App() {
       .finally(() => setCaptureStatus(null));
   }, [orders, applyCapture, toast]);
 
-  // Create the OneDrive folder tree (+ MSR bid sheet) for a WO and open it.
-  const createFolder = React.useCallback((id) => {
+  // "Go to folder": ensure the OneDrive folder tree (+ MSR bid sheet) exists, then open
+  // it. Merges the old separate "Create folder" — one action creates-if-missing + opens.
+  const openWoFolder = React.useCallback((id) => {
     const src = orders.find(o => o.id === id);
     if (!src) return Promise.resolve();
-    if (!window.woFolder || !window.woFolder.create) { toast('Folder creation is only available in the desktop app'); return Promise.resolve(); }
+    if (!window.woFolder || !window.woFolder.create) { toast('Folder access is only available in the desktop app'); return Promise.resolve(); }
     return window.woFolder.create(src).then(res => {
       if (!res || !res.ok) { toast('Folder failed: ' + ((res && res.error) || 'unknown error')); return; }
+      if (res.existed) return;                                  // already there: just opened, no toast
       if (res.xlsxSkip) { toast('Folder created; bid sheet skipped: ' + res.xlsxSkip, 'warn'); return; }
       toast(res.xlsx ? 'Folder + bid sheet created' : 'Folder created');
     }).catch(e => toast('Folder error: ' + e.message));
@@ -5330,18 +5316,6 @@ function App() {
       if (res.coSkip) toast('CO folder created; bid copy needs a manual date (' + res.coSkip + ')');
       else if (res.co) toast('CO folder created with the bid duplicated');
       else toast('Dated subfolder created');
-    }).catch(e => toast('Folder error: ' + e.message));
-  }, [orders, toast]);
-
-  // Open the WO root folder in Explorer (no create). Missing folder -> toast.
-  const openWoFolder = React.useCallback((id) => {
-    const src = orders.find(o => o.id === id);
-    if (!src) return Promise.resolve();
-    if (!window.woFolder || !window.woFolder.open) { toast('Folder access is only available in the desktop app'); return Promise.resolve(); }
-    return window.woFolder.open(src).then(res => {
-      if (res && res.ok) return;
-      if (res && res.missing) { toast('No folder yet — use Create folder', 'warn'); return; }
-      toast('Open failed: ' + ((res && res.error) || 'unknown error'));
     }).catch(e => toast('Folder error: ' + e.message));
   }, [orders, toast]);
 
@@ -5554,13 +5528,10 @@ function App() {
       case 'capture':
         captureOrder(id);
         break;
-      case 'createFolder':
-        createFolder(id);
-        break;
       case 'createSubfolder':
         createWoSubfolder(id);
         break;
-      case 'openFolder':
+      case 'openFolder':                 // "Go to folder": create-if-missing + open
         openWoFolder(id);
         break;
       case 'jumpToSchedule': {
@@ -5620,7 +5591,7 @@ function App() {
       // change11: markInvoiced + markPaid retired (QuickBooks tracks those).
       default: break;
     }
-  }, [updateOrder, captureOrder, createFolder, createWoSubfolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
+  }, [updateOrder, captureOrder, createWoSubfolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
   const detailAction = React.useCallback((kind, payload) => {
@@ -5630,7 +5601,7 @@ function App() {
     if (kind === 'setStatus' || kind === 'setType' || kind === 'setTech' ||
         kind === 'backToActive' || kind === 'softDelete' ||
         kind === 'toggleEmergency' || kind === 'toggleWarranty' ||
-        kind === 'markComplete' || kind === 'reopen' || kind === 'createFolder' || kind === 'createSubfolder' || kind === 'openFolder') {
+        kind === 'markComplete' || kind === 'reopen' || kind === 'createSubfolder' || kind === 'openFolder') {
       woAction(id, kind, payload);
       return;
     }

@@ -472,7 +472,11 @@ const WO_ROOT       = () => path.join(app.getPath('home'), 'OneDrive', 'Desktop'
 const BID_SKELETONS = () => path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'PM Bids Excel');
 const BID_SKELETON  = { HVAC: 'Gamble Plumbing - MSR HVAC Bid Sheet.xlsx', Plumbing: 'Gamble Plumbing - MSR Plumbing Bid Sheet.xlsx' };
 // Verified cell map: label in the column left of the value cell (see scan).
-const BID_CELLS     = { HVAC: { sheet: 'Vendor HVAC Bid Sheet', addr: 'C8', date: 'C9' }, Plumbing: { sheet: 'Plumbing - Rough & Finish', addr: 'D5', date: 'D6' } };
+// HVAC value cells (labels in col B): Market=C8, Property Address=C9, Date of Bid=C10
+// (each merged C:I). zoom = default view % per copy (template ships at 90%, too zoomed
+// in). market/marketVal = pre-fill the Market dropdown (C8) with the fixed home market;
+// 'Raleigh Durham' is the exact option string from the sheet's Markets list.
+const BID_CELLS     = { HVAC: { sheet: 'Vendor HVAC Bid Sheet', addr: 'C9', date: 'C10', zoom: 70, market: 'C8', marketVal: 'Raleigh Durham' }, Plumbing: { sheet: 'Plumbing - Rough & Finish', addr: 'D5', date: 'D6' } };
 
 function sanitizeName(s) { return String(s || '').replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim(); }
 // "3804 Chokecherry Ln" -> "Chokecherry Ln 3804": leading street number to the
@@ -496,11 +500,24 @@ function setSheetCell(xml, ref, val) {
   });
   return { out, hit };
 }
+// Set the worksheet's default zoom (the MSR template ships at 90% -> too zoomed in).
+// Rewrites zoomScale + zoomScaleNormal on the sheet's first <sheetView>. Cosmetic, so
+// a miss is non-fatal (patchBidSheet ignores hit here). Non-global: only this sheet's view.
+function setSheetZoom(xml, pct) {
+  const z = String(pct);
+  let hit = false;
+  const out = xml.replace(/<sheetView\b([^>]*)>/, (_full, attrs) => {
+    hit = true;
+    const a = attrs.replace(/\s+zoomScale(Normal)?="[^"]*"/g, '');
+    return '<sheetView' + a + ' zoomScale="' + z + '" zoomScaleNormal="' + z + '">';
+  });
+  return { out, hit };
+}
 // Patch a bid sheet copy IN PLACE by editing only the target worksheet XML
 // inside the xlsx zip; every other entry stays byte-identical. This avoids the
 // full-workbook re-serialize exceljs does, which corrupted the Plumbing template
 // (Excel "found a problem with some content"). Returns an error string or null.
-async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal) {
+async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal, zoom, marketRef, marketVal) {
   const JSZip = require('jszip');
   const zip   = await JSZip.loadAsync(fs.readFileSync(dest));
   const wb    = await zip.file('xl/workbook.xml').async('string');
@@ -514,6 +531,8 @@ async function patchBidSheet(dest, sheetName, addrRef, dateRef, addrVal, dateVal
   const a = setSheetCell(sx, addrRef, addrVal); sx = a.out;
   const b = setSheetCell(sx, dateRef, dateVal); sx = b.out;
   if (!a.hit || !b.hit) return 'cells not found (addr=' + a.hit + ' date=' + b.hit + ')';
+  if (marketRef && marketVal) sx = setSheetCell(sx, marketRef, marketVal).out;  // Market dropdown default
+  if (zoom) sx = setSheetZoom(sx, zoom).out;   // cosmetic default zoom; miss is non-fatal
   zip.file(target, sx);
   // JSZip infers folder entries on load; the skeleton has none. Drop them so the
   // output entry-set matches the original exactly (only the target sheet differs).
@@ -541,23 +560,9 @@ function resolveWoFolder(rec) {
   return { folder: path.join(root, 'Other Customers', cust) };
 }
 
-// Gray-out signal for the "Go to folder" menu item — true only if the folder exists on disk.
-ipcMain.handle('wo-folder-exists', (_e, rec) => {
-  try { const r = resolveWoFolder(rec); return { exists: !!(r.folder && fs.existsSync(r.folder)) }; }
-  catch (e) { return { exists: false }; }
-});
-
-// Open the WO root folder in Explorer. No create — missing folder reports back so the renderer can toast.
-ipcMain.handle('wo-open-folder', (_e, rec) => {
-  try {
-    const r = resolveWoFolder(rec);
-    if (r.error) return { ok: false, error: r.error };
-    if (!fs.existsSync(r.folder)) return { ok: false, missing: true, path: r.folder };
-    shell.openPath(r.folder);
-    return { ok: true, path: r.folder };
-  } catch (e) { return { ok: false, error: String(e.message || e) }; }
-});
-
+// "Go to folder" = ensure-then-open: create the folder tree (+ MSR bid sheet) if it
+// does not exist yet, then open it in Explorer. Merges the old separate "Create folder"
+// action so there is ONE folder entry point. `existed` lets the renderer pick the toast.
 ipcMain.handle('wo-create-folder', async (_e, rec) => {
   try {
     rec = rec || {};
@@ -565,6 +570,7 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
     const resolved = resolveWoFolder(rec);
     if (resolved.error) return { ok: false, error: resolved.error };
     const folder = resolved.folder;
+    const existed = fs.existsSync(folder);
     fs.mkdirSync(folder, { recursive: true });
 
     const d  = new Date();
@@ -586,7 +592,7 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
         if (!fs.existsSync(dest)) {                 // never clobber an edited bid
           fs.copyFileSync(skel, dest);              // raw copy first -> preserves template byte-for-byte
           const map = BID_CELLS[trade];
-          const err = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate);
+          const err = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate, map.zoom, map.market, map.marketVal);
           if (err) xlsxSkip = err;                  // copy kept (uncorrupted, unfilled) so user can fill manually
         }
         xlsx = dest;
@@ -594,7 +600,7 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
       require('electron-log').info('[wo-create-folder] pm=MSR trade=' + trade + ' skel=' + skel + ' exists=' + fs.existsSync(skel) + ' xlsx=' + xlsx + (xlsxSkip ? ' skip=' + xlsxSkip : ''));
     }
     shell.openPath(folder);
-    return { ok: true, path: folder, xlsx, xlsxSkip };
+    return { ok: true, path: folder, xlsx, xlsxSkip, existed };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -664,7 +670,7 @@ ipcMain.handle('wo-create-subfolder', async (_e, rec) => {
           fs.copyFileSync(source, dest);         // preserves line items + formatting
           const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
           const map   = BID_CELLS[trade];
-          const err   = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate);
+          const err   = await patchBidSheet(dest, map.sheet, map.addr, map.date, String(rec.address || ''), cellDate, map.zoom, map.market, map.marketVal);
           if (err) coSkip = err;                 // copy kept (uncorrupted) for manual date edit
         }
         co = dest;
@@ -816,10 +822,16 @@ ipcMain.handle('library-seed-amh', async (_e, overridePath) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-ipcMain.handle('library-seed-msr', async () => {
-  // Fixed embedded price list -- no file to resolve or validate.
-  try { return { ok: true, items: libraryIO.parseMsr() }; }
-  catch (e) { return { ok: false, error: e.message }; }
+ipcMain.handle('library-seed-msr', async (_e, overridePath) => {
+  // Reads MSR prices from the live MSR HVAC bid sheet -- the same file used as the
+  // WO-folder automation skeleton (BID_SKELETON.HVAC), so one source of truth.
+  try {
+    const p = (overridePath && overridePath.trim())
+      ? overridePath.trim()
+      : path.join(BID_SKELETONS(), BID_SKELETON.HVAC);
+    if (!fs.existsSync(p)) return { ok: false, error: `MSR HVAC bid sheet not found at:\n  ${p}` };
+    return { ok: true, items: await libraryIO.parseMsr(p), path: p };
+  } catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('library-import-roundtrip', async (_e, filePath) => {

@@ -78,14 +78,16 @@ def make_driver():
     binary = _edge_binary()
     if binary:
         opts.binary_location = binary
+    # Always route through a Service so we can suppress the msedgedriver console
+    # window on Windows (creation_flags=CREATE_NO_WINDOW). A bundled driver keeps
+    # the packaged app offline; an empty-path Service still lets Selenium Manager
+    # (selenium 4.6+) auto-resolve the binary. Without this, the no-driver fallback
+    # spawned msedgedriver with a visible blank console window.
     driver_path = _edge_driver_path()
-    if driver_path:
-        service = Service(driver_path)
-        if sys.platform == "win32":
-            service.creation_flags = _NO_WINDOW
-        return webdriver.Edge(service=service, options=opts)
-    # Selenium Manager (selenium 4.6+) resolves a matching msedgedriver.
-    return webdriver.Edge(options=opts)
+    service = Service(driver_path) if driver_path else Service()
+    if sys.platform == "win32":
+        service.creation_flags = _NO_WINDOW
+    return webdriver.Edge(service=service, options=opts)
 
 
 # ── login + token capture ──────────────────────────────────────────────────────

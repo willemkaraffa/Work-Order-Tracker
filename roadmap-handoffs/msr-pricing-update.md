@@ -3,9 +3,19 @@
 Date: 2026-07-06
 Source: `~/OneDrive/Desktop/excel/PM Bids Excel/Complete_with_Docusign_MSR_-_Maintenance_Bid.pdf`
 Effective date (per doc): **July 2, 2026**. Signed by Gamble Plumbing 7/3/2026.
-Status: WS1 + WS2 DONE (2026-07-06). WS3 BLOCKED (user requesting MSR's official Excel
-sheet — will not self-build; MSR won't accept a vendor-made/locked sheet). WS4 captured here.
-`npm run verify` green (5 pass); parseMsr returns 98 valid items.
+Status: WS1 + WS2 + WS3 DONE. WS4 RESOLVED (user decisions, see below). `npm run verify`
+green (7 pass). Bid-sheet copies now default to 70% zoom (was 90%). TWO outstanding/deferred
+tasks logged under WS4: (1) bid-submission confirmation phase-hook (only if MSR demands
+in-bid equipment data), (2) auto service-call qty=1 on the FIRST bid sheet per WO. OPEN
+QUESTION (awaiting MSR confirmation): the diagnostic/service-call fee may be payable ONLY
+when it was the sole labor (Incurred-Costs rule) — if so, do NOT ubiquitously add the
+service call to MSR invoices/bids; this gates Outstanding #2.
+UPDATE 2026-07-07: MSR's live Excel bid sheet arrived. parseMsr now READS that sheet
+(no more embedded array) — same file as the automation skeleton, one source of truth.
+Sheet = 120 items (embedded had drifted to 98, missing tonnages). Col B = Item, col G =
+Total Price. ALL items taxable:true (tax-inclusive divide-out; grand total = sheet face).
+WS3 cell map re-verified + updated: HVAC addr C8->C9, date C9->C10 (header block moved down
+one row); patch live-tested on a copy (C9/C10 materialized, values land, reparse clean).
 
 DONE:
 - library_io.js: embedded 98-item MSR HVAC price list + `parseMsr()`.
@@ -103,7 +113,24 @@ Note: the sheet's own "10% Tax" column (pages 25+) is MSR's material-cost tax co
 already baked into each Total Price. It is NOT the app's 7.25% sales tax and needs no
 handling — the Total Price is the single number the catalog stores.
 
-## WS3 — Replace the MSR bid sheet template (BLOCKED on the Excel file)
+## WS3 — Replace the MSR bid sheet template (DONE 2026-07-07)
+
+Received `Gamble Plumbing - MSR HVAC Bid Sheet.xlsx` (already the `BID_SKELETON.HVAC`
+filename, dropped into `PM Bids Excel/`). Changes shipped:
+- `BID_CELLS.HVAC` addr `C8`->`C9`, date `C9`->`C10` (header labels at B9/B10; value cells are
+  the merged C9:I9 / C10:I10). Sheet tab name unchanged ('Vendor HVAC Bid Sheet'). Market cell
+  C8 pre-filled to "Raleigh Durham" (fixed home market; exact string from the Markets dropdown
+  list) via `market`/`marketVal` in the config -> patchBidSheet.
+- `library_io.parseMsr(filePath)` now reads this sheet (col B name / col G Total Price) instead
+  of an embedded array; `main.js` `library-seed-msr` passes the skeleton path. Re-seeding MSR
+  pulls MSR's current prices with no code edit.
+- Live-tested: patched a copy's C9/C10, values land, exceljs reparse clean (no corruption; the
+  JSZip in-place patch mechanism is unchanged). RUNTIME: user re-runs Settings > Service Library
+  > "Seed MSR" to load the 120 items; folder-create for an MSR HVAC WO fills address+date.
+- Provenance files `msr-hvac-catalog.{json,csv}` are now STALE (98-item snapshot); the live sheet
+  is the source of truth. Left for history; ignore for pricing.
+
+### Original WS3 (blocked) reference
 
 MSR requires all future bids on their designated live Excel bid sheet: "Vendor is required
 to submit all future bids using the designated bid sheet format... Compliance with this
@@ -128,25 +155,49 @@ When the Excel file arrives:
    Excel opens it without the "found a problem with content" repair prompt (the in-place
    JSZip patch already avoids the exceljs corruption — see the patchBidSheet comment).
 
-## WS4 — Capture MSR's bid-acceptance requirements
+## WS4 — MSR bid-acceptance requirements (RESOLVED 2026-07-07, user decisions)
 
-New rules MSR imposes for bid acceptance (from PDF pages 1-2, 24). Where to surface these
-in-app is open (no existing "agreement notes" UI). Options: a static reference blurb in the
-Service Items / MSR tab header, or leave them here as the reference. Requirements:
-- **Fixed pricing, no deviation** without prior written MSR approval.
-- **Non-listed work → the "Other" line item**: bid = standard hourly labor rate × estimated
-  hours + material cost; subject to review/approval before work starts.
-- **Bid-sheet format is mandatory**; non-compliant bids are rejected (see WS3).
-- **Equipment data required**: existing equipment data plate — manufacturer, model number,
-  serial number — plus photographs, as part of every bid submission.
-- **Header fields per bid**: Vendor Name, Supplier Used (dropdown), Market (dropdown),
-  Property Address, Date of Bid, recommendation to remedy (dropdown), and a written reason
-  for the recommendation (equipment age, serial, scope).
-- **Diagnostic fees go in the Work Order's "Incurred Costs" section in Salesforce**, not the
-  bid body; if the total bid is approved, incurred costs are removed from the WO. Diagnostic
-  Fee is only payable with documented troubleshooting/testing that identifies a specific
-  fault — visual inspections, estimates, second opinions, and no-test site visits are not
-  reimbursable.
+MSR's rules (PDF pages 1-2, 24) and how the app treats each:
+- **Fixed pricing, no deviation** — applies ONLY to service items MSR explicitly lists and
+  prices (the MSR tab). Anything not on that sheet is NOT bound by MSR pricing.
+- **Non-listed work → treat as General**, not the MSR "Other" line. Non-listed work falls under
+  the General catalog / normal pricing; it does not adhere to MSR fixed pricing. (No code: the
+  matcher already falls back client→General, and a non-MSR-catalog line just prices freely.)
+- **Bid-sheet format is mandatory** — handled (WS3: MSR's own sheet is the skeleton).
+- **Equipment data plate + photos** — COVERED for now: techs already photograph the data plate
+  in the field. Only becomes a code task if MSR requires the data written into the bid itself
+  (see Outstanding #1).
+- **Diagnostic fees** — KEEP them in the app's invoice line list for now (they ARE MSR catalog
+  items: Diagnostic Fee $85 / Emergency $135, and drive the invoiceHasServiceCall alert). MSR's
+  rule that they go in Salesforce "Incurred Costs" is a Salesforce-entry step, not an app change.
+  **OPEN QUESTION (needs MSR confirmation):** the Incurred-Costs language implies the diagnostic
+  fee is only PAID when it was the ONLY labor — i.e. if the bid is approved, incurred costs
+  (incl. the diagnostic) are removed from the WO, so the fee is billable only on a
+  diagnose-and-no-further-work visit. If confirmed, the app must NOT ubiquitously include the
+  service call on MSR HVAC invoices/bids: it belongs only when no other billable work is on the
+  invoice. This DIRECTLY GATES Outstanding #2 (auto service-call qty=1) and softens the
+  invoiceHasServiceCall RED alert for MSR (no service call is CORRECT when other work exists).
+  Do not build the auto-service-call default until MSR confirms the rule. Await user
+  confirmation.
+
+## Outstanding tasks (deferred, not built)
+
+1. **Bid-submission confirmation phase-hook.** IF MSR later demands the equipment data
+   (make/model/serial) + photos be written into the bid itself: add a hook on the
+   bid-submitted status(es) that pops a confirmation checklist ("data plate photo attached?
+   equipment info in bid?") before the status commits. Gate: only if MSR rejects photo-only.
+   Look at the existing phase/status-change flow for the hook point (phases live in the WO
+   record; find where a status transition fires).
+2. **Auto service-call on the FIRST bid sheet.** BLOCKED on the diagnostic-fee OPEN QUESTION
+   above — if MSR pays the fee only when it was the sole labor, an auto qty=1 on every first
+   bid is WRONG. Do not build until confirmed. Spec (when unblocked): in `patchBidSheet`
+   (main.js), on the FIRST
+   bid per WO only (NOT CO duplications), set the Diagnostic Fee / basic service-call line's
+   Quantity cell to 1 — col H, row 17 on the current 'Vendor HVAC Bid Sheet' (H17). One
+   service-call fee per WO. The first-bid path (main.js ~line 588, `copyFileSync(skel,dest)`)
+   is distinct from the CO path (~line 666, copies the newest cumulative bid) — set the qty
+   ONLY in the first-bid branch, or pass a flag through patchBidSheet. Re-verify the H17 cell
+   ref against the sheet before shipping (numeric-qty cell for the Diagnostic Fee row).
 
 ---
 

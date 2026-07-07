@@ -1,7 +1,7 @@
 // Pure order/phase/age/migration logic. Carved out of app.jsx so node tests
 // import the SHIPPED code instead of a hand-copied mirror (the change11 drift
 // that produced false-green tests). React-free; depends only on constants.js.
-import { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } from './constants.js';
+import { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName, catalogTax } from './constants.js';
 
 /* ---------- data adapters ---------- */
 
@@ -475,45 +475,211 @@ export function findOtherViewMatches(orders, q, shownLocations) {
   return out;
 }
 
+/* ---------- invoice tax model ---------- */
+
+// TAX_RATE is the tax-INCLUSIVE multiplier (1 + 0.0725). A taxable line's price
+// is treated as tax-INCLUSIVE (divide the tax back out) only for catalogs whose
+// signed pricing is inclusive (MSR); AMH/General taxable lines are pre-tax so tax
+// is added on top. Non-taxable lines never get tax. Policy per catalog lives in
+// CATALOG_TAX (constants.js).
+export const TAX_RATE = 1.0725;
+
+export function money(n) {
+  const v = (typeof n === 'number' && !Number.isNaN(n)) ? n : 0;
+  return Math.round(v * 100) / 100;
+}
+
+// Pure. invoice = { lineItems:[{ unitPrice, qty, taxable, agreement }] }.
+// defaultAgreement = the WO's catalog tab (General/AMH/MSR), used when a line
+// carries no agreement of its own. A taxable line divides the embedded tax out
+// only when its catalog is tax-inclusive (catalogTax(agreement).taxableInclusive);
+// otherwise the price is pre-tax and tax is added on top.
+// Returns per-line breakdown + { taxableSubtotal, nonTaxableSubtotal, tax, grandTotal }.
+export function computeInvoiceTotals(invoice, defaultAgreement) {
+  const lines = (invoice && Array.isArray(invoice.lineItems)) ? invoice.lineItems : [];
+  let taxableSubtotal = 0;   // pre-tax sum of taxable lines
+  let nonTaxableSubtotal = 0;
+  const rows = lines.map((li) => {
+    const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
+    const unit = money(Number(li.unitPrice));
+    const taxable = !!li.taxable;
+    const inclusive = catalogTax(li.agreement || defaultAgreement).taxableInclusive;
+    // Accumulate raw (unrounded) line values so the cent rounding happens once
+    // on the subtotals, not per line (avoids 1-cent drift on multi-line invoices).
+    const preTaxUnitRaw = (taxable && inclusive) ? (unit / TAX_RATE) : unit;
+    const lineRaw = preTaxUnitRaw * qty;
+    if (taxable) taxableSubtotal += lineRaw;
+    else nonTaxableSubtotal += lineRaw;
+    return { ...li, qty, unitPrice: unit, preTaxUnit: money(preTaxUnitRaw), lineSubtotal: money(lineRaw) };
+  });
+  taxableSubtotal = money(taxableSubtotal);
+  nonTaxableSubtotal = money(nonTaxableSubtotal);
+  const tax = money(taxableSubtotal * (TAX_RATE - 1));
+  const grandTotal = money(taxableSubtotal + tax + nonTaxableSubtotal);
+  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal };
+}
+
 /* ---------- invoice line normalization (Build A) ---------- */
 
-// Turn a WO's scraped bidItems into InvoiceEditor line items. The scraper
-// (scrape_amh.py) emits bidItems as { name, qty, price }
-// where `name` HOLDS THE DESCRIPTION -- there is no `desc` field. Match that
-// description against the service library (by item name OR desc, case-insensitive);
-// on a hit the library entry drives price/taxable, on a miss keep the bid
-// description and pick the Labor!/Materials! sentinel from a "material" keyword so
-// the item name follows the invoicing convention. Pure: (bidItems, catalog,
-// agreement) -> line[]. Empty/invalid bidItems -> []. Fixes the b.desc/b.name
-// field-drift bug (scraped lines got prices but no descriptions; WO 9767507).
-export function bidItemsToInvoiceLines(bidItems, catalog, agreement) {
+const priceOf = (p) => (typeof p === 'number' ? p : (parseFloat(p) || 0));
+
+// Keyword tokens for fuzzy catalog matching. Lowercase, strip punctuation, drop
+// stopwords, and crudely stem trailing -ing/-ed/-es/-s so "replace"/"replacing"/
+// "replaced" collapse to one token. Bid wording is human + varies; tokens absorb it.
+const MATCH_STOP = new Set(['to','the','a','an','of','for','and','with','in','on','at','new',
+  'my','is','are','be','per','up','down','into','through','from','it','that','this','or']);
+// Service-catalog BOILERPLATE (post-stem). These recur verbatim on a handful of AMH
+// items ("- no additional labor fee", "Includes ...") so plain IDF wrongly ranks them
+// DISTINCTIVE and their unshared mass sinks the real item's coverage below the gate.
+// They carry no identity, so strip them at tokenization -- object nouns (contactor,
+// faucet, coil) still carry the match. Also matches the handoff's "fee/labor near-zero".
+const MATCH_BOILER = new Set(['fee','labor','no','additional','include','includ','necessary',
+  'provide','provid','as','when']);
+function matchTokens(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/)
+    .filter(Boolean).map(t => t.replace(/(ing|ed|es|s)$/, ''))
+    // Drop stopwords, boilerplate, and BARE NUMBERS ("9 lbs" must not match "9-GPM
+    // tankless"; tonnage variants disambiguate by PRICE, not the digit). Alphanumerics
+    // like "r410a"/"50ft" survive as one token.
+    .filter(t => t && !MATCH_STOP.has(t) && !MATCH_BOILER.has(t) && !/^\d+$/.test(t));
+}
+
+// Best keyword resolution within ONE catalog. PRICE is a CONFIRMER, not a gate:
+// invoice price is always the bid price (we may charge above the library over time),
+// so price only decides CONFIDENCE. Returns:
+//   { confirmed: item }  strong keyword AND price == library price (identity certain)
+//   { suspects: [item] } strong keyword but price differs (needs human confirmation)
+//   null                 no strong keyword match
+//
+// Slice-1b scoring (tuned vs the 133 live AMH bid lines, scratchpad/matchrate.js):
+// a plain shared-token count flagged 43% of lines RED, mostly FALSE, because every
+// token weighed the same -- generic words ("fee","replace","service") and the AMH
+// desc=tab-name ("HVAC" on every HVAC item) manufactured matches ("Diagnostic fee"
+// -> "Main water line ... Diagnostic fee (per LF)"; "HVAC - Service Call" -> "Replace
+// contactor"). Fix = IDF weighting + fractional distinctive-token coverage:
+//   - idf(t) = log((N+1)/(df+1)) over item-NAME tokens (desc=tab noise is dropped),
+//     so a token in nearly every item (hvac/replace) counts ~0 and a rare token
+//     (contactor/txv/schrader) counts a lot.
+//   - COVERAGE gate over DISTINCTIVE tokens only: the shared distinctive tokens must
+//     carry a real FRACTION (MATCH_MIN_COVER) of the candidate's distinctive IDF mass.
+//     Generic filler (labor/fee/no/additional/replace) is excluded from BOTH sides so
+//     a descriptive catalog name isn't penalized for its tail ("Clean condenser coil
+//     - no additional labor fee" still covers fully), while a terse bid that only
+//     touches a candidate's peripheral word fails ("Diagnostic fee" shares just
+//     "diagnostic" of "Main water line dig up ... Diagnostic fee (per LF)").
+//   - STRONG = coverage met AND summed IDF of the shared tokens >= MATCH_MIN_IDF.
+// Erring toward FEWER false suspects (a missed suspect is a plain sentinel the user
+// can still fix; a false RED flag spams and misleads).
+const MATCH_MIN_IDF = 2.0;      // absolute distinctiveness floor for the shared tokens
+const MATCH_MIN_COVER = 0.45;   // shared distinctive IDF / candidate distinctive IDF
+const MATCH_GENERIC_IDF = 1.5;  // below this a token is generic filler (ignored in coverage)
+function resolveInCatalog(wording, price, catalog) {
+  const items = (Array.isArray(catalog) ? catalog : []).filter(Boolean);
+  if (!items.length) return null;
+  const w = new Set(matchTokens(wording));
+  if (!w.size) return null;
+  // Document frequency over item-NAME tokens (identity vocabulary; desc is dropped
+  // because AMH desc is just the scope-tab label and pollutes every item alike).
+  const N = items.length;
+  const nameToks = items.map(it => new Set(matchTokens(it.name)));
+  const df = new Map();
+  for (const toks of nameToks) for (const t of toks) df.set(t, (df.get(t) || 0) + 1);
+  const idf = (t) => Math.log((N + 1) / ((df.get(t) || 0) + 1));
+  const scored = [];
+  for (let i = 0; i < items.length; i++) {
+    const toks = nameToks[i];
+    if (!toks.size) continue;
+    let score = 0, distinctTotal = 0, distinctShared = 0;
+    for (const t of toks) {
+      const s = idf(t);
+      if (w.has(t)) score += s;
+      if (s >= MATCH_GENERIC_IDF) { distinctTotal += s; if (w.has(t)) distinctShared += s; }
+    }
+    if (score < MATCH_MIN_IDF) continue;
+    if (distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
+    scored.push({ it: items[i], score });
+  }
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.score - a.score);
+  // CONFIRM only within the TOP-scored group (best identity match). Price disambiguates
+  // equal-scored variants (tonnage: two "Heat Pump" rows, the bid price picks one). A
+  // lower-scored item that merely price-collides must NOT confirm -- e.g. "shower valve"
+  // $260 top-matches "Tub and Shower Valve" ($220, price off) while "Replace Shower Pan"
+  // coincidentally reads $260; confirming the pan would be a silent wrong identity. So a
+  // top group that doesn't contain the bid price stays a SUSPECT (flag), not a confirm.
+  const top = scored[0].score;
+  const topGroup = scored.filter(s => Math.abs(s.score - top) < 1e-9);
+  const priceMatch = topGroup.find(s => Math.abs(priceOf(s.it.price) - price) < 0.005);
+  if (priceMatch) return { confirmed: priceMatch.it };
+  return { suspects: topGroup.map(s => s.it) };
+}
+
+// Labor vs Material for a bid line with no confirmed match. User rule: a line is
+// MATERIAL if it says "Material -/:", or has NO action verb (materials are things,
+// not actions); otherwise it's LABOR (action verbs: replace/install/clear/etc.).
+const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|drain|fix|swap)\w*/i;
+function isMaterialWording(desc) {
+  if (/^\s*material\s*[-:]/i.test(desc)) return true;
+  return !ACTION_VERB.test(desc);
+}
+
+// Resolve ONE bid line to an invoice line. Fallback chain: the WO's CLIENT library
+// first, then General, then sentinel. unitPrice = ALWAYS the bid price.
+//   confirmed (client or general) -> library name + taxable.
+//   client strong-keyword but price off -> RED flag (AMH/MSR = fixed contract) or
+//     YELLOW (General agreement); keep sentinel name, attach suspects.
+//   general strong-keyword but price off -> YELLOW flag + suspects.
+//   nothing -> plain Labor!/Materials! sentinel by verb.
+// suspects = [{name, price}] the library item(s) it resembles (drives the UI flag).
+// Pure: (wording, price, clientCatalog, generalCatalog, agreement) -> line (no qty).
+export function resolveBidLine(wording, price, clientCatalog, generalCatalog, agreement) {
+  const bidPrice = priceOf(price);
+  const desc = String(wording || '').trim();
+  const base = { desc, unitPrice: bidPrice, agreement };
+  const sentinel = () => {
+    const mat = isMaterialWording(desc);
+    return { ...base, name: mat ? 'Materials!' : 'Labor!', category: mat ? 'material' : 'labor',
+      taxable: mat ? false : catalogTax(agreement).defaultLaborTaxable };
+  };
+  const confirm = (it) => ({ ...base, name: it.name, category: 'labor', taxable: !!it.taxable });
+  const suspectList = (items) => items.map(s => ({ name: s.name, price: priceOf(s.price) }));
+  // Fixed-contract clients flag RED (price off the signed agreement); General drifts -> YELLOW.
+  const clientFlag = (agreement === 'AMH' || agreement === 'MSR') ? 'red' : 'yellow';
+
+  const client = resolveInCatalog(desc, bidPrice, clientCatalog);
+  if (client) {
+    if (client.confirmed) return confirm(client.confirmed);
+    return { ...sentinel(), suspects: suspectList(client.suspects), priceFlag: clientFlag };
+  }
+  const gen = resolveInCatalog(desc, bidPrice, generalCatalog);
+  if (gen) {
+    if (gen.confirmed) return confirm(gen.confirmed);
+    return { ...sentinel(), suspects: suspectList(gen.suspects), priceFlag: 'yellow' };
+  }
+  return sentinel();
+}
+
+// Turn a WO's scraped bidItems into InvoiceEditor line items. The scraper emits
+// bidItems as { name, qty, price } where `name` HOLDS THE DESCRIPTION. Each line
+// runs the resolveBidLine fallback chain (client -> general -> sentinel). The
+// invoice price NEVER deviates from the bid (what we are paid); the library only
+// supplies identity + taxable on a CONFIRMED (price-matching) keyword hit.
+// Pure: (bidItems, clientCatalog, agreement, generalCatalog) -> line[]. Empty -> [].
+export function bidItemsToInvoiceLines(bidItems, clientCatalog, agreement, generalCatalog) {
   const bid = Array.isArray(bidItems) ? bidItems : [];
   if (!bid.length) return [];
-  const cat = Array.isArray(catalog) ? catalog : [];
-  const norm = (s) => String(s || '').trim().toLowerCase();
-  const findCatalog = (desc) => {
-    const q = norm(desc);
-    if (!q) return null;
-    for (const it of cat) {
-      if (it && (norm(it.name) === q || norm(it.desc) === q)) return it;
-    }
-    return null;
-  };
-  const priceOf = (p) => (typeof p === 'number' ? p : (parseFloat(p) || 0));
   return bid.map((b) => {
     const qty = Number(b && b.qty) > 0 ? Number(b.qty) : 1;
-    const desc = String((b && b.name) || '').trim();
-    const hit = findCatalog(desc);
-    if (hit) {
-      return { name: hit.name, desc, qty, unitPrice: priceOf(hit.price),
-        category: 'labor', taxable: !!hit.taxable, agreement };
-    }
-    const isMaterial = /material/i.test(desc);
-    // Non-AMH labor/service is TAXABLE (materials + AMH premier are not). Without
-    // this the miss-path left every line non-taxable, so tax was never applied and
-    // the invoice total came in under the bid.
-    return { name: isMaterial ? 'Materials!' : 'Labor!', desc, qty,
-      unitPrice: priceOf(b && b.price), category: isMaterial ? 'material' : 'labor',
-      taxable: (agreement === 'AMH' || isMaterial) ? false : true, agreement };
+    const line = resolveBidLine(String((b && b.name) || '').trim(), priceOf(b && b.price),
+      clientCatalog, generalCatalog, agreement);
+    return { ...line, qty };
   });
+}
+
+// True if the invoice lines already contain a service-call / diagnostic fee. Drives
+// the "no service call" red alert (easy to forget; we lose that billing). Checks the
+// line name OR its bid description.
+export function invoiceHasServiceCall(lines) {
+  const re = /\b(diagnostic|service\s*(call|fee|charge)|trip\s*(fee|charge))\b/i;
+  return (Array.isArray(lines) ? lines : []).some(l => l && (re.test(l.name || '') || re.test(l.desc || '')));
 }

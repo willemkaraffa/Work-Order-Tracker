@@ -11,6 +11,26 @@ export const DEFAULT_PMS = [
   { name: 'Other', fullName: 'Other',                 color: '#6b7280' },
 ];
 
+// Per-client (service-library catalog) tax policy -- the single source of truth
+// for how each PM client's prices behave, sourced from their signed pricing:
+//   AMH  Premier: "All Line Items are inclusive of LABOR, MATERIAL, TAX AND
+//        HAUL-AWAY" -- tax-inclusive, so items are non-taxable, EXCEPT the service
+//        calls ($75 plumbing, $90 HVAC) which are taxable + pre-tax.
+//   MSR  "fully burdened and inclusive of material, tax, labor..." -- tax-inclusive.
+//   General  Gamble's own RazorSync catalog -- pre-tax; sales tax added on top.
+// Fields:
+//   taxableInclusive     a TAXABLE line's price already includes tax -> divide it
+//                        back out so grand = face (MSR only). AMH/General taxable
+//                        lines are pre-tax, so tax is added on top.
+//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line.
+export const CATALOG_TAX = {
+  General: { taxableInclusive: false, defaultLaborTaxable: true },
+  AMH:     { taxableInclusive: false, defaultLaborTaxable: false },
+  MSR:     { taxableInclusive: true,  defaultLaborTaxable: false },
+};
+const DEFAULT_CATALOG_TAX = { taxableInclusive: false, defaultLaborTaxable: true };
+export function catalogTax(name) { return CATALOG_TAX[String(name || '')] || DEFAULT_CATALOG_TAX; }
+
 // Suggest a short Client code from a full name: capital letters first, else the
 // first 3 letters uppercased. Only a SUGGESTION -- not every acronym derives
 // ("American Homes 4 Rent" -> "AHR"; the user corrects it to "AMH").

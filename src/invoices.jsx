@@ -7,50 +7,13 @@ import { ActionBtn } from './primitives.jsx';
 import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches,
 } from './app.jsx';
-import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches } from './orders-logic.js';
+import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches,
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
-// ── Invoice tax model (slice 2) ───────────────────────────────────────────────
-// TAX_RATE is the tax-INCLUSIVE multiplier (1 + 0.0725). MSR library/quoted
-// prices are tax-INCLUSIVE, so for an MSR WO a taxable line's pre-tax unit is
-// price / TAX_RATE (dividing back out the embedded tax). Every other WO quotes
-// pre-tax, so the unit price is used as-is and tax is added on top. Non-taxable
-// lines (e.g. AMH, already all-inclusive) never get tax applied.
-const TAX_RATE = 1.0725;
-
-function money(n) {
-  const v = (typeof n === 'number' && !Number.isNaN(n)) ? n : 0;
-  return Math.round(v * 100) / 100;
-}
-
-// Pure. invoice = { number, date, lineItems:[{name,desc,qty,unitPrice,category,taxable,agreement}] }.
-// pm = the WO's PM (e.g. 'MSR'); only MSR triggers the divide-out rule.
-// Returns per-line breakdown + { taxableSubtotal, nonTaxableSubtotal, tax, grandTotal }.
-function computeInvoiceTotals(invoice, pm) {
-  const isMSR = String(pm || '').toUpperCase() === 'MSR';
-  const lines = (invoice && Array.isArray(invoice.lineItems)) ? invoice.lineItems : [];
-  let taxableSubtotal = 0;   // pre-tax sum of taxable lines
-  let nonTaxableSubtotal = 0;
-  const rows = lines.map((li) => {
-    const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
-    const unit = money(Number(li.unitPrice));
-    const taxable = !!li.taxable;
-    // Accumulate raw (unrounded) line values so the cent rounding happens once
-    // on the subtotals, not per line (avoids 1-cent drift on multi-line invoices).
-    const preTaxUnitRaw = (taxable && isMSR) ? (unit / TAX_RATE) : unit;
-    const lineRaw = preTaxUnitRaw * qty;
-    if (taxable) taxableSubtotal += lineRaw;
-    else nonTaxableSubtotal += lineRaw;
-    return { ...li, qty, unitPrice: unit, preTaxUnit: money(preTaxUnitRaw), lineSubtotal: money(lineRaw) };
-  });
-  taxableSubtotal = money(taxableSubtotal);
-  nonTaxableSubtotal = money(nonTaxableSubtotal);
-  const tax = money(taxableSubtotal * (TAX_RATE - 1));
-  const grandTotal = money(taxableSubtotal + tax + nonTaxableSubtotal);
-  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal };
-}
-
-// Live-verify handle for the MSR 1.0725 round-trip (console: __invoiceCalc(...)).
+// Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
+// policy live in orders-logic.js / constants.js so the money math is unit-tested.
+// Live-verify handle for the divide-out round-trip (console: __invoiceCalc(...)).
 if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals; }
 
 // Slice 2 (#6): Add Service Item modal — replaces the old insert-blank-row
@@ -80,9 +43,9 @@ function AddServiceItemModal({ defaultCatalog, subCats, onAdd, onClose }) {
     onAdd({
       name: name.trim(), desc: desc.trim(),
       price: price === '' ? 0 : parseFloat(price) || 0,
-      // AMH prices are tax-inclusive; the catalog never carries a taxable flag
-      // (its table column is hidden too).
-      taxable: catalog === 'AMH' ? false : taxable,
+      // Taxable is per-item for every catalog now: AMH is mostly tax-inclusive
+      // (non-taxable) but its service calls ($75 plumb / $90 HVAC) are taxable.
+      taxable,
       catalog, subCategory: sub || null,
     });
   };
@@ -105,12 +68,10 @@ function AddServiceItemModal({ defaultCatalog, subCats, onAdd, onClose }) {
             {LIBRARY_TABS.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </label>
-        {catalog !== 'AMH' && (
-          <label style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} />
-            Taxable
-          </label>
-        )}
+        <label style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} />
+          Taxable
+        </label>
         <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Sub-category
           <select value={subCat} onChange={(e) => setSubCat(e.target.value)} style={fld}>
             <option value="">None</option>
@@ -158,7 +119,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
     for (const it of items) if (it && it.subCategory) set.add(it.subCategory);
     return [...(subCats || []), ...[...set].filter(s => !(subCats || []).includes(s)).sort()];
   }, [subCats, items]);
-  const colCount = 3 + (showSubCol ? 1 : 0) + (tab !== 'AMH' ? 1 : 0) + 1;
+  const colCount = 3 + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
   const grouped = React.useMemo(() => {
     if (!filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
     const order = [''].concat(subCats || []);
@@ -287,7 +248,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
                 <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '20%' }}>Description</th>
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Price</th>
                 {showSubCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 130 }}>Sub-category</th>}
-                {tab !== 'AMH' && <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Taxable</th>}
+                <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Taxable</th>
                 <th style={{ width: 36 }} />
               </tr>
             </thead>
@@ -317,11 +278,9 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
                     </select>
                   </td>
                   )}
-                  {tab !== 'AMH' && (
                   <td style={{ padding: '4px 6px', textAlign: 'center' }}>
                     <input type="checkbox" checked={!!it.taxable} onChange={(e) => updateItem(i, { taxable: e.target.checked })} />
                   </td>
-                  )}
                   <td style={{ padding: '4px 6px', textAlign: 'center' }}>
                     <button onClick={() => deleteItem(i)} title="Delete" style={{
                       border: 'none', background: 'transparent', color: 'var(--text-3)',
@@ -358,6 +317,90 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
   );
 }
 
+// Invoice-matching Slice 2: resolve a price-flagged line. bidItemsToInvoiceLines
+// leaves a `priceFlag` (red = off an AMH/MSR fixed contract, yellow = General price
+// drift) + `suspects` (library items the line resembles but price could not confirm).
+// The user picks a suspect (fills name/taxable, keeps the bid price per the money
+// rule) or edits fields directly, then Apply (writes + clears the flag) or Dismiss
+// (clears the flag, keeps the line as-is). Reuses the shared Modal.
+function FlagResolveModal({ line, onApply, onDismiss, onClose }) {
+  const [name, setName] = React.useState(line.name || '');
+  const [desc, setDesc] = React.useState(line.desc || '');
+  const [price, setPrice] = React.useState(String(line.unitPrice != null ? line.unitPrice : ''));
+  const [taxable, setTaxable] = React.useState(!!line.taxable);
+  const [category, setCategory] = React.useState(line.category === 'material' ? 'material' : 'labor');
+  const fld = {
+    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 14, boxSizing: 'border-box',
+  };
+  // Picking a suspect confirms IDENTITY only: name + taxable from the library item;
+  // the price stays the bid price (what we are paid). Category -> labor (catalog items).
+  const useSuspect = (s) => { setName(s.name); setTaxable(!!s.taxable); setCategory('labor'); };
+  const apply = () => onApply({
+    name: name.trim() || line.name, desc: desc.trim(), category,
+    unitPrice: price === '' ? 0 : (parseFloat(price) || 0), taxable,
+  });
+  const red = line.priceFlag === 'red';
+  return (
+    <Modal open onClose={onClose} title={red ? 'Price off contract' : 'Price differs from library'} width={460}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-2)' }}>
+          {red
+            ? 'AMH/MSR prices are fixed by the signed agreement - a mismatch is likely an error. Confirm the identity and price.'
+            : 'General prices drift over time. Confirm which library item this is, or dismiss.'}
+        </div>
+        {Array.isArray(line.suspects) && line.suspects.length > 0 && (
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 6 }}>Resembles</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {line.suspects.map((s, i) => (
+                <button key={i} onClick={() => useSuspect(s)} style={{
+                  display: 'flex', justifyContent: 'space-between', gap: 12, textAlign: 'left',
+                  padding: '7px 10px', borderRadius: 8, cursor: 'pointer',
+                  border: '1px solid ' + (name === s.name ? 'var(--accent)' : 'var(--border-1)'),
+                  background: name === s.name ? 'var(--accent-soft, var(--bg-hover))' : 'var(--bg-canvas)',
+                  color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13 }}>
+                  <span>{s.name}</span>
+                  <span style={{ color: 'var(--text-3)' }}>${money(s.price).toFixed(2)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Name
+          <input value={name} onChange={(e) => setName(e.target.value)} style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Description
+          <input value={desc} onChange={(e) => setDesc(e.target.value)} style={fld} />
+        </label>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <label style={{ fontSize: 12, color: 'var(--text-3)', flex: 1 }}>Unit price
+            <input value={price} onChange={(e) => setPrice(e.target.value)} type="number" step="0.01" style={fld} />
+          </label>
+          <label style={{ fontSize: 12, color: 'var(--text-3)', flex: 1 }}>Category
+            <select value={category} onChange={(e) => setCategory(e.target.value)} style={fld}>
+              <option value="labor">Labor</option>
+              <option value="material">Material</option>
+            </select>
+          </label>
+        </div>
+        <label style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox" checked={taxable} onChange={(e) => setTaxable(e.target.checked)} />
+          Taxable
+        </label>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', marginTop: 4 }}>
+          <ActionBtn onClick={onDismiss}>Dismiss flag</ActionBtn>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+            <ActionBtn primary onClick={apply}>Apply</ActionBtn>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ── Invoice editor (slice 2) ──────────────────────────────────────────────────
 // Full-screen overlay. Records an invoice on a WO: manual invoice #/date, line
 // items (autocompleted from the service library), per-line labor/material
@@ -380,6 +423,9 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
   );
   const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : 'General';
   const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
+  // Fallback library for the resolveBidLine chain (client -> General -> sentinel).
+  // On a General WO the client catalog IS General, so no separate fallback needed.
+  const generalCatalog = (tabName !== 'General' && library && Array.isArray(library.General)) ? library.General : null;
   const catalogByName = React.useMemo(() => {
     const m = new Map();
     for (const it of catalog) if (it && it.name) m.set(it.name, it);
@@ -398,7 +444,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
     // bidItem.name (scrapers put it there, no desc field), matches the service
     // library, and falls back to a Labor!/Materials! sentinel keeping the bid
     // description. blankLine spread keeps forward-compatible line defaults.
-    const built = bidItemsToInvoiceLines(order && order.bidItems, catalog, tabName);
+    const built = bidItemsToInvoiceLines(order && order.bidItems, catalog, tabName, generalCatalog);
     if (built.length) return built.map(li => ({ ...blankLine(), ...li }));
     return [blankLine()];
   });
@@ -421,7 +467,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
       // materials are detected (taxable=false) and any service-library match
       // applies -- instead of everything defaulting to taxable Labor.
       const asBid = res.items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice }));
-      const built = bidItemsToInvoiceLines(asBid, catalog, tabName);
+      const built = bidItemsToInvoiceLines(asBid, catalog, tabName, generalCatalog);
       if (built.length) setLines(built.map(li => ({ ...blankLine(), ...li })));
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -431,6 +477,12 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
   const setLine = (idx, patch) => setLines(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
   const removeLine = (idx) => setLines(ls => ls.length > 1 ? ls.filter((_, i) => i !== idx) : ls);
   const addLine = () => setLines(ls => [...ls, blankLine()]);
+
+  // Slice 2: price-flag resolution. flagIdx = the line whose badge modal is open.
+  // Apply writes the edited fields AND clears the flag; Dismiss just clears it.
+  const [flagIdx, setFlagIdx] = React.useState(null);
+  const clearFlag = (idx, patch) => setLine(idx, { ...(patch || {}), priceFlag: undefined, suspects: undefined });
+  const noServiceCall = React.useMemo(() => !invoiceHasServiceCall(lines), [lines]);
 
   // Picking a catalog name autofills price/desc/taxable; user may override after.
   // Sentinel items (Labor!/Materials!) have an empty library desc — keep the
@@ -536,6 +588,18 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
           </label>
         </div>
 
+        {/* Slice 2: never lose the service call / diagnostic fee (has happened before).
+            Red alert when no line reads as a service-call/diagnostic. */}
+        {noServiceCall && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+            padding: '9px 12px', borderRadius: 8, fontSize: 13,
+            border: '1px solid var(--flag-emergency)', color: 'var(--flag-emergency)',
+            background: 'color-mix(in srgb, var(--flag-emergency) 10%, transparent)' }}>
+            <span style={{ fontSize: 14 }}>{'▲'}</span>
+            No service-call / diagnostic fee on this invoice - add one if the visit had a diagnostic.
+          </div>
+        )}
+
         {/* table-layout:fixed so the Unit price column keeps its width and 4-digit
             prices are not clipped to their leading 3 chars (same bug as the library). */}
         <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -554,8 +618,17 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
             {lines.map((l, i) => (
               <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
                 <td style={{ padding: '4px 6px' }}>
-                  <input list="invoice-item-names" value={l.name} onChange={(e) => pickName(i, e.target.value)}
-                    placeholder="Item name" style={{ ...inputStyle, width: '100%' }} />
+                  <div style={{ display: 'flex', alignItems: 'center' }}>
+                    {l.priceFlag && (
+                      <button onClick={() => setFlagIdx(i)}
+                        title={l.priceFlag === 'red' ? 'Price off contract - click to review' : 'Price differs from library - click to review'}
+                        style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '0 6px 0 0',
+                          fontSize: 13, lineHeight: 1, flexShrink: 0,
+                          color: l.priceFlag === 'red' ? 'var(--flag-emergency)' : 'var(--p-await)' }}>{'▲'}</button>
+                    )}
+                    <input list="invoice-item-names" value={l.name} onChange={(e) => pickName(i, e.target.value)}
+                      placeholder="Item name" style={{ ...inputStyle, width: '100%' }} />
+                  </div>
                 </td>
                 <td style={{ padding: '4px 6px' }}>
                   <input value={l.desc} onChange={(e) => setLine(i, { desc: e.target.value })}
@@ -610,6 +683,16 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
           </div>
         </div>
       </div>
+
+      {flagIdx != null && lines[flagIdx] && (
+        <FlagResolveModal
+          key={flagIdx}
+          line={lines[flagIdx]}
+          onApply={(patch) => { clearFlag(flagIdx, patch); setFlagIdx(null); }}
+          onDismiss={() => { clearFlag(flagIdx); setFlagIdx(null); }}
+          onClose={() => setFlagIdx(null)}
+        />
+      )}
     </div>
   );
 }
