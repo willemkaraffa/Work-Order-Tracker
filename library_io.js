@@ -75,7 +75,9 @@ async function parseAmh(filePath) {
       const name = toStr(cellVal(row.getCell(1)));
       const price = toPrice(cellVal(row.getCell(4)));
       if (!name || price == null) return; // section header / blank
-      items.push({ name, desc: tab, price, taxable: false });
+      // AMH Premier items are tax-INCLUSIVE -> never taxed, EXCEPT service call /
+      // diagnostic / emergency, which are ALWAYS taxed (core truth #2/#3).
+      items.push({ name, desc: tab, price, taxable: SERVICE_ALWAYS_TAX_RE.test(name) });
     });
   }
   return items;
@@ -90,12 +92,24 @@ async function parseAmh(filePath) {
 // tonnages). Catalog = the first table on the 'Vendor HVAC Bid Sheet' tab: col B =
 // Item, col G = Total Price (fully burdened / tax-INCLUSIVE per the master agreement).
 // Rows with no numeric Total Price are section headers or the trailing OTHER
-// placeholder -> skipped. ALL items taxable:true: MSR prices are tax-inclusive, so
-// the invoices.jsx isMSR divide-out shows a broken-out 7.25% line while the grand
-// total equals the sheet price (roadmap-handoffs/msr-pricing-update.md WS1/WS2).
+// placeholder -> skipped. Per-item taxable is READ from the col C scope prose ("Item
+// Description"), not hardcoded (core truth #4, roadmap-handoffs/invoice-generation.md):
+// prose that states the price includes tax ("...applicable taxes...") -> tax-included
+// -> taxable:false; a material (refrigerant R22/R410a) -> false; a service call /
+// diagnostic / emergency -> ALWAYS true; otherwise a taxable service. MSR stays a
+// divide-out (CATALOG_TAX.MSR.taxableInclusive), so grand = face = paid either way.
 // Source name spellings kept verbatim ("Pacakaged") so invoice autofill matches the
 // MSR-scraped bid descriptions.
 const MSR_SHEET = 'Vendor HVAC Bid Sheet';
+// Refrigerants (R22, R-410A, R407c, R134a) and other physical materials are never taxed.
+const REFRIGERANT_RE = /^\s*R-?\d{2,3}[a-z]?\b/i;
+const SERVICE_ALWAYS_TAX_RE = /\b(service\s*call|diagnostic|emergency|trip\s*(fee|charge))\b/i;
+function msrTaxable(name, prose) {
+  if (REFRIGERANT_RE.test(name)) return false;               // material
+  if (SERVICE_ALWAYS_TAX_RE.test(name)) return true;         // core truth #3
+  if (/\btax/i.test(prose)) return false;                    // prose says price includes tax
+  return true;                                               // taxable service
+}
 async function parseMsr(filePath) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(filePath);
@@ -107,7 +121,8 @@ async function parseMsr(filePath) {
     const name = toStr(cellVal(row.getCell(2)));    // col B = Item
     const price = toPrice(cellVal(row.getCell(7)));  // col G = Total Price
     if (!name || price == null) return;              // section header / OTHER placeholder
-    items.push({ name, desc: '', price, taxable: true });
+    const prose = toStr(cellVal(row.getCell(3)));    // col C = Item Description (scope prose)
+    items.push({ name, desc: '', price, taxable: msrTaxable(name, prose) });
   });
   return items;
 }

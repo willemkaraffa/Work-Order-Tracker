@@ -31,6 +31,7 @@ import { DetailPane } from './detail.jsx';
 import { ListPane } from './listpane.jsx';
 import { SettingsDrawer } from './settings.jsx';
 import { ServiceLibrary, InvoiceEditor, InvoicesModule } from './invoices.jsx';
+import { RemittancesModule } from './remittances.jsx';
 import { useWorkOrders } from './data.js';
 
 
@@ -2810,10 +2811,19 @@ function useLibraryTools(lib, persist, toast) {
     if (!window.library) { toast('Library tools unavailable - fully restart the app (not just reload)', 'err'); return false; }
     return true;
   }, [toast]);
+  // Re-seed MERGES, it does not wipe: manually-added items (manual:true) are kept and
+  // only the sheet-sourced items are refreshed (core truth #5). A manual item wins over
+  // a seed item of the same name (the user curated it -- e.g. taxable service calls).
   const replaceTab = (tabName, newItems, label) => {
     const cur = (lib && lib[tabName]) || [];
-    if (cur.length && !window.confirm(`Replace all ${cur.length} ${tabName} items with ${newItems.length} from ${label}?`)) return false;
-    persist({ ...(lib || emptyLibrary()), [tabName]: newItems });
+    const manual = cur.filter(it => it && it.manual);
+    const manualNames = new Set(manual.map(it => String(it.name || '').toLowerCase()));
+    const seeded = newItems.filter(it => !manualNames.has(String(it.name || '').toLowerCase()));
+    const refreshCount = cur.length - manual.length;
+    if (refreshCount > 0 && !window.confirm(
+      `Refresh ${refreshCount} sheet-sourced ${tabName} item(s) with ${seeded.length} from ${label}?` +
+      (manual.length ? ` (${manual.length} manually-added item(s) kept)` : ''))) return false;
+    persist({ ...(lib || emptyLibrary()), [tabName]: [...manual, ...seeded] });
     return true;
   };
   const seedGeneral = async () => {
@@ -4902,6 +4912,18 @@ function App() {
     toast('Invoice saved');
   }, [orders, updateOrder, toast]);
 
+  // Clear a saved invoice so the WO re-autofills fresh next open (picks up corrected
+  // tax rules / re-seeded library). Strips order.invoice; bidItems are untouched.
+  const clearInvoice = React.useCallback((id) => {
+    updateOrder(id, cur => {
+      const { invoice: _drop, ...rest } = cur;
+      return { ...rest, history: [...(Array.isArray(cur.history) ? cur.history : []),
+        { ts: Date.now(), action: 'invoice cleared', detail: (_drop && _drop.number) || '' }] };
+    });
+    setInvoiceEditorWO(null);
+    toast('Invoice cleared - reopen to re-autofill');
+  }, [updateOrder, toast]);
+
   // Clear a stuck editor target if its WO disappears (e.g. deleted elsewhere).
   React.useEffect(() => {
     if (invoiceEditorWO != null && !orders.some(o => o.id === invoiceEditorWO)) {
@@ -5946,6 +5968,8 @@ function App() {
               onOpenInvoice={openInvoiceEditor}
               onWoAction={woAction}
             />
+          ) : currentModule === 'remittances' ? (
+            <RemittancesModule orders={orders} toast={toast} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}
@@ -6198,6 +6222,7 @@ function App() {
               library={editorLibrary}
               existingNumbers={existingNumbers}
               onSave={(invoice, errMsg) => saveInvoice(invoiceEditorWO, invoice, errMsg)}
+              onClear={() => clearInvoice(invoiceEditorWO)}
               onClose={() => setInvoiceEditorWO(null)}
             />
           );

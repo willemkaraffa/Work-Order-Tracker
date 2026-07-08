@@ -15,6 +15,7 @@ export const MODULE_GROUPS = [
   ]},
   { category: 'Accounting', items: [
     { id: 'invoices',      glyph: '$', title: 'Invoices',      blurb: 'Build invoices for the billing queue' },
+    { id: 'remittances',   glyph: '▣', title: 'Remittances',   blurb: 'Reconcile PM remittance PDFs to bids' },
     { id: 'service-items', glyph: '▦', title: 'Service Items', blurb: 'Edit the service-item price library' },
   ]},
 ];

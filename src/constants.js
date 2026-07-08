@@ -13,16 +13,25 @@ export const DEFAULT_PMS = [
 
 // Per-client (service-library catalog) tax policy -- the single source of truth
 // for how each PM client's prices behave, sourced from their signed pricing:
-//   AMH  Premier: "All Line Items are inclusive of LABOR, MATERIAL, TAX AND
-//        HAUL-AWAY" -- tax-inclusive, so items are non-taxable, EXCEPT the service
-//        calls ($75 plumbing, $90 HVAC) which are taxable + pre-tax.
-//   MSR  "fully burdened and inclusive of material, tax, labor..." -- tax-inclusive.
+//   AMH  Premier: "All Line Items are inclusive of LABOR, MATERIAL, TAX AND HAUL-AWAY"
+//        -- AMH-listed items are NEVER taxed (price is fully inclusive). The AMH!
+//        sentinel/category is exactly this: AMH-priced, non-taxable, face. EXCEPTION:
+//        Service Call / Diagnostic Fee / Emergency are ALWAYS taxed (forced in
+//        resolveBidLine + present as taxable:true library items). See core truths in
+//        roadmap-handoffs/invoice-generation.md.
+//   MSR  DIVIDE-OUT: prices are tax-inclusive, so a TAXABLE MSR line divides the tax
+//        back out (grand = face). MSR sheets are tax-included by default, so items are
+//        NOT marked taxable (per-item taxable comes from the Col C scope prose at seed
+//        time; see library_io.parseMsr). Either way grand = face = paid (flag is
+//        total-invariant under divide-out).
 //   General  Gamble's own RazorSync catalog -- pre-tax; sales tax added on top.
 // Fields:
 //   taxableInclusive     a TAXABLE line's price already includes tax -> divide it
 //                        back out so grand = face (MSR only). AMH/General taxable
 //                        lines are pre-tax, so tax is added on top.
-//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line.
+//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line. AMH/MSR
+//                        default FALSE (AMH inclusive; MSR tax-included sheets); a
+//                        service-call/diagnostic/emergency wording overrides to taxable.
 export const CATALOG_TAX = {
   General: { taxableInclusive: false, defaultLaborTaxable: true },
   AMH:     { taxableInclusive: false, defaultLaborTaxable: false },

@@ -573,7 +573,8 @@ function matchTokens(s) {
 const MATCH_MIN_IDF = 2.0;      // absolute distinctiveness floor for the shared tokens
 const MATCH_MIN_COVER = 0.45;   // shared distinctive IDF / candidate distinctive IDF
 const MATCH_GENERIC_IDF = 1.5;  // below this a token is generic filler (ignored in coverage)
-function resolveInCatalog(wording, price, catalog) {
+const MATCH_SOLO_IDF = 4.0;     // a lone shared distinctive token must be THIS rare to flag
+function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
   const items = (Array.isArray(catalog) ? catalog : []).filter(Boolean);
   if (!items.length) return null;
   const w = new Set(matchTokens(wording));
@@ -589,15 +590,21 @@ function resolveInCatalog(wording, price, catalog) {
   for (let i = 0; i < items.length; i++) {
     const toks = nameToks[i];
     if (!toks.size) continue;
-    let score = 0, distinctTotal = 0, distinctShared = 0;
+    // KIND gate: a MATERIAL bid ("Material - drain line") is a physical thing, not a
+    // labor service, so it must not match a labor/cleaning catalog item -- those NAMES
+    // LEAD with an action verb ("Clean Drain Pan...", "Replace Supply Line"). Material
+    // catalog items lead with a noun ("Capacitor Replacement", "R410a"), so a legit
+    // material->material match still passes.
+    if (bidIsMaterial && ACTION_VERB.test(String(items[i].name).split(/\s+/)[0] || '')) continue;
+    let score = 0, distinctTotal = 0, distinctShared = 0, distinctCount = 0;
     for (const t of toks) {
       const s = idf(t);
       if (w.has(t)) score += s;
-      if (s >= MATCH_GENERIC_IDF) { distinctTotal += s; if (w.has(t)) distinctShared += s; }
+      if (s >= MATCH_GENERIC_IDF) { distinctTotal += s; if (w.has(t)) { distinctShared += s; distinctCount++; } }
     }
     if (score < MATCH_MIN_IDF) continue;
     if (distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
-    scored.push({ it: items[i], score });
+    scored.push({ it: items[i], score, distinctCount, distinctShared });
   }
   if (!scored.length) return null;
   scored.sort((a, b) => b.score - a.score);
@@ -611,17 +618,31 @@ function resolveInCatalog(wording, price, catalog) {
   const topGroup = scored.filter(s => Math.abs(s.score - top) < 1e-9);
   const priceMatch = topGroup.find(s => Math.abs(priceOf(s.it.price) - price) < 0.005);
   if (priceMatch) return { confirmed: priceMatch.it };
-  return { suspects: topGroup.map(s => s.it) };
+  // A SUSPECT (price-off FLAG) needs real evidence: >=2 shared distinctive tokens, OR a
+  // single shared token that is genuinely RARE (idf >= MATCH_SOLO_IDF). One common word
+  // ("air" -> Air Handler, "line" -> Supply Line) is too weak to flag; a rare one
+  // ("capacitor", "plenum") is worth surfacing. Nothing strong enough -> no flag.
+  const strong = topGroup.filter(s => s.distinctCount >= 2 || s.distinctShared >= MATCH_SOLO_IDF);
+  if (!strong.length) return null;
+  return { suspects: strong.map(s => s.it) };
 }
 
 // Labor vs Material for a bid line with no confirmed match. User rule: a line is
 // MATERIAL if it says "Material -/:", or has NO action verb (materials are things,
 // not actions); otherwise it's LABOR (action verbs: replace/install/clear/etc.).
-const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|drain|fix|swap)\w*/i;
+// NOTE: "drain" is deliberately NOT a verb here -- it reads far more often as a NOUN
+// ("drain line", "drain pan", "drain assembly") than a verb ("drain the system"), so
+// treating it as a verb wrongly filed those materials as Labor. Real drain work still
+// carries a true verb (clear/replace/clean the drain) and stays Labor.
+const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap)\w*/i;
 function isMaterialWording(desc) {
   if (/^\s*material\s*[-:]/i.test(desc)) return true;
   return !ACTION_VERB.test(desc);
 }
+
+// Service Call / Diagnostic / Emergency wording -> ALWAYS taxed (both PMs; core truth
+// #3). Used by the resolveBidLine sentinel to force taxable on an unmatched service line.
+const SERVICE_TAXABLE_RE = /\b(diagnostic|service\s*(call|fee|charge)|trip\s*(fee|charge)|emergency)\b/i;
 
 // Resolve ONE bid line to an invoice line. Fallback chain: the WO's CLIENT library
 // first, then General, then sentinel. unitPrice = ALWAYS the bid price.
@@ -629,29 +650,43 @@ function isMaterialWording(desc) {
 //   client strong-keyword but price off -> RED flag (AMH/MSR = fixed contract) or
 //     YELLOW (General agreement); keep sentinel name, attach suspects.
 //   general strong-keyword but price off -> YELLOW flag + suspects.
-//   nothing -> plain Labor!/Materials! sentinel by verb.
+//   nothing -> per-agreement sentinel by verb: material -> Materials!; labor ->
+//     Labor! (General) / AMH! / MSR!, each with that catalog's labor-taxable default.
 // suspects = [{name, price}] the library item(s) it resembles (drives the UI flag).
 // Pure: (wording, price, clientCatalog, generalCatalog, agreement) -> line (no qty).
 export function resolveBidLine(wording, price, clientCatalog, generalCatalog, agreement) {
   const bidPrice = priceOf(price);
   const desc = String(wording || '').trim();
   const base = { desc, unitPrice: bidPrice, agreement };
+  // Per-agreement labor sentinel name. General -> Labor!; AMH -> AMH! (Premier-priced,
+  // inclusive, never taxed); MSR -> MSR! (divide-out). RazorSync maps AMH! -> Premier!.
+  const laborName = () => (agreement === 'AMH' ? 'AMH!' : agreement === 'MSR' ? 'MSR!' : 'Labor!');
   const sentinel = () => {
+    // Service Call / Diagnostic / Emergency are ALWAYS taxed (both PMs) and are a
+    // billable SERVICE (labor), not a material -- even though the wording is verbless
+    // (would otherwise fall to Materials!). Force labor + taxable. (Core truth #3.)
+    if (SERVICE_TAXABLE_RE.test(desc)) {
+      return { ...base, name: laborName(), category: 'labor', taxable: true };
+    }
     const mat = isMaterialWording(desc);
-    return { ...base, name: mat ? 'Materials!' : 'Labor!', category: mat ? 'material' : 'labor',
-      taxable: mat ? false : catalogTax(agreement).defaultLaborTaxable };
+    if (mat) return { ...base, name: 'Materials!', category: 'material', taxable: false };
+    // Labor fallback: taxable = the catalog's labor default. General labor is taxed;
+    // AMH/MSR default FALSE (AMH inclusive; MSR sheets tax-included). A matched library
+    // item's own taxable still wins on the confirm path.
+    return { ...base, name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
   };
   const confirm = (it) => ({ ...base, name: it.name, category: 'labor', taxable: !!it.taxable });
   const suspectList = (items) => items.map(s => ({ name: s.name, price: priceOf(s.price) }));
   // Fixed-contract clients flag RED (price off the signed agreement); General drifts -> YELLOW.
   const clientFlag = (agreement === 'AMH' || agreement === 'MSR') ? 'red' : 'yellow';
+  const bidIsMaterial = isMaterialWording(desc);   // gates out labor-service matches below
 
-  const client = resolveInCatalog(desc, bidPrice, clientCatalog);
+  const client = resolveInCatalog(desc, bidPrice, clientCatalog, bidIsMaterial);
   if (client) {
     if (client.confirmed) return confirm(client.confirmed);
     return { ...sentinel(), suspects: suspectList(client.suspects), priceFlag: clientFlag };
   }
-  const gen = resolveInCatalog(desc, bidPrice, generalCatalog);
+  const gen = resolveInCatalog(desc, bidPrice, generalCatalog, bidIsMaterial);
   if (gen) {
     if (gen.confirmed) return confirm(gen.confirmed);
     return { ...sentinel(), suspects: suspectList(gen.suspects), priceFlag: 'yellow' };
@@ -682,4 +717,156 @@ export function bidItemsToInvoiceLines(bidItems, clientCatalog, agreement, gener
 export function invoiceHasServiceCall(lines) {
   const re = /\b(diagnostic|service\s*(call|fee|charge)|trip\s*(fee|charge))\b/i;
   return (Array.isArray(lines) ? lines : []).some(l => l && (re.test(l.name || '') || re.test(l.desc || '')));
+}
+
+/* ---------- MSR remittance reconcile (invoice-generation Slice 1) ---------- */
+
+// Normalize a WO number to comparable digits: strip a WO-/WO prefix, drop every
+// non-digit, drop leading zeros. So the remittance "Invoice Notes : 02045937",
+// the order.woId "02045937", and a minted "WO-2045937" all compare equal.
+export function normWoNum(v) {
+  return String(v == null ? '' : v).replace(/\D/g, '').replace(/^0+/, '');
+}
+
+// Normalize an address for a fallback (non-WO-id) match: lowercase, keep only
+// alphanumerics as space-separated tokens, sort them so "412 Sarazen Dr" and
+// "Sarazen Dr 412" collapse. Street-NUMBER typos still won't match (by design --
+// that mismatch is exactly what the "verify" flag is for).
+export function normAddress(v) {
+  return String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, ' ')
+    .trim().split(/\s+/).filter(Boolean).sort().join(' ');
+}
+
+// Match one parsed remittance row to an app order. PRIMARY key = the WO number
+// (row.woId = the Invoice Notes number == order.woId, the 8-digit portal number;
+// order.id is a minted WO-### so check both). FALLBACK = normalized address
+// equality, returned with matchBy:'address' so the UI can flag it "verify" (folder
+// name typos make address unreliable). No match -> { order:null, matchBy:'none' }.
+export function matchMsrRow(row, orders) {
+  const list = Array.isArray(orders) ? orders : [];
+  const rn = normWoNum(row && row.woId);
+  if (rn) {
+    for (const o of list) {
+      if (!o) continue;
+      if (normWoNum(o.woId) === rn || normWoNum(o.id) === rn) return { order: o, matchBy: 'woId' };
+    }
+  }
+  const ra = normAddress(row && row.addressRaw);
+  if (ra) {
+    for (const o of list) {
+      if (o && normAddress(o.address) === ra) return { order: o, matchBy: 'address' };
+    }
+  }
+  return { order: null, matchBy: 'none' };
+}
+
+// Reconcile ONE MSR remittance row against the WO's bid-sheet line items.
+// MSR prices are tax-INCLUSIVE, so computed = sum(unitPrice*qty) and should equal
+// the paid amount to the penny. bidItems = read-bid-lineitems output
+// [{desc, unitPrice, qty}] (already deduped across the bid + CO sheets). match =
+// matchMsrRow output. Returns a report block; the user is the FINAL arbitrator, so
+// every line + total is meant to be editable downstream. Status:
+//   match      computed == paid (to the penny)
+//   off        computed != paid (bid on file incomplete, or a genuine discrepancy)
+//   no-items   matched WO but no bid-sheet items (likely a service-call-only fix)
+//   unmatched  no WO found for this remittance line
+export function reconcileMsrRow(row, match, bidItems) {
+  const paid = money(Number(row && row.amount));
+  const items = Array.isArray(bidItems) ? bidItems : [];
+  const lines = items.map(it => ({
+    desc: String((it && it.desc) || ''),
+    unitPrice: money(Number(it && it.unitPrice)),
+    qty: Number(it && it.qty) > 0 ? Number(it.qty) : 1,
+  }));
+  let computed = 0;
+  for (const l of lines) computed += l.unitPrice * l.qty;
+  computed = money(computed);
+  const order = match && match.order;
+  const flags = [];
+  let status;
+  if (!order) {
+    status = 'unmatched';
+    flags.push('No work order found for this remittance line -- verify manually.');
+  } else if (!lines.length) {
+    status = 'no-items';
+    flags.push('Paid ' + paid.toFixed(2) + ' but no bid-sheet items found -- likely a service-call-only correction; enter the line manually.');
+  } else if (Math.abs(computed - paid) < 0.005) {
+    status = 'match';
+  } else {
+    status = 'off';
+    flags.push('Computed ' + computed.toFixed(2) + ' vs paid ' + paid.toFixed(2) + ' (off ' + money(computed - paid).toFixed(2) + ') -- bid on file may be incomplete.');
+  }
+  if (match && match.matchBy === 'address') {
+    flags.push('Matched by ADDRESS, not WO id -- verify this is the right work order.');
+  }
+  return {
+    woId: (row && row.woId) || '',
+    invoiceNum: (row && row.invoiceNum) || '',
+    propCode: (row && row.propCode) || '',
+    address: (order && order.address) || (row && row.addressRaw) || '',
+    orderId: order ? order.id : null,
+    matchBy: match ? match.matchBy : 'none',
+    paid, computed, delta: money(computed - paid),
+    lines, status, flags,
+  };
+}
+
+/* ---------- AMH remittance reconcile (invoice-generation Slice 2) ---------- */
+
+// The remittance matcher is agreement-agnostic (WO number first, address fallback),
+// so AMH reuses matchMsrRow -- AMH rows have no addressRaw, so the fallback is inert.
+export const matchAmhRow = matchMsrRow;
+
+// Reconcile ONE AMH remittance row against the WO's itemized AMH portal-API bid lines.
+// AMH Premier prices are tax-INCLUSIVE (Core Truth #2): the reconcile line AMOUNT =
+// qty*unitPrice + vendorTax (the figure AMH actually pays), presented taxable:FALSE --
+// EXCEPT service call / diagnostic / emergency, which are taxable (Core Truth #3).
+// apiItems = [{name, desc, unitPrice, vendorTax, qty}] from the AMH API (the Slice-2
+// itemize; live-gated). A WO that aged out of the 100-order API window returns no items
+// -> status 'unavailable' (NOT an error). match = matchAmhRow output.
+export function reconcileAmhRow(row, match, apiItems) {
+  const paid = money(Number(row && row.amount));
+  const items = Array.isArray(apiItems) ? apiItems : [];
+  const lines = items.map(it => {
+    const qty = Number(it && it.qty) > 0 ? Number(it.qty) : 1;
+    const unit = money(Number(it && it.unitPrice));
+    const vtax = money(Number(it && it.vendorTax));
+    const name = String((it && it.name) || '');
+    const desc = String((it && (it.desc || it.name)) || '');
+    // AMH inclusive -> non-taxable, EXCEPT service call / diagnostic / emergency.
+    const taxable = SERVICE_TAXABLE_RE.test(name) || SERVICE_TAXABLE_RE.test(desc);
+    return { name, desc, qty, unitPrice: unit, vendorTax: vtax, amount: money(unit * qty + vtax), taxable };
+  });
+  let computed = 0;
+  for (const l of lines) computed += l.amount;
+  computed = money(computed);
+  const order = match && match.order;
+  const flags = [];
+  let status;
+  if (!order) {
+    status = 'unmatched';
+    flags.push('No work order found for this remittance line -- verify manually.');
+  } else if (!lines.length) {
+    status = 'unavailable';
+    flags.push('No AMH bid items retrieved (WO likely aged out of the 100-order API window) -- needs AMH history access; enter items manually.');
+  } else if (Math.abs(computed - paid) < 0.005) {
+    status = 'match';
+  } else {
+    status = 'off';
+    flags.push('Computed ' + computed.toFixed(2) + ' vs paid ' + paid.toFixed(2) + ' (off ' + money(computed - paid).toFixed(2) + ').');
+  }
+  if (match && match.matchBy === 'address') {
+    flags.push('Matched by ADDRESS, not WO id -- verify this is the right work order.');
+  }
+  return {
+    woId: (row && row.woId) || '',
+    invoiceNum: (row && row.invoiceNum) || '',
+    bidNum: (row && row.bidNum) || '',
+    revisit: (row && row.revisit) || '',
+    address: (order && order.address) || '',
+    orderId: order ? order.id : null,
+    matchBy: match ? match.matchBy : 'none',
+    paid, computed, delta: money(computed - paid),
+    lines, status, flags,
+  };
 }

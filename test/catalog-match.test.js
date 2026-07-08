@@ -37,7 +37,9 @@ const GENERAL = [
   { name: 'Toilet Fill Valve Replacement', desc: '', price: 35, taxable: true },
   { name: 'Water Heater Replacement', desc: '', price: 950, taxable: true },
   { name: 'Shower Cartridge Replacement', desc: '', price: 95, taxable: true },
-  ...filler(24),
+  // Sized to the live General catalog range so a lone rare token (capacitor) clears
+  // MATCH_SOLO_IDF (4.0) exactly as it does against the real ~150-item library.
+  ...filler(150),
 ];
 
 const results = [];
@@ -107,15 +109,60 @@ test('bare-number token does not manufacture a match', () => {
   assert.strictEqual(l.name, 'Materials!');              // no action verb -> material
 });
 
+test('KIND gate: material-wording bid does NOT match a labor/cleaning catalog item', () => {
+  // "Material - drain line" is a physical thing; must not flag as the "Clean Drain..."
+  // labor service (name leads with an action verb). Regression: live MSR invoice.
+  const CLEAN = [{ name: 'Clean Drain Pan and Drain Line', desc: '', price: 145, taxable: true }, ...filler(150)];
+  const l = resolveBidLine('Material - 1ft of drain line', 10, CLEAN, null, 'MSR');
+  assert.strictEqual(l.priceFlag, undefined);
+  assert.strictEqual(l.suspects, undefined);
+  assert.strictEqual(l.name, 'Materials!');
+});
+
+test('lone COMMON shared token does not flag (air -> Air Handler noise)', () => {
+  const HANDLERS = ['1.5', '2', '3', '4', '5'].map(t => (
+    { name: t + ' Ton Air Handler', desc: '', price: 2000, taxable: true })).concat(filler(150));
+  const l = resolveBidLine('Install new return air register', 300, HANDLERS, null, 'MSR');
+  assert.strictEqual(l.priceFlag, undefined);   // shares only the common word "air"
+  assert.strictEqual(l.suspects, undefined);
+});
+
+test('"drain" is a noun, not a verb: bare drain line/pan -> Materials!', () => {
+  assert.strictEqual(resolveBidLine('1ft of drain line', 10, [], [], 'MSR').name, 'Materials!');
+  assert.strictEqual(resolveBidLine('secondary drain pan', 40, [], [], 'AMH').name, 'Materials!');
+  assert.strictEqual(resolveBidLine('clear the drain line', 90, [], [], 'AMH').name, 'AMH!'); // real verb -> AMH labor sentinel
+});
+
+test('MSR sentinel labor -> MSR! and NOT taxed (sheets tax-included; divide-out)', () => {
+  const l = resolveBidLine('Install half inch black pipe', 150, [], [], 'MSR');
+  assert.strictEqual(l.name, 'MSR!');
+  assert.strictEqual(l.taxable, false);
+});
+
+test('AMH sentinel labor -> AMH! and NEVER taxed (Premier inclusive, core truth #2)', () => {
+  const l = resolveBidLine('Install half inch black pipe', 150, [], [], 'AMH');
+  assert.strictEqual(l.name, 'AMH!');
+  assert.strictEqual(l.taxable, false);
+});
+
+test('service call / diagnostic / emergency ALWAYS taxed on either PM (core truth #3)', () => {
+  const sc = resolveBidLine('HVAC - Service Call', 90, [], [], 'AMH');
+  assert.strictEqual(sc.name, 'AMH!');
+  assert.strictEqual(sc.category, 'labor');
+  assert.strictEqual(sc.taxable, true);
+  assert.strictEqual(resolveBidLine('Emergency after-hours trip', 120, [], [], 'MSR').taxable, true);
+  assert.strictEqual(resolveBidLine('Diagnostic Fee', 75, [], [], 'MSR').taxable, true);
+});
+
 test('weak keyword -> plain sentinel, no flag, no suspects', () => {
   const l = resolveBidLine('Labor to correct drainage setup', 90, AMH, GENERAL, 'AMH');
   assert.strictEqual(l.priceFlag, undefined);
   assert.strictEqual(l.suspects, undefined);
-  assert.strictEqual(l.name, 'Labor!');                  // has verb "correct"
+  assert.strictEqual(l.name, 'AMH!');                    // has verb "correct" -> AMH labor sentinel
 });
 
 test('sentinel labels by action verb; verbless/Material- = material', () => {
-  assert.strictEqual(resolveBidLine('Replaced flush handle', 20, [], [], 'AMH').name, 'Labor!');
+  assert.strictEqual(resolveBidLine('Replaced flush handle', 20, [], [], 'AMH').name, 'AMH!'); // verb -> AMH labor
   assert.strictEqual(resolveBidLine('9 lbs R410A', 315, [], [], 'AMH').name, 'Materials!');
   assert.strictEqual(resolveBidLine('Material - new TXV valve', 250, [], [], 'AMH').name, 'Materials!');
 });

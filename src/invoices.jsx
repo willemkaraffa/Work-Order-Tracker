@@ -144,7 +144,8 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
   // A sub-category typed fresh in the modal is appended to the settings list
   // so it shows up in every dropdown from then on.
   const addFromModal = ({ name, desc, price, taxable, catalog, subCategory }) => {
-    const item = { name, desc, price, taxable };
+    // manual:true marks a hand-added item so re-seeding preserves it (core truth #5).
+    const item = { name, desc, price, taxable, manual: true };
     if (subCategory) item.subCategory = subCategory;
     if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
       setSubCats([...(subCats || []), subCategory]);
@@ -411,7 +412,7 @@ function blankLine() {
   return { name: '', desc: '', qty: 1, unitPrice: 0, category: 'labor', taxable: false, agreement: '' };
 }
 const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
-export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose }) {
+export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear, onClose }) {
   useModalOpenFlag(true);   // full-screen overlay: silence type-to-search underneath
   const pm = (order && order.pm) || '';
   const pmUpper = String(pm).toUpperCase();
@@ -426,11 +427,20 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
   // Fallback library for the resolveBidLine chain (client -> General -> sentinel).
   // On a General WO the client catalog IS General, so no separate fallback needed.
   const generalCatalog = (tabName !== 'General' && library && Array.isArray(library.General)) ? library.General : null;
+  // Picker list = the WO's PM catalog PLUS General as a cross-category fallback, so an
+  // AMH/MSR WO can pick a General item when nothing in the PM library matches (core
+  // truth #6). catalogByName maps name -> { it, agreement }: General is inserted first
+  // so a same-name PM item OVERWRITES it (client library wins, matching resolveBidLine).
+  const pickerItems = React.useMemo(
+    () => (generalCatalog ? [...catalog, ...generalCatalog] : catalog),
+    [catalog, generalCatalog]
+  );
   const catalogByName = React.useMemo(() => {
     const m = new Map();
-    for (const it of catalog) if (it && it.name) m.set(it.name, it);
+    if (generalCatalog) for (const it of generalCatalog) if (it && it.name) m.set(it.name, { it, agreement: 'General' });
+    for (const it of catalog) if (it && it.name) m.set(it.name, { it, agreement: tabName });
     return m;
-  }, [catalog]);
+  }, [catalog, generalCatalog, tabName]);
 
   const existing = order && order.invoice;
   const [number, setNumber] = React.useState((existing && existing.number) || '');
@@ -491,10 +501,12 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
     const hit = catalogByName.get(name);
     if (hit) setLine(idx, {
       name,
-      ...(hit.desc ? { desc: hit.desc } : {}),
-      unitPrice: typeof hit.price === 'number' ? hit.price : (parseFloat(hit.price) || 0),
-      taxable: !!hit.taxable,
-      agreement: tabName,
+      ...(hit.it.desc ? { desc: hit.it.desc } : {}),
+      unitPrice: typeof hit.it.price === 'number' ? hit.it.price : (parseFloat(hit.it.price) || 0),
+      taxable: !!hit.it.taxable,
+      // A General-picked item on an AMH/MSR WO carries agreement:'General' so its tax
+      // follows General (added on top), not the PM's inclusive/divide-out rule.
+      agreement: hit.agreement,
     });
     else setLine(idx, { name });
   };
@@ -551,7 +563,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
       display: 'flex', flexDirection: 'column',
     }}>
       <datalist id="invoice-item-names">
-        {catalog.map((it, i) => <option key={i} value={it.name} />)}
+        {pickerItems.map((it, i) => <option key={i} value={it.name} />)}
       </datalist>
 
       <div style={{ flexShrink: 0, padding: '14px 22px', borderBottom: '1px solid var(--border-1)',
@@ -563,6 +575,12 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClose
           WO {(order && order.id) || ''} · {pm || 'no PM'}{order && order.address ? ' · ' + order.address : ''}
         </div>
         <div style={{ flex: 1 }} />
+        {order && order.invoice && onClear && (
+          <button onClick={() => { if (window.confirm('Clear the saved invoice for this WO? Line items are discarded; reopen to re-autofill from the bid.')) onClear(); }}
+            style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+            border: '1px solid var(--flag-emergency)', background: 'transparent', color: 'var(--flag-emergency)',
+            fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Clear saved invoice</button>
+        )}
         <button onClick={onClose} style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
           border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
           fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Cancel</button>

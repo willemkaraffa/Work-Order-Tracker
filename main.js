@@ -4,6 +4,7 @@ const fs     = require('fs');
 const http   = require('http');
 const { autoUpdater } = require('electron-updater');
 const { runAmhCapture } = require('./amh-runner');
+const { parseMsrRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
 
 // Single-instance guard. A second launch focuses the existing window
@@ -694,20 +695,34 @@ function parseOtherCell(text) {
   for (const raw of String(text || '').split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
-    const m = line.match(/^\$?\s*([\d,]+(?:\.\d+)?)\s+(.+?)\s*$/);
-    if (!m) continue;
-    const price = parseFloat(m[1].replace(/,/g, ''));
-    if (!Number.isFinite(price) || price <= 0) continue;
-    out.push({ desc: m[2].trim(), unitPrice: Math.round(price * 100) / 100 });
+    // A single line can pack MORE than one "$amount desc" (e.g. "$20 Labor/$20Material
+    // to replace filters"). Split on each "$" and parse every segment; a leading
+    // segment with no "$" (e.g. "200 Labor...") still parses.
+    for (const seg of line.split('$')) {
+      const s = seg.trim();
+      if (!s) continue;
+      const m = s.match(/^([\d,]+(?:\.\d+)?)\s*(.+?)\s*$/);
+      if (!m) continue;
+      const price = parseFloat(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(price) || price <= 0) continue;
+      out.push({ desc: m[2].trim(), unitPrice: Math.round(price * 100) / 100 });
+    }
   }
   return out;
 }
 
-// Read + parse the OTHER-section line items from one bid/CO sheet. Locate the
-// "OTHER" header, find the "Item Description" column by label (Plumbing is offset
-// one column from HVAC), then split each OTHER row's packed description into
-// individual sub-items via parseOtherCell. Defensive cell access (exceljs `.text`
-// can throw on some cell types). -> [{desc, unitPrice, qty}].
+// Read the priced line items from one bid/CO sheet. Bid items come from TWO places:
+//   (1) the MAIN fixed-catalog table -- rows with Quantity>0, priced by "Line Item
+//       Price" (= Qty x Total Price). Big-ticket SELECTED items live here (e.g.
+//       "50 Gallon Water Heater - Gas" $1123). Columns differ HVAC vs Plumbing, so
+//       they are found by HEADER LABEL, not fixed index. The HVAC service call /
+//       diagnostic (INCURRED COSTS) is EXCLUDED here -- it is left out of the HVAC bid
+//       total and re-entered as "Service Call $85" in OTHER, so counting it twice
+//       would double the service call.
+//   (2) the OTHER section -- packed "$amount desc" custom lines (parseOtherCell).
+// Reading OTHER only (the prior behavior) UNDER-COUNTED any sheet that selected a
+// main-table catalog item. Defensive cell access (exceljs `.text` can throw).
+// -> [{desc, unitPrice, qty}].
 async function readSheetOtherItems(file, sheetName) {
   const ExcelJS = require('exceljs');
   const wb = new ExcelJS.Workbook();
@@ -726,26 +741,61 @@ async function readSheetOtherItems(file, sheetName) {
       return String(t);
     } catch (_) { return ''; }
   };
-  let otherRow = 0; const last = ws.rowCount;
+  const last = ws.rowCount;
+  const num = (row, c) => { const n = parseFloat(String(cellText(row, c)).replace(/,/g, '')); return Number.isFinite(n) ? n : NaN; };
+  const headerCols = (rn) => {
+    const row = ws.getRow(rn); const col = {};
+    for (let c = 1; c <= 14; c++) {
+      const t = cellText(row, c).trim().toLowerCase();
+      if (t === 'item description') col.desc = c;
+      else if (t === 'item') col.item = c;
+      else if (t === 'quantity') col.qty = c;
+      else if (t === 'line item price') col.line = c;
+      else if (t === 'total price') col.total = c;
+    }
+    return col;
+  };
+  // main-table header = first row carrying "Item Description"; OTHER header = the next.
+  let mainHdr = 0, otherRow = 0;
   for (let rn = 1; rn <= last; rn++) {
     const row = ws.getRow(rn);
-    for (let c = 1; c <= 12; c++) { if (cellText(row, c).trim().toUpperCase() === 'OTHER') { otherRow = rn; break; } }
-    if (otherRow) break;
+    for (let c = 1; c <= 14; c++) {
+      const u = cellText(row, c).trim().toUpperCase();
+      if (!mainHdr && u === 'ITEM DESCRIPTION') mainHdr = rn;
+      if (!otherRow && u === 'OTHER') otherRow = rn;
+    }
   }
-  if (!otherRow) return [];
-  const hdr = ws.getRow(otherRow + 1);
-  let cDesc = 0;
-  for (let c = 1; c <= 12; c++) { if (cellText(hdr, c).trim().toLowerCase() === 'item description') { cDesc = c; break; } }
-  if (!cDesc) return [];
   const items = [];
-  for (let rn = otherRow + 2; rn <= last; rn++) {
-    const row = ws.getRow(rn);
-    let stop = false;
-    for (let c = 1; c <= 12; c++) { const u = cellText(row, c).toUpperCase(); if (u.includes('TOTAL OTHER') || u.includes('BID TOTAL')) { stop = true; break; } }
-    if (stop) break;
-    const desc = cellText(row, cDesc).trim();
-    if (!desc) continue;
-    for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: 1 });
+  // (1) main catalog table: Quantity>0 rows, above the OTHER section.
+  if (mainHdr) {
+    const col = headerCols(mainHdr); const stopAt = otherRow || (last + 1);
+    if (col.qty) {
+      for (let rn = mainHdr + 1; rn < stopAt; rn++) {
+        const row = ws.getRow(rn);
+        const q = num(row, col.qty); if (!Number.isFinite(q) || q <= 0) continue;
+        const name = cellText(row, col.item).trim() || cellText(row, col.desc).trim();
+        if (/diagnostic fee|service call/i.test(name)) continue;   // HVAC service call: see note above
+        let price = col.line ? num(row, col.line) : NaN;
+        if (!Number.isFinite(price) || price <= 0) price = q * (num(row, col.total) || 0);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        items.push({ desc: name, unitPrice: Math.round(price * 100) / 100, qty: 1 });
+      }
+    }
+  }
+  // (2) OTHER section: packed "$amount desc" custom lines.
+  if (otherRow) {
+    const oc = headerCols(otherRow + 1); const cDesc = oc.desc || 0;
+    if (cDesc) {
+      for (let rn = otherRow + 2; rn <= last; rn++) {
+        const row = ws.getRow(rn);
+        let stop = false;
+        for (let c = 1; c <= 14; c++) { const u = cellText(row, c).toUpperCase(); if (u.includes('TOTAL OTHER') || u.includes('BID TOTAL')) { stop = true; break; } }
+        if (stop) break;
+        const desc = cellText(row, cDesc).trim();
+        if (!desc) continue;
+        for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: 1 });
+      }
+    }
   }
   return items;
 }
@@ -788,6 +838,30 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec) => {
       }
     }
     return { ok: true, items, count: items.length };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
+// ── IPC: MSR remittance parse (invoice-generation Slice 1) ────────────────────
+// Pick (or accept) an MSR "Vendor ACH Payment Detail" PDF and parse it into per-WO
+// rows via parse_msr_remittance.py (pdfplumber). The renderer then matches rows to
+// orders (matchMsrRow), reads each WO's bid items (read-bid-lineitems), and
+// reconciles (reconcileMsrRow). Returns { ok, rows, statementTotal } or { ok:false }.
+ipcMain.handle('parse-msr-remittance', async (_e, filePath) => {
+  try {
+    let pdf = filePath && String(filePath).trim();
+    if (!pdf) {
+      const r = await dialog.showOpenDialog({
+        title: 'Select MSR remittance PDF',
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+        properties: ['openFile'],
+      });
+      if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, canceled: true };
+      pdf = r.filePaths[0];
+    }
+    if (!fs.existsSync(pdf)) return { ok: false, error: 'File not found: ' + pdf };
+    const res = await parseMsrRemittance(pdf);
+    if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Parser returned no data.' };
+    return { ok: true, rows: res.rows || [], statementTotal: res.statementTotal, path: pdf };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 

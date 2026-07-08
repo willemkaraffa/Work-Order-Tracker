@@ -75,6 +75,12 @@ contextBridge.exposeInMainWorld('woFolder', {
   readBidLineItems: (record) => ipcRenderer.invoke('read-bid-lineitems', record),
 });
 
+// Remittance bridge — parse an MSR "Vendor ACH Payment Detail" PDF into per-WO
+// rows (invoice-generation Slice 1). filePath optional; omit to open a file dialog.
+contextBridge.exposeInMainWorld('remittance', {
+  parseMsr: (filePath) => ipcRenderer.invoke('parse-msr-remittance', filePath),
+});
+
 // Credentials bridge — safeStorage-encrypted PM credentials
 contextBridge.exposeInMainWorld('creds', {
   set:   (pm, username, password) => ipcRenderer.invoke('creds-set', pm, username, password),
