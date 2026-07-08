@@ -4,7 +4,7 @@ const fs     = require('fs');
 const http   = require('http');
 const { autoUpdater } = require('electron-updater');
 const { runAmhCapture } = require('./amh-runner');
-const { parseMsrRemittance } = require('./remittance-runner');
+const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
 
 // Single-instance guard. A second launch focuses the existing window
@@ -862,6 +862,27 @@ ipcMain.handle('parse-msr-remittance', async (_e, filePath) => {
     const res = await parseMsrRemittance(pdf);
     if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Parser returned no data.' };
     return { ok: true, rows: res.rows || [], statementTotal: res.statementTotal, path: pdf };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
+// AMH "ACHVendor" remittance parse (Slice 2). Same shape as MSR; renderer itemizes
+// each matched WO from its captured order.bidItems (no live API needed) + reconciles.
+ipcMain.handle('parse-amh-remittance', async (_e, filePath) => {
+  try {
+    let pdf = filePath && String(filePath).trim();
+    if (!pdf) {
+      const r = await dialog.showOpenDialog({
+        title: 'Select AMH remittance PDF (ACHVendor)',
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+        properties: ['openFile'],
+      });
+      if (r.canceled || !r.filePaths || !r.filePaths.length) return { ok: false, canceled: true };
+      pdf = r.filePaths[0];
+    }
+    if (!fs.existsSync(pdf)) return { ok: false, error: 'File not found: ' + pdf };
+    const res = await parseAmhRemittance(pdf);
+    if (!res || !res.ok) return { ok: false, error: (res && res.error) || 'Parser returned no data.' };
+    return { ok: true, rows: res.rows || [], paymentTotal: res.paymentTotal, eftNo: res.eftNo, path: pdf };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 

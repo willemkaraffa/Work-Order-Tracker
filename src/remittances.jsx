@@ -7,13 +7,14 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import { HeaderChips } from './app.jsx';
-import { money, matchMsrRow, reconcileMsrRow } from './orders-logic.js';
+import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow } from './orders-logic.js';
 
 const STATUS_STYLE = {
-  match:     { label: 'MATCH',        fg: '#065f46', bg: 'rgba(16,185,129,0.15)' },
-  off:       { label: 'OFF',          fg: '#991b1b', bg: 'rgba(220,38,38,0.15)' },
-  'no-items':{ label: 'NO BID SHEET', fg: '#92400e', bg: 'rgba(245,158,11,0.18)' },
-  unmatched: { label: 'NO WO',        fg: 'var(--text-2)', bg: 'var(--bg-surface-2)' },
+  match:      { label: 'MATCH',        fg: '#065f46', bg: 'rgba(16,185,129,0.15)' },
+  off:        { label: 'OFF',          fg: '#991b1b', bg: 'rgba(220,38,38,0.15)' },
+  'no-items': { label: 'NO BID SHEET', fg: '#92400e', bg: 'rgba(245,158,11,0.18)' },
+  unavailable:{ label: 'UNAVAILABLE',  fg: '#92400e', bg: 'rgba(245,158,11,0.18)' },
+  unmatched:  { label: 'NO WO',        fg: 'var(--text-2)', bg: 'var(--bg-surface-2)' },
 };
 
 export function RemittancesModule({ orders, toast }) {
@@ -21,35 +22,51 @@ export function RemittancesModule({ orders, toast }) {
   const [report, setReport] = React.useState(null);   // { blocks, statementTotal, fileName } | null
   const [loading, setLoading] = React.useState(false);
 
-  const run = React.useCallback(async () => {
-    if (!window.remittance || !window.remittance.parseMsr) {
+  const run = React.useCallback(async (source) => {
+    const api = source === 'amh'
+      ? (window.remittance && window.remittance.parseAmh)
+      : (window.remittance && window.remittance.parseMsr);
+    if (!api) {
       toast && toast('Remittance parser unavailable - fully restart the app (not just reload)', 'err');
       return;
     }
     setLoading(true);
     try {
-      const res = await window.remittance.parseMsr();
+      const res = await api();
       if (res && res.canceled) { setLoading(false); return; }
       if (!res || !res.ok) {
         toast && toast('Parse failed: ' + ((res && res.error) || 'unknown'), 'err');
         setLoading(false); return;
       }
       const rows = Array.isArray(res.rows) ? res.rows : [];
-      // Match + reconcile each row. Bid reads are per-WO IPC (main reuses
-      // resolveWoFolder + readSheetOtherItems); run them concurrently.
-      const blocks = await Promise.all(rows.map(async (row) => {
-        const match = matchMsrRow(row, orders);
-        let items = [];
-        if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
-          try {
-            const r = await window.woFolder.readBidLineItems(match.order);
-            if (r && r.ok && Array.isArray(r.items)) items = r.items;
-          } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
-        }
-        return reconcileMsrRow(row, match, items);
-      }));
+      let blocks;
+      if (source === 'amh') {
+        // AMH itemize = the matched WO's captured order.bidItems (AMH API data
+        // {name,qty,price}); price is the inclusive Premier line price (Core Truth #2)
+        // so vendorTax 0. A WO with no captured bidItems -> reconcile flags 'unavailable'.
+        blocks = rows.map((row) => {
+          const match = matchAmhRow(row, orders);
+          const bid = (match.order && Array.isArray(match.order.bidItems)) ? match.order.bidItems : [];
+          const items = bid.map(b => ({ name: String((b && b.name) || ''), unitPrice: b && b.price, vendorTax: 0, qty: b && b.qty }));
+          return reconcileAmhRow(row, match, items);
+        });
+      } else {
+        // MSR itemize = the WO folder bid sheet(s), read per-WO via IPC (concurrent).
+        blocks = await Promise.all(rows.map(async (row) => {
+          const match = matchMsrRow(row, orders);
+          let items = [];
+          if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
+            try {
+              const r = await window.woFolder.readBidLineItems(match.order);
+              if (r && r.ok && Array.isArray(r.items)) items = r.items;
+            } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
+          }
+          return reconcileMsrRow(row, match, items);
+        }));
+      }
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';
-      setReport({ blocks, statementTotal: res.statementTotal, fileName });
+      const total = source === 'amh' ? res.paymentTotal : res.statementTotal;
+      setReport({ blocks, statementTotal: total, fileName, source });
     } catch (e) {
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
@@ -69,8 +86,11 @@ export function RemittancesModule({ orders, toast }) {
           <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
             Remittances
           </div>
-          <ActionBtn onClick={run} disabled={loading}>
-            {loading ? 'Parsing...' : 'Open MSR remittance PDF'}
+          <ActionBtn onClick={() => run('msr')} disabled={loading}>
+            {loading ? 'Parsing...' : 'Open MSR PDF'}
+          </ActionBtn>
+          <ActionBtn onClick={() => run('amh')} disabled={loading}>
+            {loading ? 'Parsing...' : 'Open AMH PDF'}
           </ActionBtn>
           {report && (
             <div style={{ fontSize: 12, color: 'var(--text-3)' }}>
@@ -85,9 +105,11 @@ export function RemittancesModule({ orders, toast }) {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
         {!report && (
           <div style={{ color: 'var(--text-3)', fontSize: 14, maxWidth: 560, lineHeight: 1.6 }}>
-            Open an MSR "Vendor ACH Payment Detail" PDF. Each paid work order is matched by its
-            Invoice Notes number, its bid-sheet line items are read from the WO folder, and the
-            computed total is checked against the amount paid. AMH remittances come in a later slice.
+            Open an <b>MSR</b> "Vendor ACH Payment Detail" or an <b>AMH</b> "ACHVendor" remittance PDF.
+            Each paid work order is matched (MSR by Invoice Notes number, AMH by the W#B# invoice), its
+            line items are pulled (MSR from the WO folder bid sheet, AMH from the captured bid), and the
+            computed total is checked against the amount paid. AMH WOs that aged out of the portal API
+            window show as "unavailable" (enter items manually).
           </div>
         )}
 
@@ -107,7 +129,7 @@ export function RemittancesModule({ orders, toast }) {
                 <>
                   <div style={{ color: 'var(--text-3)' }}>vs</div>
                   <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Statement total</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>{report.source === 'amh' ? 'Payment total' : 'Statement total'}</div>
                     <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "'Bricolage Grotesque', sans-serif" }}>{fmt(stmt)}</div>
                   </div>
                   <div style={{

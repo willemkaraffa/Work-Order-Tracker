@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('woFolder', {
 // rows (invoice-generation Slice 1). filePath optional; omit to open a file dialog.
 contextBridge.exposeInMainWorld('remittance', {
   parseMsr: (filePath) => ipcRenderer.invoke('parse-msr-remittance', filePath),
+  parseAmh: (filePath) => ipcRenderer.invoke('parse-amh-remittance', filePath),
 });
 
 // Credentials bridge — safeStorage-encrypted PM credentials
