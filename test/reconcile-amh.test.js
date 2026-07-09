@@ -95,6 +95,13 @@ test('post-fix capture with per-line vendorTax -> exact, no fallback flag', () =
   assert.ok(!rep.flags.some(f => /re-capture/i.test(f)));
 });
 
+test('block carries propertyId from the matched order (needed for invoicing)', () => {
+  const orders = [{ id: 'WO-9', woId: '9692517', pm: 'AMH', address: '10 Oak St', propertyId: 'AMH-4421' }];
+  const r = row({ woId: '9692517', amount: 100 });
+  const rep = reconcileAmhRow(r, matchAmhRow(r, orders), [{ name: 'Labor', unitPrice: 100, vendorTax: 0, qty: 1 }]);
+  assert.strictEqual(rep.propertyId, 'AMH-4421');
+});
+
 console.log('reconcile-amh test');
 console.log('==================');
 let pass = 0, fail = 0;

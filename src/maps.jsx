@@ -386,7 +386,6 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       marker.on('contextmenu', (ev) => {
         const oe = ev && ev.originalEvent;
         if (oe) { oe.preventDefault(); oe.stopPropagation(); }
-        console.log('[maps-ctx] marker right-click', o.id, oe && oe.clientX, oe && oe.clientY);
         setSelected(o.id);
         setCtxMenu({ woId: o.id, x: oe ? oe.clientX : 200, y: oe ? oe.clientY : 200 });
       });

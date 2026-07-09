@@ -60,7 +60,15 @@ def _edge_driver_path() -> Optional[str]:
 
 def make_driver():
     opts = Options()
-    opts.add_argument("--headless=new")
+    # NO HEADLESS. Edge 150 (Chromium 150) REMOVED --headless=old (dropped in Chromium 132),
+    # so --headless=new is the only headless mode -- and it paints the click-through
+    # DirectComposition "screen blocker" overlay that NO gpu flag suppresses (--disable-gpu
+    # and --disable-gpu-compositing both tried; overlay persisted). The reference AMH scraper
+    # avoids it only because it drives CHROME (different headless surface); we must use Edge
+    # (AMH blocks generic Chrome). So run a REAL, HEADED Edge window positioned far OFF-SCREEN:
+    # no headless mode -> no headless surface, and an off-screen window is invisible while it
+    # logs in + captures the perf-log token exactly as before.
+    opts.add_argument("--window-position=-32000,-32000")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")

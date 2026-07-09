@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('woFolder', {
 contextBridge.exposeInMainWorld('remittance', {
   parseMsr: (filePath) => ipcRenderer.invoke('parse-msr-remittance', filePath),
   parseAmh: (filePath) => ipcRenderer.invoke('parse-amh-remittance', filePath),
+  exportXlsx: (report) => ipcRenderer.invoke('export-remittance-xlsx', report),
 });
 
 // Credentials bridge — safeStorage-encrypted PM credentials
@@ -91,8 +92,9 @@ contextBridge.exposeInMainWorld('creds', {
 
 // Scraper bridge — trigger in-app portal scraping
 contextBridge.exposeInMainWorld('scraper', {
-  captureWO:     (woData) => ipcRenderer.invoke('capture-wo', woData),
-  captureAllAMH: (woNums) => ipcRenderer.invoke('capture-all-amh', woNums),
+  captureWO:     (woData)  => ipcRenderer.invoke('capture-wo', woData),
+  captureWOs:    (woDatas) => ipcRenderer.invoke('capture-wos', woDatas),
+  captureAllAMH: (woNums)  => ipcRenderer.invoke('capture-all-amh', woNums),
 });
 
 // Tray bridge -- main process pushes click events; renderer pushes state.

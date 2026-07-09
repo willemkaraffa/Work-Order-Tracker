@@ -13,7 +13,7 @@
 // bridge. Exit 0 pass / 1 fail.
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
-const { resolveBidLine, bidItemsToInvoiceLines, invoiceHasServiceCall } = loadEsm('src/orders-logic.js');
+const { resolveBidLine, bidItemsToInvoiceLines, invoiceHasServiceCall, categoryLabel, isPmListed } = loadEsm('src/orders-logic.js');
 
 // Inert filler: unique throwaway tokens, never shared with any test wording, purely to
 // grow N so IDF(distinctive single token) reaches the live-catalog range.
@@ -130,24 +130,26 @@ test('lone COMMON shared token does not flag (air -> Air Handler noise)', () => 
 test('"drain" is a noun, not a verb: bare drain line/pan -> Materials!', () => {
   assert.strictEqual(resolveBidLine('1ft of drain line', 10, [], [], 'MSR').name, 'Materials!');
   assert.strictEqual(resolveBidLine('secondary drain pan', 40, [], [], 'AMH').name, 'Materials!');
-  assert.strictEqual(resolveBidLine('clear the drain line', 90, [], [], 'AMH').name, 'AMH!'); // real verb -> AMH labor sentinel
+  assert.strictEqual(resolveBidLine('clear the drain line', 90, [], [], 'AMH').name, 'Labor!'); // real verb -> unlisted labor sentinel
 });
 
-test('MSR sentinel labor -> MSR! and TAXABLE (custom service; divide-out, total-invariant)', () => {
+test('MSR sentinel labor -> Labor! and TAXABLE (custom service; divide-out, total-invariant)', () => {
   const l = resolveBidLine('Install half inch black pipe', 150, [], [], 'MSR');
-  assert.strictEqual(l.name, 'MSR!');
+  assert.strictEqual(l.name, 'Labor!');   // unlisted -> Labor!; MSR carried on agreement
+  assert.strictEqual(l.agreement, 'MSR');
   assert.strictEqual(l.taxable, true);
 });
 
-test('AMH sentinel labor -> AMH! and NEVER taxed (Premier inclusive, core truth #2)', () => {
+test('AMH sentinel labor -> Labor! and NEVER taxed (Premier inclusive, core truth #2)', () => {
   const l = resolveBidLine('Install half inch black pipe', 150, [], [], 'AMH');
-  assert.strictEqual(l.name, 'AMH!');
+  assert.strictEqual(l.name, 'Labor!');   // unlisted -> Labor!; tax still non-taxable via AMH agreement
+  assert.strictEqual(l.agreement, 'AMH');
   assert.strictEqual(l.taxable, false);
 });
 
 test('service call / diagnostic / emergency ALWAYS taxed on either PM (core truth #3)', () => {
   const sc = resolveBidLine('HVAC - Service Call', 90, [], [], 'AMH');
-  assert.strictEqual(sc.name, 'AMH!');
+  assert.strictEqual(sc.name, 'Labor!');
   assert.strictEqual(sc.category, 'labor');
   assert.strictEqual(sc.taxable, true);
   assert.strictEqual(resolveBidLine('Emergency after-hours trip', 120, [], [], 'MSR').taxable, true);
@@ -158,11 +160,26 @@ test('weak keyword -> plain sentinel, no flag, no suspects', () => {
   const l = resolveBidLine('Labor to correct drainage setup', 90, AMH, GENERAL, 'AMH');
   assert.strictEqual(l.priceFlag, undefined);
   assert.strictEqual(l.suspects, undefined);
-  assert.strictEqual(l.name, 'AMH!');                    // has verb "correct" -> AMH labor sentinel
+  assert.strictEqual(l.name, 'Labor!');                  // has verb "correct" -> unlisted labor sentinel
+});
+
+test('categoryLabel: confirmed PM item reads its client; unlisted/General reads labor/material', () => {
+  // A confirmed AMH library item -> category label 'AMH' (derived from agreement, locked).
+  const amhItem = { name: 'Replace contactor', agreement: 'AMH', category: 'labor' };
+  assert.strictEqual(isPmListed(amhItem), true);
+  assert.strictEqual(categoryLabel(amhItem), 'AMH');
+  // Unlisted AMH line (Labor! sentinel) is NOT PM-listed -> labor/material.
+  const unlisted = { name: 'Labor!', agreement: 'AMH', category: 'labor' };
+  assert.strictEqual(isPmListed(unlisted), false);
+  assert.strictEqual(categoryLabel(unlisted), 'labor');
+  // Retired AMH! sentinel name still reads as unlisted (backward-compat).
+  assert.strictEqual(isPmListed({ name: 'AMH!', agreement: 'AMH' }), false);
+  // General confirmed item -> labor/material, never a client label.
+  assert.strictEqual(categoryLabel({ name: 'Some Labor', agreement: 'General', category: 'material' }), 'material');
 });
 
 test('sentinel labels by action verb; verbless/Material- = material', () => {
-  assert.strictEqual(resolveBidLine('Replaced flush handle', 20, [], [], 'AMH').name, 'AMH!'); // verb -> AMH labor
+  assert.strictEqual(resolveBidLine('Replaced flush handle', 20, [], [], 'AMH').name, 'Labor!'); // verb -> unlisted labor
   assert.strictEqual(resolveBidLine('9 lbs R410A', 315, [], [], 'AMH').name, 'Materials!');
   assert.strictEqual(resolveBidLine('Material - new TXV valve', 250, [], [], 'AMH').name, 'Materials!');
 });

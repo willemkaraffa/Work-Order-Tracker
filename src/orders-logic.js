@@ -662,9 +662,13 @@ export function resolveBidLine(wording, price, clientCatalog, generalCatalog, ag
   const bidPrice = priceOf(price);
   const desc = String(wording || '').trim();
   const base = { desc, unitPrice: bidPrice, agreement };
-  // Per-agreement labor sentinel name. General -> Labor!; AMH -> AMH! (Premier-priced,
-  // inclusive, never taxed); MSR -> MSR! (divide-out). RazorSync maps AMH! -> Premier!.
-  const laborName = () => (agreement === 'AMH' ? 'AMH!' : agreement === 'MSR' ? 'MSR!' : 'Labor!');
+  // Unmatched labor sentinel is ALWAYS 'Labor!' now -- Labor!/Materials! are reserved
+  // for items NOT in the library (their true purpose). The client is carried on the
+  // line's `agreement`, which drives tax (catalogTax) AND the derived category label
+  // (categoryLabel: a CONFIRMED AMH/MSR item reads 'AMH'/'MSR'); the sentinel name no
+  // longer encodes the PM. Retiring AMH!/MSR! does NOT change any total (tax = agreement
+  // + taxable only). AMH labor still defaults non-taxable via catalogTax(agreement).
+  const laborName = () => 'Labor!';
   const sentinel = () => {
     // Service Call / Diagnostic / Emergency are ALWAYS taxed (both PMs) and are a
     // billable SERVICE (labor), not a material -- even though the wording is verbless
@@ -679,7 +683,10 @@ export function resolveBidLine(wording, price, clientCatalog, generalCatalog, ag
     // item's own taxable still wins on the confirm path.
     return { ...base, name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
   };
-  const confirm = (it) => ({ ...base, name: it.name, category: 'labor', taxable: !!it.taxable });
+  // Category from the bid wording (material vs labor), not hardcoded -- a CONFIRMED
+  // material (e.g. a General refrigerant line) must not read as labor. Tax is unaffected
+  // (driven by agreement + taxable); PM-listed lines display their client via categoryLabel.
+  const confirm = (it) => ({ ...base, name: it.name, category: isMaterialWording(desc) ? 'material' : 'labor', taxable: !!it.taxable });
   const suspectList = (items) => items.map(s => ({ name: s.name, price: priceOf(s.price) }));
   // Fixed-contract clients flag RED (price off the signed agreement); General drifts -> YELLOW.
   const clientFlag = (agreement === 'AMH' || agreement === 'MSR') ? 'red' : 'yellow';
@@ -783,17 +790,25 @@ export function reconcileMsrRow(row, match, bidItems) {
   // post = face. A non-taxable/material line: pre = post = face, tax = 0. The grand
   // total = sum(face) either way, so `computed` is unchanged from the raw sum.
   const invLines = items.map(it => ({
+    // `name` = the resolved library-canonical name (bidItemsToInvoiceLines set it);
+    // `desc` = the original bid wording. Carry both so Slice-3 persistence keeps the
+    // canonical name, not just the raw description.
+    name: String((it && it.name) || (it && it.desc) || ''),
     desc: String((it && it.desc) || ''),
     unitPrice: money(Number(it && it.unitPrice)),
     qty: Number(it && it.qty) > 0 ? Number(it.qty) : 1,
     taxable: !!(it && it.taxable),
+    // Carry the resolveBidLine identity flags so a billed invoice keeps the warning
+    // icon (FlagResolveModal) for a price-off / unconfirmed line the user should vet.
+    priceFlag: (it && it.priceFlag) || undefined,
+    suspects: (it && it.suspects) || undefined,
     agreement: 'MSR',
   }));
   const t = computeInvoiceTotals({ lineItems: invLines }, 'MSR');
   const lines = invLines.map((l, i) => {
     const post = money(l.unitPrice * l.qty);
     const pre = t.rows[i] ? t.rows[i].lineSubtotal : post;   // pre-tax (divide-out for taxable)
-    return { desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, pre, tax: money(post - pre), post };
+    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, priceFlag: l.priceFlag, suspects: l.suspects, pre, tax: money(post - pre), post };
   });
   const preTax = money(t.taxableSubtotal + t.nonTaxableSubtotal);
   const tax = t.tax;
@@ -820,6 +835,9 @@ export function reconcileMsrRow(row, match, bidItems) {
     woId: (row && row.woId) || '',
     invoiceNum: (row && row.invoiceNum) || '',
     propCode: (row && row.propCode) || '',
+    // Property ID for invoicing: from the matched order (scraper-set), MSR falls back to
+    // the remittance property code. AMH remittance PDFs carry no property id.
+    propertyId: (order && order.propertyId) || (row && row.propCode) || '',
     address: (order && order.address) || (row && row.addressRaw) || '',
     orderId: order ? order.id : null,
     matchBy: match ? match.matchBy : 'none',
@@ -896,10 +914,123 @@ export function reconcileAmhRow(row, match, apiItems, inclusiveTotal) {
     invoiceNum: (row && row.invoiceNum) || '',
     bidNum: (row && row.bidNum) || '',
     revisit: (row && row.revisit) || '',
+    // Property ID (from the matched order) — the AMH remittance PDF has none; invoicing needs it.
+    propertyId: (order && order.propertyId) || '',
     address: (order && order.address) || '',
     orderId: order ? order.id : null,
     matchBy: match ? match.matchBy : 'none',
     paid, preTax: subtotal, subtotal, tax, postTax: computed, computed, delta: money(computed - paid),
+    // taxFromBidAmount = tax came from the aggregate bid total, not per-line vendorTax
+    // (captured before the tax fix). Slice-3 persistence uses this to require a fresh
+    // "Fetch AMH items" before saving (a folded per-line invoice would be short the tax).
+    taxFromBidAmount,
     lines, status, flags,
   };
+}
+
+/* ---------- Slice 3: persist a reconciled block as a WO invoice ---------- */
+
+// Turn a reconcile report block (reconcileMsrRow / reconcileAmhRow output) into a
+// saveable WO invoice { number, date, lineItems } that computeInvoiceTotals
+// reproduces to the paid amount. Pure. source = 'amh' | 'msr'.
+//   MSR: keep the face unitPrice + taxable flag; MSR is a divide-out so the grand
+//        total = sum(face) = paid regardless (Core Truth #1).
+//   AMH: FOLD the per-line vendorTax into unitPrice and mark taxable:false -- AMH is
+//        NOT tax-inclusive in the invoice model, so a Premier line's paid amount
+//        (qty*unitPrice + vendorTax = block line `post`) must be carried as the price
+//        (Core Truth #2: present AMH lines non-taxable at the inclusive amount). This
+//        is exact only when per-line vendorTax was captured; an aggregate-fallback
+//        block (taxFromBidAmount) would be short the tax, so the caller must fetch
+//        fresh AMH items first.
+export function reconcileBlockToInvoice(block, source, dateIso) {
+  const lines = (block && Array.isArray(block.lines)) ? block.lines : [];
+  const isAmh = String(source) === 'amh';
+  const agreement = isAmh ? 'AMH' : 'MSR';
+  const lineItems = lines.map((l) => {
+    const qty = Number(l && l.qty) > 0 ? Number(l.qty) : 1;
+    const name = String((l && l.name) || (l && l.desc) || '').trim();
+    const desc = String((l && l.desc) || '').trim();
+    // Carry identity flags (MSR resolve suspects) so the editor lights the warning icon.
+    const flags = (l && l.priceFlag) ? { priceFlag: l.priceFlag, suspects: l.suspects } : {};
+    if (isAmh) {
+      const post = money(Number(l && (l.post != null ? l.post : (Number(l.unitPrice) * qty + Number(l.vendorTax || 0)))));
+      return { name, desc, qty, unitPrice: money(post / qty), category: 'labor', taxable: false, agreement, ...flags };
+    }
+    return { name, desc, qty, unitPrice: money(Number(l && l.unitPrice)), category: 'labor', taxable: !!(l && l.taxable), agreement, ...flags };
+  });
+  return {
+    number: String((block && block.invoiceNum) || '').trim(),
+    date: dateIso || new Date().toISOString().slice(0, 10),
+    lineItems,
+  };
+}
+
+/* ---------- Slice 5: recompute / refresh a saved invoice ---------- */
+
+// Re-run the derive pipeline over a SAVED invoice against the CURRENT service
+// library and repair drift. Pure. Auto-applies SAFE upgrades (a sentinel line that
+// now matches a library item -> its canonical name + taxable; a taxable-flag
+// correction) and FLAGS risky ones (a price-off suspect -> priceFlag, no rewrite).
+// A line marked edited:true is left untouched (manual-edit protection). The bid
+// PRICE is never changed (money rule); only identity/taxable snap. authoritativeTotal
+// (optional) = the paid/bid figure; when given, a grand-total mismatch > $0.005 is
+// reported in totalFlag. Returns { lines, changes:[{lineIdx,field,from,to}], totalDelta }.
+const SENTINELS = new Set(['AMH!', 'MSR!', 'Labor!', 'Materials!']);
+
+// A line is "PM-listed" when it is a CONFIRMED item from the AMH/MSR catalog (real
+// library name, not a sentinel). Such lines take their client as the category label
+// (derived from `agreement`, not stored) so the fuzzy labor/material heuristic runs
+// ONLY for General + unlisted items. Old saved invoices with the retired AMH!/MSR!
+// names are in SENTINELS, so they correctly read as unlisted (labor/material).
+export function isPmListed(line) {
+  const ag = line && line.agreement;
+  return (ag === 'AMH' || ag === 'MSR') && !SENTINELS.has(String((line && line.name) || ''));
+}
+// Category label for display: 'AMH'/'MSR' for a PM-listed line, else labor/material.
+export function categoryLabel(line) {
+  if (isPmListed(line)) return line.agreement;
+  return (line && line.category === 'material') ? 'material' : 'labor';
+}
+export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, defaultAgreement, authoritativeTotal) {
+  const saved = (savedInvoice && Array.isArray(savedInvoice.lineItems)) ? savedInvoice.lineItems : [];
+  const changes = [];
+  const before = computeInvoiceTotals({ lineItems: saved }, defaultAgreement).grandTotal;
+  const lines = saved.map((l, idx) => {
+    if (!l || l.edited) return l;   // honor manual-edit protection
+    const agreement = l.agreement || defaultAgreement;
+    // Re-resolve from the line's own wording (desc holds the bid text; fall back to name).
+    const wording = String(l.desc || l.name || '').trim();
+    const res = resolveBidLine(wording, Number(l.unitPrice), clientCatalog, generalCatalog, agreement);
+    const next = { ...l };
+    const resIsSentinel = SENTINELS.has(res.name);
+    const curIsSentinel = SENTINELS.has(String(l.name || ''));
+    const flagged = !!(res.priceFlag || res.suspects);
+    const change = (field, from, to) => { changes.push({ lineIdx: idx, field, from, to }); };
+    // Price-off suspect: surface the flag for review, NEVER auto-rewrite the money.
+    if (flagged && res.priceFlag && !l.priceFlag) { change('priceFlag', l.priceFlag || null, res.priceFlag); next.priceFlag = res.priceFlag; next.suspects = res.suspects; }
+    if (curIsSentinel) {
+      // UNLISTED / legacy line: the name is not identity-bearing, so normalize FREELY
+      // even under a price flag -- migrate a legacy AMH!/MSR! to Labor!/Materials! (or a
+      // confirmed canonical), re-derive labor/material category (fixes a material saved
+      // as labor, e.g. R410A), and re-derive taxable. Money is never touched.
+      if (res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
+      if (res.category && res.category !== l.category) { change('category', l.category, res.category); next.category = res.category; }
+      if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+    } else if (!flagged) {
+      // CONFIRMED real name, clean re-resolve: snap to the canonical library name + taxable;
+      // keep the stored category. Never clobber a real name with a sentinel (library item
+      // may have been removed) and never touch a price-flagged confirmed line.
+      if (!resIsSentinel && res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
+      if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+    }
+    return next;
+  });
+  const after = computeInvoiceTotals({ lineItems: lines }, defaultAgreement).grandTotal;
+  const totalDelta = money(after - before);
+  let totalFlag = null;
+  if (authoritativeTotal != null) {
+    const off = money(after - money(Number(authoritativeTotal)));
+    if (Math.abs(off) > 0.005) totalFlag = off;
+  }
+  return { lines, changes, totalDelta, totalFlag };
 }

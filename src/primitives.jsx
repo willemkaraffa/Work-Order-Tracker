@@ -117,9 +117,9 @@ export function StatusPill({ status, size = 'md' }) {
   );
 }
 
-export function ActionBtn({ children, primary, onClick, type = 'button', disabled, style: extraStyle }) {
+export function ActionBtn({ children, primary, onClick, type = 'button', disabled, title, style: extraStyle }) {
   return (
-    <button type={type} onClick={onClick} disabled={disabled} style={{
+    <button type={type} onClick={onClick} disabled={disabled} title={title} style={{
       height: 30, padding: '0 12px',
       border: primary ? '1px solid var(--accent)' : '1px solid var(--border-2)',
       background: primary ? 'var(--accent)' : 'var(--bg-surface)',

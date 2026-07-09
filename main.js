@@ -886,6 +886,94 @@ ipcMain.handle('parse-amh-remittance', async (_e, filePath) => {
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
+// Export a reconciled remittance report to an .xlsx invoice file in Downloads, named
+// [CLIENT]_[YYYY-MM-DD]_Invoice.xlsx. Fresh exceljs workbook (not a template re-serialize,
+// so exceljs writeFile is safe here). One row per line item, a bold WO subtotal row after
+// each WO. report = { source:'amh'|'msr', blocks:[reconcile blocks], statementTotal }.
+ipcMain.handle('export-remittance-xlsx', async (_e, report) => {
+  try {
+    const blocks = (report && Array.isArray(report.blocks)) ? report.blocks : [];
+    if (!blocks.length) return { ok: false, error: 'Nothing to export.' };
+    const client = String((report && report.source) || 'remittance').toUpperCase();
+    const date = new Date().toISOString().slice(0, 10);
+    const name = `${client}_${date}_Invoice.xlsx`;
+    const outPath = path.join(app.getPath('downloads'), name);
+
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Invoices');
+    ws.columns = [
+      { header: 'WO', key: 'wo', width: 12 },
+      { header: 'Property ID', key: 'prop', width: 14 },
+      { header: 'Invoice #', key: 'inv', width: 18 },
+      { header: 'Address', key: 'addr', width: 34 },
+      { header: 'Item', key: 'item', width: 54 },
+      { header: 'Qty', key: 'qty', width: 6 },
+      { header: 'Pre-tax', key: 'pre', width: 12 },
+      { header: 'Tax', key: 'tax', width: 10 },
+      { header: 'Post-tax', key: 'post', width: 12 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    ws.views = [{ state: 'frozen', ySplit: 1 }];   // keep the header visible on scroll
+    const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    // Group per WO: header fields (WO/PropID/Invoice/Address) appear ONCE on the first
+    // row of the block (blank on the item rows below -- no duplicated columns), a bold
+    // WO-total row closes it, a per-WO background tint + box border delineate the entry,
+    // and a blank spacer row separates WOs. Tint alternates so adjacent WOs are distinct.
+    let tintToggle = false;
+    for (const b of blocks) {
+      const wo = b.orderId || b.woId || '';
+      const prop = b.propertyId || b.propCode || '';
+      const lines = Array.isArray(b.lines) ? b.lines : [];
+      const tint = tintToggle ? 'FFEFF3F8' : 'FFFFFFFF';   // subtle blue-gray / white
+      tintToggle = !tintToggle;
+      const blockRows = [];
+      for (const l of lines) {
+        blockRows.push(ws.addRow({
+          // One "Item" column (Description dropped -- it duplicated the name). A sentinel
+          // name (Labor!/Materials!/AMH!/MSR!, all end in '!') is an internal token, so use
+          // the real bid wording there; a confirmed line shows its canonical library name.
+          item: /!$/.test(l.name || '') ? (l.desc || l.name || '') : (l.name || l.desc || ''),
+          qty: l.qty || 1, pre: money(l.pre), tax: money(l.tax), post: money(l.post),
+        }));
+      }
+      const sub = ws.addRow({
+        item: 'WO TOTAL (' + String(b.status || '').toUpperCase() + ') — Paid ' + money(b.paid).toFixed(2),
+        pre: money(b.preTax != null ? b.preTax : b.computed), tax: money(b.tax), post: money(b.postTax != null ? b.postTax : b.computed),
+      });
+      sub.font = { bold: true };
+      blockRows.push(sub);
+      // WO header fields on the FIRST row of the block only (falls on the total row if
+      // the WO has no line items, e.g. unavailable/no-bid-sheet).
+      const head = blockRows[0];
+      head.getCell('wo').value = wo;
+      head.getCell('prop').value = prop;
+      head.getCell('inv').value = b.invoiceNum || '';
+      head.getCell('addr').value = b.address || '';
+      head.getCell('wo').font = { bold: true };
+      // Tint + box border across the block.
+      const firstNum = blockRows[0].number, lastNum = sub.number;
+      for (let rn = firstNum; rn <= lastNum; rn++) {
+        const row = ws.getRow(rn);
+        for (let c = 1; c <= 9; c++) {
+          const cell = row.getCell(c);
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rn === lastNum ? 'FFDCE3EC' : tint } };
+          const border = {};
+          if (rn === firstNum) border.top = { style: 'thin', color: { argb: 'FF8A94A6' } };
+          if (rn === lastNum) border.bottom = { style: 'medium', color: { argb: 'FF8A94A6' } };
+          if (c === 1) border.left = { style: 'thin', color: { argb: 'FF8A94A6' } };
+          if (c === 9) border.right = { style: 'thin', color: { argb: 'FF8A94A6' } };
+          cell.border = border;
+        }
+      }
+      ws.addRow({});   // blank spacer row between WOs
+    }
+    for (const col of ['pre', 'tax', 'post']) ws.getColumn(col).numFmt = '$#,##0.00';
+    await wb.xlsx.writeFile(outPath);
+    return { ok: true, path: outPath, name };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.
@@ -1015,6 +1103,20 @@ ipcMain.handle('capture-wo', async (_e, woData) => {
   try {
     const results = await runAmhCapture([woNum], amhCredential());
     return results[woNum] || { ok: false, error: `WO ${woNum} not returned by AMH scraper.` };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Batch: capture a SPECIFIC set of AMH WOs in ONE login (remittance "Fetch all
+// AMH items"). woDatas = array of records; MSR entries are skipped. Returns
+// { ok, results } keyed by WO number (same contract as capture-all-amh).
+ipcMain.handle('capture-wos', async (_e, woDatas) => {
+  const nums = (Array.isArray(woDatas) ? woDatas : [])
+    .filter(w => String((w && w.pm) || '').toUpperCase() === 'AMH')
+    .map(woNumberOf).filter(Boolean);
+  if (!nums.length) return { ok: false, error: 'No AMH work orders to fetch.' };
+  try {
+    const results = await runAmhCapture(nums, amhCredential());
+    return { ok: true, results };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 

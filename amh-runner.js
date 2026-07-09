@@ -10,12 +10,18 @@ const { app } = require('electron');
 // Resolve interpreter + script. Packaged: bundled embeddable Python + script
 // under resources/. Dev: system python + repo script.
 function pythonPaths() {
+  // Use pythonW.exe (console-LESS) on Windows: Electron is a GUI process with no
+  // console, so spawning python.exe (a console subsystem app) gives it a NEW black
+  // console window for the whole capture, and Node's windowsHide is unreliable in the
+  // no-console-parent case. pythonw round-trips the piped stdin/stdout scrape protocol
+  // fine (proven). Paired with scrape_amh.py --headless=old (which drops the layered
+  // DirectComposition overlay), this leaves NO visible surface during capture.
   if (app.isPackaged) {
     const res = process.resourcesPath;
-    return { python: path.join(res, 'python', 'python.exe'),
+    return { python: path.join(res, 'python', 'pythonw.exe'),
              script: path.join(res, 'scrape_amh.py') };
   }
-  return { python: process.platform === 'win32' ? 'python' : 'python3',
+  return { python: process.platform === 'win32' ? 'pythonw' : 'python3',
            script: path.join(__dirname, 'scrape_amh.py') };
 }
 

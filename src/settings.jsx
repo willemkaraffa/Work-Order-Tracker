@@ -1521,7 +1521,7 @@ function AlertsSection({ thresholds, setThresholds, overdueCfg, setOverdueCfg })
 // per type, a { selected, weight } cell (weight disabled unless selected).
 // Routing (slice 5) reads techJobTypes[tech][wo.type].
 const TRADE_WEIGHTS = ['low', 'med', 'high'];
-function TradesSection({ types, setTypes, mapTypeColors, setMapTypeColors, techJobTypes, setTechJobTypes, techs, techColors, setTechColors }) {
+function TradesSection({ types, setTypes, mapTypeColors, setMapTypeColors, techJobTypes, setTechJobTypes, techs, setTechs, techColors, setTechColors }) {
   const list = (types || []).filter(Boolean);
   const [editingTypeIdx, setEditingTypeIdx] = React.useState(null);
   const [editingTechIdx, setEditingTechIdx] = React.useState(null);

@@ -56,8 +56,9 @@ test('material-keyword line -> Materials! sentinel + material category', () => {
 test('action-verb line -> per-PM labor sentinel + labor category', () => {
   const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
   // lines[2] = "Labor replace the indoor unit condensate drain pan" (verb "replace").
-  // AMH labor sentinel is AMH! (not the General Labor!).
-  assert.strictEqual(lines[2].name, 'AMH!');
+  // Unlisted labor sentinel is always Labor! now (client carried on agreement).
+  assert.strictEqual(lines[2].name, 'Labor!');
+  assert.strictEqual(lines[2].agreement, 'AMH');
   assert.strictEqual(lines[2].category, 'labor');
 });
 
@@ -65,7 +66,7 @@ test('service-call line -> per-PM labor sentinel + ALWAYS taxable (core truth #3
   const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
   // lines[0] = "HVAC - Service Call": verbless, but Service Call/Diagnostic/Emergency
   // are forced to labor + taxable even on an AMH WO (whose default is non-taxable).
-  assert.strictEqual(lines[0].name, 'AMH!');
+  assert.strictEqual(lines[0].name, 'Labor!');
   assert.strictEqual(lines[0].category, 'labor');
   assert.strictEqual(lines[0].taxable, true);
 });
@@ -119,9 +120,9 @@ test('non-AMH labor miss -> taxable true; material miss -> false', () => {
 test('AMH miss: Premier items NEVER taxed except service call (core truths #2/#3)', () => {
   const lines = bidItemsToInvoiceLines(WO9767507, [], 'AMH');
   assert.strictEqual(lines[0].taxable, true);    // "HVAC - Service Call" -> ALWAYS taxed
-  assert.strictEqual(lines[1].name, 'AMH!');     // "Clear condensate drain line" (verb)
-  assert.strictEqual(lines[1].taxable, false);   // AMH Premier labor -> inclusive, not taxed
-  assert.strictEqual(lines[2].name, 'AMH!');     // "Labor replace..." -> AMH! labor sentinel
+  assert.strictEqual(lines[1].name, 'Labor!');   // "Clear condensate drain line" (verb)
+  assert.strictEqual(lines[1].taxable, false);   // AMH Premier labor -> inclusive, not taxed (agreement default)
+  assert.strictEqual(lines[2].name, 'Labor!');   // "Labor replace..." -> unlisted labor sentinel
   assert.strictEqual(lines[2].taxable, false);   // AMH Premier labor -> not taxed
   assert.strictEqual(lines[3].name, 'Materials!');
   assert.strictEqual(lines[3].taxable, false);   // "Material-..." -> material, not taxed

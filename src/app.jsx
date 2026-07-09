@@ -11,6 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
+  recomputeInvoice,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -4441,20 +4442,18 @@ function App() {
                        : opts.provider === 'photon' ? 'photon'
                        : 'nominatim'; // locationiq + nominatim share response shape
             const expectedCity = splitAddress(nextWO).city || '';
+            // Geocode logs run per attempt across the whole batch -> console spam. Gate
+            // behind window.__geoDebug so the diagnostic is available on demand, off by default.
+            const glog = (...a) => { if (typeof window !== 'undefined' && window.__geoDebug) console.log('[geocode]', nextWO.id, label, ...a); };
             try {
               const r = await fetch(url, { headers: { 'Accept-Language': 'en' } });
-              if (!r.ok) {
-                console.log('[geocode]', nextWO.id, label, 'HTTP', r.status, url);
-                return null;
-              }
+              if (!r.ok) { glog('HTTP', r.status, url); return null; }
               const data = await r.json();
               const result = evaluate(data, kind, expectedCity);
-              console.log('[geocode]', nextWO.id, label,
-                result ? (result.suspect ? 'SUSPECT ' + result.reasons.join('|') : 'ok') : 'NO_RESULT',
-                url);
+              glog(result ? (result.suspect ? 'SUSPECT ' + result.reasons.join('|') : 'ok') : 'NO_RESULT', url);
               return result;
             } catch (e) {
-              console.log('[geocode]', nextWO.id, label, 'EXCEPTION', e.message, url);
+              glog('EXCEPTION', e.message, url);
               return null;
             }
           };
@@ -4912,6 +4911,68 @@ function App() {
     toast('Invoice saved');
   }, [orders, updateOrder, toast]);
 
+  // Slice 5 bulk: re-derive EVERY saved invoice against the current service library
+  // (snap sentinel lines to canonical names + re-derive taxable; keep edited lines +
+  // bid prices). Pure recomputeInvoice per WO; only writes WOs that actually drifted.
+  // MSR/General work off the saved lines; AMH names snap too (fresh bidItems come from
+  // a per-WO Fetch, not this bulk pass).
+  const refreshAllInvoices = React.useCallback(async () => {
+    let lib = { General: [], AMH: [], MSR: [] };
+    try {
+      const r = window.storage && await window.storage.get('service_library');
+      const v = r && r.value;
+      if (v && typeof v === 'object') lib = { General: [], AMH: [], MSR: [], ...v };
+    } catch { /* keep empty library */ }
+    const tabOf = (pm) => { const u = String(pm || '').toUpperCase(); return u === 'AMH' ? 'AMH' : u === 'MSR' ? 'MSR' : 'General'; };
+    let changed = 0, withInvoice = 0;
+    for (const o of orders) {
+      if (o.deleted || !o.invoice || !Array.isArray(o.invoice.lineItems) || !o.invoice.lineItems.length) continue;
+      withInvoice++;
+      const tab = tabOf(o.pm);
+      const client = Array.isArray(lib[tab]) ? lib[tab] : [];
+      const gen = tab !== 'General' && Array.isArray(lib.General) ? lib.General : null;
+      const { lines, changes } = recomputeInvoice(o.invoice, client, gen, tab);
+      if (!changes.length) continue;
+      changed++;
+      updateOrder(o.id, cur => ({
+        ...cur,
+        invoice: { ...cur.invoice, lineItems: lines },
+        history: [...(Array.isArray(cur.history) ? cur.history : []),
+                  { ts: Date.now(), action: 'invoice recomputed', detail: changes.length + ' line(s)' }],
+      }));
+    }
+    // Distinguish "nothing drifted" from "nothing to do" -- most billing-queue WOs
+    // have no SAVED invoice yet (bid only), so recompute has nothing to act on.
+    if (changed) toast('Refreshed ' + changed + ' of ' + withInvoice + ' saved invoice(s)');
+    else if (withInvoice) toast('All ' + withInvoice + ' saved invoice(s) already current');
+    else toast('No saved invoices to recompute -- open a WO and Save an invoice first');
+  }, [orders, updateOrder, toast]);
+
+  // Bill a batch of WOs from a verified remittance: write each reconciled invoice
+  // (fill empty OR overwrite existing -- the paid remittance is authoritative) in one
+  // pass, one toast. Flagged (suspect) lines persist so the user vets them in the
+  // editor. Reuses updateOrder; the remittance module built the invoices.
+  const billInvoices = React.useCallback((entries, opts) => {
+    const list = Array.isArray(entries) ? entries : [];
+    const fillEmptyOnly = !!(opts && opts.fillEmptyOnly);   // auto-bill: never clobber a saved invoice
+    const silent = !!(opts && opts.silent);                 // auto-bill toasts on the caller side
+    let n = 0;
+    for (const e of list) {
+      if (!e || !e.id || !e.invoice) continue;
+      const cur = orders.find(o => o.id === e.id);
+      if (fillEmptyOnly && cur && cur.invoice && Array.isArray(cur.invoice.lineItems) && cur.invoice.lineItems.length) continue;
+      updateOrder(e.id, prev => ({
+        ...prev,
+        invoice: e.invoice,
+        history: [...(Array.isArray(prev.history) ? prev.history : []),
+                  { ts: Date.now(), action: 'invoice billed from remittance', detail: e.invoice.number || '' }],
+      }));
+      n++;
+    }
+    if (!silent) toast(n ? 'Billed ' + n + ' WO(s) from the remittance' : 'Nothing to bill');
+    return n;
+  }, [orders, updateOrder, toast]);
+
   // Clear a saved invoice so the WO re-autofills fresh next open (picks up corrected
   // tax rules / re-seeded library). Strips order.invoice; bidItems are untouched.
   const clearInvoice = React.useCallback((id) => {
@@ -5311,6 +5372,42 @@ function App() {
     }).catch(e => toast('Capture error: ' + e.message))
       .finally(() => setCaptureStatus(null));
   }, [orders, applyCapture, toast]);
+
+  // On-demand single-WO AMH re-fetch for the remittance report: re-capture THIS WO
+  // (proven captureWO path) so its bidItems carry per-line vendorTax, merge in place
+  // (applyCapture), and RETURN the raw result so the caller can re-reconcile that
+  // block immediately with the fresh data (no wait for state to settle). Aged-out
+  // WOs (outside the 100-order API window) come back not-ok -> caller surfaces it.
+  const captureAmhItems = React.useCallback((order) => {
+    if (!order) return Promise.resolve({ ok: false, error: 'no order' });
+    if (!window.scraper || !window.scraper.captureWO) return Promise.resolve({ ok: false, error: 'Capture is only available in the desktop app' });
+    return window.scraper.captureWO(order).then(res => {
+      if (res && res.ok) applyCapture(order.id, res);
+      return res;
+    }).catch(e => ({ ok: false, error: e.message }));
+  }, [applyCapture]);
+
+  // Batch AMH re-fetch for the remittance report: re-capture a SET of WOs in ONE
+  // Edge login (vs one login per WO). Merges each in place (applyCapture) and returns
+  // { ok, woByNum } so the caller re-reconciles each block with the fresh data. Aged-out
+  // WOs simply don't come back in the results map.
+  const captureAmhItemsBatch = React.useCallback(async (orderList) => {
+    if (!window.scraper || !window.scraper.captureWOs) return { ok: false, error: 'Capture is only available in the desktop app' };
+    const list = (Array.isArray(orderList) ? orderList : []).filter(Boolean);
+    if (!list.length) return { ok: false, error: 'No AMH work orders to fetch' };
+    const numOf = o => String(o.woId || o.id || '').replace(/^WO-/i, '').trim();
+    const byNum = new Map(list.map(o => [numOf(o), o.id]));
+    let resp;
+    try { resp = await window.scraper.captureWOs(list.map(o => ({ id: o.id, woId: o.woId, pm: o.pm }))); }
+    catch (e) { return { ok: false, error: e.message }; }
+    if (!resp || !resp.ok) return resp || { ok: false, error: 'batch fetch failed' };
+    const woById = {};   // keyed by order.id so the caller re-reconciles by block.orderId
+    for (const [num, res] of Object.entries(resp.results || {})) {
+      const key = String(num).replace(/^WO-/i, '').trim();
+      if (res && res.ok && byNum.has(key)) { const id = byNum.get(key); applyCapture(id, res); woById[id] = res.wo; }
+    }
+    return { ok: true, results: resp.results, woById };
+  }, [applyCapture]);
 
   // "Go to folder": ensure the OneDrive folder tree (+ MSR bid sheet) exists, then open
   // it. Merges the old separate "Create folder" — one action creates-if-missing + opens.
@@ -5967,9 +6064,10 @@ function App() {
               selectedId={selectedWO}
               onOpenInvoice={openInvoiceEditor}
               onWoAction={woAction}
+              onRefreshAll={refreshAllInvoices}
             />
           ) : currentModule === 'remittances' ? (
-            <RemittancesModule orders={orders} toast={toast} />
+            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}

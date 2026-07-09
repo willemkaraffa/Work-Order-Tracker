@@ -8,7 +8,7 @@ import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches,
-  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall } from './orders-logic.js';
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
@@ -484,9 +484,22 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const setLine = (idx, patch) => setLines(ls => ls.map((l, i) => i === idx ? { ...l, ...patch } : l));
+  // edited:true marks a line the USER touched (Slice 5 manual-edit protection) so a
+  // later Recompute skips it. Every manual mutator (typing, pickName, flag-resolve)
+  // routes through setLine; recompute writes setLines directly, so it never self-marks.
+  const setLine = (idx, patch) => setLines(ls => ls.map((l, i) => i === idx ? { ...l, ...patch, edited: true } : l));
   const removeLine = (idx) => setLines(ls => ls.length > 1 ? ls.filter((_, i) => i !== idx) : ls);
   const addLine = () => setLines(ls => [...ls, blankLine()]);
+
+  // Slice 5: recompute this invoice against the CURRENT library -- snap sentinel lines
+  // to their now-matching canonical name + re-derive taxable, flag price drift, keep
+  // manual (edited) lines + the bid price. In-editor (not saved until Save invoice).
+  const [recomputeMsg, setRecomputeMsg] = React.useState(null);
+  const recompute = () => {
+    const { lines: next, changes } = recomputeInvoice({ lineItems: lines }, catalog, generalCatalog, tabName);
+    setLines(next.map(li => ({ ...blankLine(), ...li })));
+    setRecomputeMsg(changes.length ? changes.length + ' line(s) updated -- review, then Save' : 'No changes -- already current');
+  };
 
   // Slice 2: price-flag resolution. flagIdx = the line whose badge modal is open.
   // Apply writes the edited fields AND clears the flag; Dismiss just clears it.
@@ -535,6 +548,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
         category: l.category === 'material' ? 'material' : 'labor',
         taxable: !!l.taxable,
         agreement: l.agreement || tabName,
+        ...(l.edited ? { edited: true } : {}),   // Slice 5: honor manual-edit protection on recompute
       }));
     if (!clean.length) { onSave && onSave(null, 'Add at least one line item'); return; }
     onSave && onSave({ number: String(number).trim(), date, lineItems: clean });
@@ -575,6 +589,11 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
           WO {(order && order.id) || ''} · {pm || 'no PM'}{order && order.address ? ' · ' + order.address : ''}
         </div>
         <div style={{ flex: 1 }} />
+        {recomputeMsg && <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{recomputeMsg}</span>}
+        <button onClick={recompute} title="Re-derive line names + taxable from the current library (keeps edited lines and bid prices)"
+          style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
+          border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
+          fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Recompute</button>
         {order && order.invoice && onClear && (
           <button onClick={() => { if (window.confirm('Clear the saved invoice for this WO? Line items are discarded; reopen to re-autofill from the bid.')) onClear(); }}
             style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
@@ -653,11 +672,22 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
                     style={{ ...inputStyle, width: '100%' }} />
                 </td>
                 <td style={{ padding: '4px 6px' }}>
-                  <select value={l.category} onChange={(e) => setLine(i, { category: e.target.value })}
-                    style={{ ...inputStyle, width: '100%' }}>
-                    <option value="labor">Labor</option>
-                    <option value="material">Material</option>
-                  </select>
+                  {/* PM-listed (confirmed AMH/MSR) lines show their client as the
+                      category, locked -- their tax is governed by the agreement, so the
+                      labor/material distinction is irrelevant and only invites error.
+                      General + unlisted lines keep the editable labor/material select. */}
+                  {isPmListed(l) ? (
+                    <div title="AMH/MSR listed item -- category set by client agreement" style={{
+                      ...inputStyle, width: '100%', display: 'flex', alignItems: 'center',
+                      color: 'var(--text-3)', background: 'var(--bg-surface)', cursor: 'default',
+                    }}>{l.agreement}</div>
+                  ) : (
+                    <select value={l.category} onChange={(e) => setLine(i, { category: e.target.value })}
+                      style={{ ...inputStyle, width: '100%' }}>
+                      <option value="labor">Labor</option>
+                      <option value="material">Material</option>
+                    </select>
+                  )}
                 </td>
                 <td style={{ padding: '4px 6px' }}>
                   <input type="number" min="1" step="1" value={l.qty}
@@ -728,7 +758,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
 // ── Invoices module (slice 3) ─────────────────────────────────────────────────
 // change11: Billing-queue view shows tab='sent' WOs only. Row click opens the
 // invoice editor for that WO. Shows recorded invoice # + grand total when present.
-export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId, onOpenInvoice, onWoAction }) {
+export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId, onOpenInvoice, onWoAction, onRefreshAll }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [query, setQuery] = React.useState('');
   // change11: status filter dropped (only 'sent' exists now). Aging filter
@@ -809,6 +839,12 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
           <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
             Invoices
           </div>
+          {onRefreshAll && (
+            <button onClick={onRefreshAll} title="Re-derive every saved invoice from the current library (snap names + taxable, keep edited lines + prices)"
+              style={{ height: 30, padding: '0 12px', borderRadius: 7, cursor: 'pointer', marginLeft: 8,
+              border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
+              fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Refresh all</button>
+          )}
           <div style={{
             flex: '1 1 200px', minWidth: 140, maxWidth: 360, marginLeft: 12,
             height: 30, border: '1px solid var(--border-1)', borderRadius: 8,
