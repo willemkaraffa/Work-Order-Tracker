@@ -226,7 +226,10 @@ def extract_bids(order: dict, remedy_map: dict):
                 continue
             if any(x["name"].lower() == name.lower() for x in items):
                 continue
-            items.append({"name": name, "qty": qty, "price": unit_price})
+            # Keep vendorTax per line (the reference amh_remittance_scraper.py uses it):
+            # AMH pays qty*unitPrice + vendorTax, so the remittance reconcile needs the
+            # per-line tax, not just the inclusive bidTotal. price stays the pre-tax unit.
+            items.append({"name": name, "qty": qty, "price": unit_price, "vendorTax": round(vendor_tax, 2)})
             total += round(qty * unit_price + vendor_tax, 2)
     return items, round(total, 2)
 

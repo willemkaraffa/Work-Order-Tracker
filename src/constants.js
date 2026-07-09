@@ -20,10 +20,12 @@ export const DEFAULT_PMS = [
 //        resolveBidLine + present as taxable:true library items). See core truths in
 //        roadmap-handoffs/invoice-generation.md.
 //   MSR  DIVIDE-OUT: prices are tax-inclusive, so a TAXABLE MSR line divides the tax
-//        back out (grand = face). MSR sheets are tax-included by default, so items are
-//        NOT marked taxable (per-item taxable comes from the Col C scope prose at seed
-//        time; see library_io.parseMsr). Either way grand = face = paid (flag is
-//        total-invariant under divide-out).
+//        back out (grand = face). CATALOG items carry a per-item taxable from their Col C
+//        scope prose (installs that state "applicable taxes" -> false; services -> true;
+//        materials -> false; see library_io.parseMsr). An UNMATCHED custom line defaults
+//        by kind: LABOR/service -> taxable (defaultLaborTaxable true), MATERIAL -> false.
+//        Divide-out makes grand = face = paid either way (flag is total-invariant; it only
+//        drives the reported tax split).
 //   General  Gamble's own RazorSync catalog -- pre-tax; sales tax added on top.
 // Fields:
 //   taxableInclusive     a TAXABLE line's price already includes tax -> divide it
@@ -35,7 +37,7 @@ export const DEFAULT_PMS = [
 export const CATALOG_TAX = {
   General: { taxableInclusive: false, defaultLaborTaxable: true },
   AMH:     { taxableInclusive: false, defaultLaborTaxable: false },
-  MSR:     { taxableInclusive: true,  defaultLaborTaxable: false },
+  MSR:     { taxableInclusive: true,  defaultLaborTaxable: true },
 };
 const DEFAULT_CATALOG_TAX = { taxableInclusive: false, defaultLaborTaxable: true };
 export function catalogTax(name) { return CATALOG_TAX[String(name || '')] || DEFAULT_CATALOG_TAX; }

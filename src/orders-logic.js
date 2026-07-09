@@ -636,7 +636,11 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
 // carries a true verb (clear/replace/clean the drain) and stays Labor.
 const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap)\w*/i;
 function isMaterialWording(desc) {
-  if (/^\s*material\s*[-:]/i.test(desc)) return true;
+  // A line LEADING with "Material"/"Materials" is a material (non-taxable), whatever
+  // follows -- user rule: bias combined "Material to replace ..." lines to material; the
+  // rare combined labor+material line is fixed at invoicing. "Labor..." leads as labor.
+  if (/^\s*materials?\b/i.test(desc)) return true;
+  if (/^\s*labor\b/i.test(desc)) return false;
   return !ACTION_VERB.test(desc);
 }
 
@@ -773,14 +777,27 @@ export function matchMsrRow(row, orders) {
 export function reconcileMsrRow(row, match, bidItems) {
   const paid = money(Number(row && row.amount));
   const items = Array.isArray(bidItems) ? bidItems : [];
-  const lines = items.map(it => ({
+  // Per-line tax breakdown via the tested money core. `taxable` comes from the caller
+  // (the module resolves it against the MSR library); MSR is a divide-out, so a taxable
+  // line's face price already includes 7.25% -> pre = face/1.0725, tax = face - pre,
+  // post = face. A non-taxable/material line: pre = post = face, tax = 0. The grand
+  // total = sum(face) either way, so `computed` is unchanged from the raw sum.
+  const invLines = items.map(it => ({
     desc: String((it && it.desc) || ''),
     unitPrice: money(Number(it && it.unitPrice)),
     qty: Number(it && it.qty) > 0 ? Number(it.qty) : 1,
+    taxable: !!(it && it.taxable),
+    agreement: 'MSR',
   }));
-  let computed = 0;
-  for (const l of lines) computed += l.unitPrice * l.qty;
-  computed = money(computed);
+  const t = computeInvoiceTotals({ lineItems: invLines }, 'MSR');
+  const lines = invLines.map((l, i) => {
+    const post = money(l.unitPrice * l.qty);
+    const pre = t.rows[i] ? t.rows[i].lineSubtotal : post;   // pre-tax (divide-out for taxable)
+    return { desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, pre, tax: money(post - pre), post };
+  });
+  const preTax = money(t.taxableSubtotal + t.nonTaxableSubtotal);
+  const tax = t.tax;
+  const computed = t.grandTotal;
   const order = match && match.order;
   const flags = [];
   let status;
@@ -806,7 +823,7 @@ export function reconcileMsrRow(row, match, bidItems) {
     address: (order && order.address) || (row && row.addressRaw) || '',
     orderId: order ? order.id : null,
     matchBy: match ? match.matchBy : 'none',
-    paid, computed, delta: money(computed - paid),
+    paid, preTax, tax, postTax: computed, computed, delta: money(computed - paid),
     lines, status, flags,
   };
 }
@@ -821,25 +838,40 @@ export const matchAmhRow = matchMsrRow;
 // AMH Premier prices are tax-INCLUSIVE (Core Truth #2): the reconcile line AMOUNT =
 // qty*unitPrice + vendorTax (the figure AMH actually pays), presented taxable:FALSE --
 // EXCEPT service call / diagnostic / emergency, which are taxable (Core Truth #3).
-// apiItems = [{name, desc, unitPrice, vendorTax, qty}] from the AMH API (the Slice-2
-// itemize; live-gated). A WO that aged out of the 100-order API window returns no items
-// -> status 'unavailable' (NOT an error). match = matchAmhRow output.
-export function reconcileAmhRow(row, match, apiItems) {
+// apiItems = [{name, qty, unitPrice/price, vendorTax}] from the captured AMH bid
+// (scrape_amh.extract_bids). Each line's AMH-paid amount = qty*unitPrice + vendorTax
+// (the reference amh_remittance_scraper.py mechanism). inclusiveTotal = the WO's
+// authoritative tax-INCLUSIVE bid total (order.bidAmount, which capture already stores
+// as sum(qty*unitPrice + vendorTax)); it is the fallback when a WO was captured BEFORE
+// vendorTax was carried per line (its lines sum pre-tax). A WO with no items -> status
+// 'unavailable' (aged out). match = matchAmhRow output.
+export function reconcileAmhRow(row, match, apiItems, inclusiveTotal) {
   const paid = money(Number(row && row.amount));
   const items = Array.isArray(apiItems) ? apiItems : [];
+  let subtotal = 0, perLineTax = 0;
   const lines = items.map(it => {
     const qty = Number(it && it.qty) > 0 ? Number(it.qty) : 1;
-    const unit = money(Number(it && it.unitPrice));
+    const unit = money(Number(it && (it.unitPrice != null ? it.unitPrice : it.price)));
     const vtax = money(Number(it && it.vendorTax));
     const name = String((it && it.name) || '');
     const desc = String((it && (it.desc || it.name)) || '');
     // AMH inclusive -> non-taxable, EXCEPT service call / diagnostic / emergency.
     const taxable = SERVICE_TAXABLE_RE.test(name) || SERVICE_TAXABLE_RE.test(desc);
-    return { name, desc, qty, unitPrice: unit, vendorTax: vtax, amount: money(unit * qty + vtax), taxable };
+    subtotal += unit * qty; perLineTax += vtax;
+    const pre = money(unit * qty);
+    return { name, desc, qty, unitPrice: unit, vendorTax: vtax, pre, tax: vtax, post: money(pre + vtax), amount: money(pre + vtax), taxable };
   });
-  let computed = 0;
-  for (const l of lines) computed += l.amount;
-  computed = money(computed);
+  subtotal = money(subtotal);
+  // Tax: prefer the summed per-line vendorTax (exact, post-fix captures). If it is zero
+  // but the authoritative inclusive total exceeds the pre-tax subtotal, the WO was
+  // captured before per-line vendorTax was stored -> derive the aggregate tax from
+  // bidAmount so the total still matches the remittance (hard rule). Flag it so the
+  // user knows to re-capture for the per-line split.
+  let tax = money(perLineTax);
+  let taxFromBidAmount = false;
+  const inc = inclusiveTotal != null ? money(Number(inclusiveTotal)) : null;
+  if (tax === 0 && inc != null && inc - subtotal > 0.005) { tax = money(inc - subtotal); taxFromBidAmount = true; }
+  const computed = money(subtotal + tax);
   const order = match && match.order;
   const flags = [];
   let status;
@@ -851,6 +883,7 @@ export function reconcileAmhRow(row, match, apiItems) {
     flags.push('No AMH bid items retrieved (WO likely aged out of the 100-order API window) -- needs AMH history access; enter items manually.');
   } else if (Math.abs(computed - paid) < 0.005) {
     status = 'match';
+    if (taxFromBidAmount) flags.push('Per-line tax not stored (captured before the tax fix) -- tax ' + tax.toFixed(2) + ' taken from the approved bid total. Re-capture this AMH WO for the per-line split.');
   } else {
     status = 'off';
     flags.push('Computed ' + computed.toFixed(2) + ' vs paid ' + paid.toFixed(2) + ' (off ' + money(computed - paid).toFixed(2) + ').');
@@ -866,7 +899,7 @@ export function reconcileAmhRow(row, match, apiItems) {
     address: (order && order.address) || '',
     orderId: order ? order.id : null,
     matchBy: match ? match.matchBy : 'none',
-    paid, computed, delta: money(computed - paid),
+    paid, preTax: subtotal, subtotal, tax, postTax: computed, computed, delta: money(computed - paid),
     lines, status, flags,
   };
 }

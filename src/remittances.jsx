@@ -6,8 +6,8 @@
 // Slice 4. AMH is Slice 2 (portal API). Shared helpers import from app.jsx.
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
-import { HeaderChips } from './app.jsx';
-import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow } from './orders-logic.js';
+import { HeaderChips, useServiceLibraryStore } from './app.jsx';
+import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow, bidItemsToInvoiceLines } from './orders-logic.js';
 
 const STATUS_STYLE = {
   match:      { label: 'MATCH',        fg: '#065f46', bg: 'rgba(16,185,129,0.15)' },
@@ -21,6 +21,10 @@ export function RemittancesModule({ orders, toast }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [report, setReport] = React.useState(null);   // { blocks, statementTotal, fileName } | null
   const [loading, setLoading] = React.useState(false);
+  // Service library drives MSR per-line taxable (via the resolveBidLine matcher), so the
+  // divide-out tax breakdown is accurate. May be null while loading -> lines fall back to
+  // non-taxable (tax 0), total still matches (MSR grand = face regardless).
+  const [lib] = useServiceLibraryStore();
 
   const run = React.useCallback(async (source) => {
     const api = source === 'amh'
@@ -47,11 +51,16 @@ export function RemittancesModule({ orders, toast }) {
         blocks = rows.map((row) => {
           const match = matchAmhRow(row, orders);
           const bid = (match.order && Array.isArray(match.order.bidItems)) ? match.order.bidItems : [];
-          const items = bid.map(b => ({ name: String((b && b.name) || ''), unitPrice: b && b.price, vendorTax: 0, qty: b && b.qty }));
-          return reconcileAmhRow(row, match, items);
+          const items = bid.map(b => ({ name: String((b && b.name) || ''), unitPrice: b && b.price, vendorTax: (b && b.vendorTax) || 0, qty: b && b.qty }));
+          // order.bidAmount = the authoritative tax-inclusive bid total; used as the tax
+          // fallback for WOs captured before per-line vendorTax was stored.
+          const inclusive = match.order ? parseFloat(String(match.order.bidAmount || '').replace(/[^0-9.]/g, '')) : null;
+          return reconcileAmhRow(row, match, items, Number.isFinite(inclusive) ? inclusive : null);
         });
       } else {
         // MSR itemize = the WO folder bid sheet(s), read per-WO via IPC (concurrent).
+        const msrLib = (lib && Array.isArray(lib.MSR)) ? lib.MSR : [];
+        const genLib = (lib && Array.isArray(lib.General)) ? lib.General : null;
         blocks = await Promise.all(rows.map(async (row) => {
           const match = matchMsrRow(row, orders);
           let items = [];
@@ -61,7 +70,13 @@ export function RemittancesModule({ orders, toast }) {
               if (r && r.ok && Array.isArray(r.items)) items = r.items;
             } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
           }
-          return reconcileMsrRow(row, match, items);
+          // Resolve each read line against the MSR library so its taxable flag drives the
+          // per-line divide-out breakdown (reuses the resolveBidLine matcher). Shape in:
+          // {desc,unitPrice,qty} -> bidItems {name=desc, qty, price}.
+          const resolved = bidItemsToInvoiceLines(
+            items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice })),
+            msrLib, 'MSR', genLib);
+          return reconcileMsrRow(row, match, resolved);
         }));
       }
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';
@@ -71,7 +86,7 @@ export function RemittancesModule({ orders, toast }) {
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
     setLoading(false);
-  }, [orders, toast]);
+  }, [orders, toast, lib]);
 
   const paidSum = report ? money(report.blocks.reduce((s, b) => s + b.paid, 0)) : 0;
   const matched = report ? report.blocks.filter(b => b.status === 'match').length : 0;
@@ -171,24 +186,34 @@ function ReportBlock({ b, fmt }) {
 
       {b.lines.length > 0 && (
         <div style={{ padding: '8px 14px' }}>
+          {/* column headers: description | pre-tax | tax | post-tax */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '2px 0 4px',
+            fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', color: 'var(--text-3)', textTransform: 'uppercase' }}>
+            <span>Item</span><span style={{ textAlign: 'right' }}>Pre-tax</span>
+            <span style={{ textAlign: 'right' }}>Tax</span><span style={{ textAlign: 'right' }}>Post-tax</span>
+          </div>
           {b.lines.map((l, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '3px 0', fontSize: 13 }}>
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '3px 0', fontSize: 13, borderTop: '1px solid var(--border-1)' }}>
               <span style={{ color: 'var(--text-1)' }}>{l.desc || '(no description)'}{l.qty > 1 ? ' ×' + l.qty : ''}</span>
-              <span style={{ color: 'var(--text-2)', whiteSpace: 'nowrap' }}>{fmt(l.unitPrice * l.qty)}</span>
+              <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.pre)}</span>
+              <span style={{ textAlign: 'right', color: l.tax > 0 ? 'var(--text-1)' : 'var(--text-3)' }}>{fmt(l.tax)}</span>
+              <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.post)}</span>
             </div>
           ))}
         </div>
       )}
 
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 14, padding: '8px 14px',
-        borderTop: '1px solid var(--border-1)', background: 'var(--bg-canvas)',
+        display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, alignItems: 'baseline', padding: '8px 14px',
+        borderTop: '2px solid var(--border-2)', background: 'var(--bg-canvas)', fontWeight: 700,
       }}>
-        <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Computed <b style={{ color: 'var(--text-1)' }}>{fmt(b.computed)}</b></span>
-        <span style={{ fontSize: 13, color: 'var(--text-2)' }}>Paid <b style={{ color: 'var(--text-1)' }}>{fmt(b.paid)}</b></span>
-        {b.status === 'off' && (
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#991b1b' }}>Off by {fmt(offBy)}</span>
-        )}
+        <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+          Paid {fmt(b.paid)}
+          {b.status === 'off' && <span style={{ color: '#991b1b', marginLeft: 10 }}>Off by {fmt(offBy)}</span>}
+        </span>
+        <span style={{ textAlign: 'right', fontSize: 13 }}>{fmt(b.preTax != null ? b.preTax : b.computed)}</span>
+        <span style={{ textAlign: 'right', fontSize: 13 }}>{fmt(b.tax || 0)}</span>
+        <span style={{ textAlign: 'right', fontSize: 13, color: Math.abs(b.delta) < 0.005 ? '#065f46' : 'var(--text-1)' }}>{fmt(b.postTax != null ? b.postTax : b.computed)}</span>
       </div>
 
       {b.flags.length > 0 && (

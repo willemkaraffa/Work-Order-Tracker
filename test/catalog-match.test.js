@@ -133,10 +133,10 @@ test('"drain" is a noun, not a verb: bare drain line/pan -> Materials!', () => {
   assert.strictEqual(resolveBidLine('clear the drain line', 90, [], [], 'AMH').name, 'AMH!'); // real verb -> AMH labor sentinel
 });
 
-test('MSR sentinel labor -> MSR! and NOT taxed (sheets tax-included; divide-out)', () => {
+test('MSR sentinel labor -> MSR! and TAXABLE (custom service; divide-out, total-invariant)', () => {
   const l = resolveBidLine('Install half inch black pipe', 150, [], [], 'MSR');
   assert.strictEqual(l.name, 'MSR!');
-  assert.strictEqual(l.taxable, false);
+  assert.strictEqual(l.taxable, true);
 });
 
 test('AMH sentinel labor -> AMH! and NEVER taxed (Premier inclusive, core truth #2)', () => {

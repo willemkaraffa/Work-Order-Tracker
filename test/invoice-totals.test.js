@@ -77,10 +77,10 @@ test('empty / invalid invoice -> zero totals', () => {
   assert.strictEqual(t2.grandTotal, 0);
 });
 
-test('miss-path labor default is per-catalog: General taxed, AMH/MSR not; per-PM name', () => {
-  // Only General taxes generic labor (added on top). AMH is Premier-inclusive (never taxed)
-  // and MSR sheets are tax-included (divide-out, not marked taxable) -> both default FALSE.
-  // Unmatched labor is named by the WO agreement: General -> Labor!, AMH -> AMH!, MSR -> MSR!.
+test('miss-path labor default is per-catalog: General + MSR taxed, AMH not; per-PM name', () => {
+  // General taxes generic labor (added on top). MSR taxes custom labor too (divide-out, so
+  // total-invariant -- only the reported tax split changes). AMH is Premier-inclusive -> never
+  // taxed. Unmatched labor is named by the WO agreement: General -> Labor!, AMH -> AMH!, MSR -> MSR!.
   // (A service-call/diagnostic/emergency wording would override to taxable -- tested elsewhere.)
   const bid = [{ name: 'Replace a broken part', qty: 1, price: 100 }];  // action verb -> labor sentinel
   assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'General')[0].name, 'Labor!');
@@ -88,7 +88,7 @@ test('miss-path labor default is per-catalog: General taxed, AMH/MSR not; per-PM
   assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'AMH')[0].name, 'AMH!');
   assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'AMH')[0].taxable, false);
   assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'MSR')[0].name, 'MSR!');
-  assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'MSR')[0].taxable, false);
+  assert.strictEqual(bidItemsToInvoiceLines(bid, [], 'MSR')[0].taxable, true);
 });
 
 console.log('invoice-totals test');

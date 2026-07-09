@@ -194,12 +194,21 @@ These are authoritative. An earlier pass wrongly flipped AMH labor to taxable; t
 3. **Service Call / Diagnostic Fee / Emergency are ALWAYS taxed** (both PMs). The user manually added
    these to the PM libraries as `taxable:true`. So a matched service-call/diagnostic/emergency line
    is taxable; an UNMATCHED one (sentinel) must be forced taxable too (override the PM default).
-4. **Whether an MSR service item is taxed is read from the Col C scope prose** ("Item Description")
-   on the bid sheet, EXCLUDING materials (refrigerants like R22/R410a -> never taxed):
-   - prose states the price INCLUDES tax (e.g. "...standard installation materials, applicable
-     taxes, permit costs...") -> tax-included -> `taxable:false`. (The big install items C39-C82.)
-   - prose does NOT mention including tax (e.g. Clean Drain C22, Diagnostic C17) -> `taxable:true`.
-   - material (refrigerant) -> `taxable:false` regardless.
+4. **MSR taxable comes from TWO sources, by whether the line matches the catalog:**
+   a. MATCHED catalog item -> its library `taxable`, which parseMsr read from the Col C scope prose
+      ("Item Description"): prose states the price INCLUDES tax (e.g. "...standard installation
+      materials, applicable taxes, permit costs...") -> `false` (the big installs C39-C82); prose
+      does NOT mention tax (Clean Drain C22, Diagnostic C17) -> `true`; material (refrigerant
+      R22/R410a) -> `false`.
+   b. UNMATCHED custom OTHER line (free-text, no catalog match) -> default by KIND
+      (isMaterialWording): a line LEADING with "Material"/"Materials" -> `Materials!` `false`
+      (whatever follows); a line leading "Labor" -> labor; else action-verb = labor, no verb =
+      material. LABOR/service -> `taxable:true` (`CATALOG_TAX.MSR.defaultLaborTaxable = true`).
+   Divide-out (#1) makes this total-invariant -- it only fixes the reported tax split.
+   ACCEPTED TRADEOFF (user): a single OTHER cell COMBINING labor + material under a "Material ..."
+   description is taxed wholly as material (the bundled labor loses its tax). Rare; fixed at
+   invoicing. The leading-"Material" rule's forward benefit outweighs it. `taxable` is a code-level
+   line field ONLY -- it drives the Tax column, NOT shown in the visible item name.
 5. **Manually-added library items must NOT be overwritten by re-seeding.** Re-seed merges: keep the
    user's manual items, refresh only the sheet-sourced ones.
 6. **Manual picker must allow cross-category fallback.** Auto-match already falls PM -> General
@@ -208,12 +217,12 @@ These are authoritative. An earlier pass wrongly flipped AMH labor to taxable; t
    tax follows General, not the PM. (Increases match accuracy.)
 
 Implementation of the above:
-- **constants.js**: `AMH.defaultLaborTaxable:false` (revert), `MSR.defaultLaborTaxable:false` (revert;
-  MSR sheets are tax-included). Divide-out (`MSR.taxableInclusive:true`) unchanged.
-- **orders-logic.js `resolveBidLine`**: sentinels `AMH!`/`MSR!`/`Labor!` by agreement (unchanged),
-  taxable = catalog default (now false for AMH/MSR), BUT a service-call/diagnostic/emergency wording
-  forces `taxable:true` (truth #3). `Labor!` (General) stays taxable. Material wording -> `Materials!`
-  `taxable:false`.
+- **constants.js**: `AMH.defaultLaborTaxable:false` (Premier inclusive). `MSR.defaultLaborTaxable:true`
+  (custom labor is a taxable service; divide-out keeps the total). `MSR.taxableInclusive:true` unchanged.
+- **orders-logic.js `resolveBidLine`**: sentinels `AMH!`/`MSR!`/`Labor!` by agreement; taxable =
+  catalog default (AMH false; MSR/General true), BUT service-call/diagnostic/emergency wording forces
+  `taxable:true` (truth #3). Material wording -> `Materials!` `taxable:false`. `isMaterialWording`
+  treats a leading "Labor" as labor, "Material -/:" as material.
 - **library_io.js `parseMsr`**: set each item's `taxable` from its Col C prose (truth #4) and carry
   the prose as `desc`; material (refrigerant) names -> false.
 - **app.jsx `useLibraryTools`**: re-seed MERGES (keep `manual:true` items) instead of `replaceTab`.

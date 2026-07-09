@@ -114,6 +114,26 @@ test('reconcileMsrRow: address-matched adds a verify flag even when totals match
   assert.ok(rep.flags.some(f => /ADDRESS/i.test(f)));
 });
 
+test('MSR taxable line -> per-line divide-out breakdown (pre/tax/post)', () => {
+  const r = row({ woId: '02615338', amount: 85 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'Diagnostic Fee', unitPrice: 85, qty: 1, taxable: true }]);
+  assert.strictEqual(rep.lines[0].pre, 79.25);
+  assert.strictEqual(rep.lines[0].tax, 5.75);
+  assert.strictEqual(rep.lines[0].post, 85);
+  assert.strictEqual(rep.preTax, 79.25);
+  assert.strictEqual(rep.tax, 5.75);
+  assert.strictEqual(rep.postTax, 85);
+  assert.strictEqual(rep.status, 'match');
+});
+
+test('MSR non-taxable line -> tax 0, pre == post', () => {
+  const r = row({ woId: '02615338', amount: 145 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'R410a', unitPrice: 145, qty: 1, taxable: false }]);
+  assert.strictEqual(rep.lines[0].tax, 0);
+  assert.strictEqual(rep.lines[0].pre, 145);
+  assert.strictEqual(rep.postTax, 145);
+});
+
 console.log('reconcile-msr test');
 console.log('==================');
 let pass = 0, fail = 0;

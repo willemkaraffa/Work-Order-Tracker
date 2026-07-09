@@ -69,6 +69,32 @@ test('computed != paid -> off, flagged', () => {
   assert.strictEqual(rep.delta, -78.25);
 });
 
+test('pre-fix capture (no per-line vendorTax) reconciles via bidAmount fallback', () => {
+  // Old bidItems have only {name,price,qty}; order.bidAmount=100.44 is tax-inclusive.
+  const r = row({ woId: '9692517', amount: 100.44 });
+  const rep = reconcileAmhRow(r, matchAmhRow(r, ORDERS), [
+    { name: 'Diagnostic fee', price: 75, qty: 1 },
+    { name: 'Clear blockage in half bathroom toilet', price: 20, qty: 1 },
+  ], 100.44);
+  assert.strictEqual(rep.subtotal, 95);
+  assert.strictEqual(rep.tax, 5.44);            // derived from bidAmount - subtotal
+  assert.strictEqual(rep.computed, 100.44);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(rep.flags.some(f => /re-capture/i.test(f)));
+});
+
+test('post-fix capture with per-line vendorTax -> exact, no fallback flag', () => {
+  const r = row({ woId: '9692517', amount: 100.44 });
+  const rep = reconcileAmhRow(r, matchAmhRow(r, ORDERS), [
+    { name: 'Diagnostic fee', price: 75, qty: 1, vendorTax: 5.44 },
+    { name: 'Clear blockage in half bathroom toilet', price: 20, qty: 1, vendorTax: 0 },
+  ], 100.44);
+  assert.strictEqual(rep.tax, 5.44);
+  assert.strictEqual(rep.computed, 100.44);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(!rep.flags.some(f => /re-capture/i.test(f)));
+});
+
 console.log('reconcile-amh test');
 console.log('==================');
 let pass = 0, fail = 0;
