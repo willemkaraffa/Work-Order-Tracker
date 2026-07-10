@@ -78,4 +78,45 @@ if (typeof window !== 'undefined' && !window.__lockDebug) {
     console.log('[lockDebug]', info);
     return info;
   };
+
+  // Passive watchdog + rescue for the text lock-out (bug_note_card_input_lock). Runs once.
+  // The rescue hotkey (Ctrl+Alt+U, registered in main) both UNSTICKS focus and captures
+  // state; the watchdog auto-captures when the renderer is alive but focus is stuck.
+  const snap = (when, extra) => {
+    const el = document.activeElement;
+    return { when, tag: el && el.tagName, id: (el && el.id) || null,
+      isTyping: isTypingTarget(el), modalOpen: window.__modalOpen || 0, ...(extra || {}) };
+  };
+  // Main -> renderer rescue: reset any leaked modal ref-count, blur the stuck node, and
+  // log what was focused at the moment of the lock. webContents.focus() was already
+  // re-asserted main-side before this fires.
+  if (window.lockDiag && window.lockDiag.onRescue) {
+    window.lockDiag.onRescue(() => {
+      const info = snap('rescue');
+      // eslint-disable-next-line no-console
+      console.log('[lockRescue]', info);
+      if (window.lockDiag.log) window.lockDiag.log(info);
+      window.__modalOpen = 0;
+      try { const el = document.activeElement; if (el && el.blur) el.blur(); } catch (_) {}
+      try { const r = document.getElementById('root'); if (r && r.focus) r.focus(); } catch (_) {}
+    });
+  }
+  // Watchdog: >=5 printable keys within 3s while NOTHING editable is focused = user typing
+  // into the void (the lock signature). Log once per burst; never preventDefault (observe only).
+  let recent = [];
+  let logged = false;
+  window.addEventListener('keydown', (e) => {
+    if (!(e.key && (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Enter'))) return;
+    const now = Date.now();
+    recent.push({ t: now, bad: !isTypingTarget(document.activeElement) });
+    recent = recent.filter(r => now - r.t < 3000);
+    if (!logged && recent.filter(r => r.bad).length >= 5) {
+      logged = true;
+      const info = snap('watchdog', { badKeys: recent.filter(r => r.bad).length });
+      // eslint-disable-next-line no-console
+      console.warn('[lockWatchdog] suspected input lock', info, '-- press Ctrl+Alt+U to rescue');
+      if (window.lockDiag && window.lockDiag.log) window.lockDiag.log(info);
+      setTimeout(() => { logged = false; }, 10000);
+    }
+  });
 }

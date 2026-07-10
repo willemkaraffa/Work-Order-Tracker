@@ -97,6 +97,13 @@ contextBridge.exposeInMainWorld('scraper', {
   captureAllAMH: (woNums)  => ipcRenderer.invoke('capture-all-amh', woNums),
 });
 
+// Text lock-out diagnostic bridge: renderer logs suspected-lock state to a file, and
+// receives the rescue-hotkey signal (Ctrl+Alt+U) to reset focus/state.
+contextBridge.exposeInMainWorld('lockDiag', {
+  log:       (data) => ipcRenderer.invoke('log-lock-event', data),
+  onRescue:  (cb)   => ipcRenderer.on('lock-rescue', () => cb()),
+});
+
 // Tray bridge -- main process pushes click events; renderer pushes state.
 contextBridge.exposeInMainWorld('tray', {
   setState:  (state)   => ipcRenderer.invoke('tray-set-state', state),

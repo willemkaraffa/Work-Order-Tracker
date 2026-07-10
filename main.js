@@ -354,8 +354,31 @@ function destroyTray() {
   }
 }
 
+// Text lock-out diagnostic (bug_note_card_input_lock). An OS-level rescue hotkey works
+// even if the renderer's input focus is dead (the leading theory), so it doubles as an
+// instant unstick + a capture trigger. Fixed combo so it survives a user-hotkey re-register.
+const RESCUE_COMBO = 'CommandOrControl+Alt+U';
+function appendLockLog(entry) {
+  try {
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n';
+    fs.appendFileSync(path.join(app.getPath('userData'), 'lock-events.log'), line);
+  } catch (_) { /* diagnostic only */ }
+}
+function rescueFocus() {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  appendLockLog({ src: 'main', event: 'rescue-hotkey', winFocused: mainWin.isFocused() });
+  try {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show(); mainWin.focus();
+    mainWin.webContents.focus();                 // re-assert renderer input focus (Electron focus-death fix)
+    mainWin.webContents.send('lock-rescue');     // renderer resets __modalOpen + logs activeElement
+  } catch (e) { appendLockLog({ src: 'main', event: 'rescue-error', error: e.message }); }
+}
 function registerGlobalHotkey(combo) {
   try { globalShortcut.unregisterAll(); } catch(e) {}
+  // Always (re)register the rescue hotkey after any unregisterAll so it survives
+  // set-global-hotkey / resume.
+  try { globalShortcut.register(RESCUE_COMBO, rescueFocus); } catch(e) {}
   if (!combo) return false;
   try {
     const ok = globalShortcut.register(combo, () => {
@@ -391,6 +414,7 @@ ipcMain.handle('storage-delete', (_e, key) => {
   try { const s = readStore(); delete s[key]; writeStore(s); return { key, deleted: true }; } catch { return null; }
 });
 ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(false, true); });
+ipcMain.handle('log-lock-event', (_e, data) => { appendLockLog({ src: 'renderer', ...(data && typeof data === 'object' ? data : { data }) }); return true; });
 ipcMain.handle('set-global-hotkey', (_e, combo) => registerGlobalHotkey(combo));
 ipcMain.handle('pause-global-hotkey', () => { try { globalShortcut.unregisterAll(); } catch(e) {} return true; });
 ipcMain.handle('resume-global-hotkey', () => registerGlobalHotkey(currentHotkey));
