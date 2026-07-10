@@ -327,11 +327,14 @@ def build_wo(item: dict) -> dict:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-# statusName values that are NOT open work (excluded from all-open capture).
-# "Posted" = work completed, awaiting invoicing (subStatus "Work Completed"); not
-# open. Open = Unscheduled / Scheduled. Verified live against portal count (19).
+# statusName values excluded from the all-open bulk capture. "Posted" was here, but
+# Posted = work done, AWAITING INVOICING -- exactly the WOs the invoicing flow needs in
+# the app. Excluding it meant a WO that reached Posted before a bulk scan (e.g. 9797636)
+# was silently dropped and had to be hand-entered. Now bulk imports Posted too; only
+# truly closed/cancelled WOs are skipped. (Known WOs update in place without tab regress;
+# only NEW Posted WOs import.)
 ALL_OPEN_SENTINEL = "__ALL_OPEN__"
-_CLOSED_STATUSES = {"completed", "canceled", "cancelled", "posted"}
+_CLOSED_STATUSES = {"completed", "canceled", "cancelled"}
 
 
 def main():

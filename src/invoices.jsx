@@ -5,7 +5,7 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import {
-  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches,
+  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches,
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed } from './orders-logic.js';
@@ -595,7 +595,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
           border: '1px solid var(--border-1)', background: 'var(--bg-surface)', color: 'var(--text-1)',
           fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Recompute</button>
         {order && order.invoice && onClear && (
-          <button onClick={() => { if (window.confirm('Clear the saved invoice for this WO? Line items are discarded; reopen to re-autofill from the bid.')) onClear(); }}
+          <button onClick={async () => { if (await confirmDialog('Clear the saved invoice for this WO? Line items are discarded; reopen to re-autofill from the bid.', { danger: true, confirmLabel: 'Clear' })) onClear(); }}
             style={{ height: 32, padding: '0 14px', borderRadius: 7, cursor: 'pointer',
             border: '1px solid var(--flag-emergency)', background: 'transparent', color: 'var(--flag-emergency)',
             fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Clear saved invoice</button>

@@ -10,7 +10,7 @@ import {
 } from './primitives.jsx';
 import {
   TT_LIGHT, TT_DARK, GambleMark, DEFAULT_OVERDUE_CFG, DEFAULT_ROUTING_WEIGHTS,
-  DEFAULT_ALERT_THRESHOLDS, US_STATE_NAMES, updateStatusText, LibraryToolsSection,
+  DEFAULT_ALERT_THRESHOLDS, US_STATE_NAMES, updateStatusText, LibraryToolsSection, confirmDialog,
 } from './app.jsx';
 
 const TT_SECTIONS = [
@@ -436,8 +436,8 @@ function WorkflowSection({ phases, setPhases, statuses, setStatuses, statusColor
     setPhases(phases.map(p => (p.id || p.name) === targetId ? { ...p, displayMode: mode } : p));
   };
   // change11: togglePhaseComplete deprecated.
-  const deletePhase = (targetId) => {
-    if (!window.confirm('Delete this phase?')) return;
+  const deletePhase = async (targetId) => {
+    if (!(await confirmDialog('Delete this phase?', { danger: true, confirmLabel: 'Delete' }))) return;
     setPhases(phases.filter(p => (p.id || p.name) !== targetId));
   };
 
@@ -606,10 +606,10 @@ function StatusesEditor({ statuses, setStatuses, statusColors, setStatusColors, 
     setEditingIdx(null);
   };
 
-  const deleteStatus = (idx) => {
+  const deleteStatus = async (idx) => {
     const name = statuses[idx];
     if (LOCKED_STATUSES.has(name)) return; // hardcoded by change11; cannot delete
-    if (!window.confirm('Remove this status?')) return;
+    if (!(await confirmDialog('Remove this status?', { danger: true, confirmLabel: 'Remove' }))) return;
     setStatuses(statuses.filter((_, i) => i !== idx));
     const sc = { ...statusColors };
     delete sc[name];
@@ -862,8 +862,8 @@ function PMsEditor({ pms, setPms, onRenameCode, onClose }) {
   const setFullName = (idx, val) => setPms(pms.map((p, i) => i === idx ? { ...p, fullName: val } : p));
   const setColor = (idx, hex) => setPms(pms.map((p, i) => i === idx ? { ...p, color: hex } : p));
 
-  const deletePm = (idx) => {
-    if (!window.confirm('Remove this Client?')) return;
+  const deletePm = async (idx) => {
+    if (!(await confirmDialog('Remove this Client?', { danger: true, confirmLabel: 'Remove' }))) return;
     setPms(pms.filter((_, i) => i !== idx));
   };
 
@@ -1292,8 +1292,8 @@ function MapsSection({ mapsHomeState, mapsHomeZip, mapsHomeAddress, mapsHomeCity
           </div>
           {geocacheCount > 0 && (
             <button
-              onClick={() => {
-                if (!window.confirm('Clear all cached geocodes (' + geocacheCount + ')? Every active WO will be re-geocoded with the current home state and default view.')) return;
+              onClick={async () => {
+                if (!(await confirmDialog('Clear all cached geocodes (' + geocacheCount + ')? Every active WO will be re-geocoded with the current home state and default view.', { danger: true, confirmLabel: 'Clear' }))) return;
                 onClearGeocache && onClearGeocache();
               }}
               style={{
@@ -1540,7 +1540,7 @@ function TradesSection({ types, setTypes, mapTypeColors, setMapTypeColors, techJ
     setEditingTypeIdx(null);
     if (n && n !== oldName && !(types || []).includes(n)) setTypes((types || []).map(t => t === oldName ? n : t));
   };
-  const deleteType = (name) => { if (window.confirm('Remove type "' + name + '"?')) setTypes((types || []).filter(t => t !== name)); };
+  const deleteType = async (name) => { if (await confirmDialog('Remove type "' + name + '"?', { danger: true, confirmLabel: 'Remove' })) setTypes((types || []).filter(t => t !== name)); };
   const moveType = (name, delta) => { const i = (types || []).indexOf(name); if (i >= 0) setTypes(swapAt(types, i, i + delta)); };
   const addType = () => { const n = newType.trim(); if (!n || (types || []).includes(n)) return; setTypes([...(types || []), n]); setNewType(''); };
   // Tech list management.
@@ -1549,7 +1549,7 @@ function TradesSection({ types, setTypes, mapTypeColors, setMapTypeColors, techJ
     setEditingTechIdx(null);
     if (n && n !== oldName && !(techs || []).includes(n)) setTechs((techs || []).map(t => t === oldName ? n : t));
   };
-  const deleteTech = (name) => { if (window.confirm('Remove tech "' + name + '"?')) setTechs((techs || []).filter(t => t !== name)); };
+  const deleteTech = async (name) => { if (await confirmDialog('Remove tech "' + name + '"?', { danger: true, confirmLabel: 'Remove' })) setTechs((techs || []).filter(t => t !== name)); };
   const moveTech = (name, delta) => { const i = (techs || []).indexOf(name); if (i >= 0) setTechs(swapAt(techs, i, i + delta)); };
   const addTech = () => { const n = newTech.trim(); if (!n || (techs || []).includes(n)) return; setTechs([...(techs || []), n]); setNewTech(''); };
   // Patch one tech/type cell. Selecting for the first time defaults weight med.

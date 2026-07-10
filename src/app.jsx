@@ -1055,6 +1055,44 @@ function NamePromptModal({ state, onClose }) {
   );
 }
 
+// App-wide confirm dialog. Replaces window.confirm(), which — like window.prompt above
+// — is a NATIVE Electron dialog that WEDGES renderer keyboard input after dismissal (the
+// recurring "text lock-out": typing dies app-wide until restart; repro'd on permanent-
+// delete's confirm, and webContents.focus() could not revive it). This DOM modal has no
+// native dialog, so no wedge. Imperative: `await confirmDialog(msg, { danger })` from
+// anywhere; a single <ConfirmHost/> at the app root renders it. Resolves true/false.
+let _confirmEmit = null;
+export function confirmDialog(message, opts = {}) {
+  return new Promise((resolve) => {
+    if (!_confirmEmit) { resolve(false); return; }   // host not mounted -> safe cancel
+    _confirmEmit({ message, title: opts.title || 'Confirm', confirmLabel: opts.confirmLabel || 'OK', danger: !!opts.danger, resolve });
+  });
+}
+export function ConfirmHost() {
+  const [req, setReq] = React.useState(null);
+  React.useEffect(() => { _confirmEmit = (r) => setReq(r); return () => { _confirmEmit = null; }; }, []);
+  const done = (v) => { setReq((r) => { if (r && r.resolve) r.resolve(v); return null; }); };
+  if (!req) return null;
+  return (
+    <Modal open onClose={() => done(false)} title={req.title} width={440}>
+      <div style={{ fontSize: 14, color: 'var(--text-1)', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{req.message}</div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+        <button onClick={() => done(false)} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: 'var(--bg-surface-2)', color: 'var(--text-2)',
+          border: '1px solid var(--border-2)', borderRadius: 6, cursor: 'pointer',
+        }}>Cancel</button>
+        <button onClick={() => done(true)} style={{
+          fontFamily: 'inherit', fontSize: 13, padding: '6px 12px',
+          background: req.danger ? 'var(--flag-emergency)' : 'var(--accent)',
+          color: req.danger ? 'white' : 'var(--accent-fg)',
+          border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
+        }}>{req.confirmLabel}</button>
+      </div>
+    </Modal>
+  );
+}
+
 // App-wide inline rename field. Fixes the chronic "uneditable field" bug: a
 // conditionally-rendered input could receive a spurious blur right after mount
 // (React-18 focus timing), which fired onBlur -> commit -> close before the user
@@ -2815,15 +2853,15 @@ function useLibraryTools(lib, persist, toast) {
   // Re-seed MERGES, it does not wipe: manually-added items (manual:true) are kept and
   // only the sheet-sourced items are refreshed (core truth #5). A manual item wins over
   // a seed item of the same name (the user curated it -- e.g. taxable service calls).
-  const replaceTab = (tabName, newItems, label) => {
+  const replaceTab = async (tabName, newItems, label) => {
     const cur = (lib && lib[tabName]) || [];
     const manual = cur.filter(it => it && it.manual);
     const manualNames = new Set(manual.map(it => String(it.name || '').toLowerCase()));
     const seeded = newItems.filter(it => !manualNames.has(String(it.name || '').toLowerCase()));
     const refreshCount = cur.length - manual.length;
-    if (refreshCount > 0 && !window.confirm(
+    if (refreshCount > 0 && !(await confirmDialog(
       `Refresh ${refreshCount} sheet-sourced ${tabName} item(s) with ${seeded.length} from ${label}?` +
-      (manual.length ? ` (${manual.length} manually-added item(s) kept)` : ''))) return false;
+      (manual.length ? ` (${manual.length} manually-added item(s) kept)` : '')))) return false;
     persist({ ...(lib || emptyLibrary()), [tabName]: [...manual, ...seeded] });
     return true;
   };
@@ -2833,7 +2871,7 @@ function useLibraryTools(lib, persist, toast) {
     try {
       const r = await window.library.seedGeneral('');
       if (!r || !r.ok) { toast((r && r.error) || 'Seed failed', 'err'); return; }
-      if (replaceTab('General', r.items, 'workbook')) toast(`General seeded: ${r.items.length} items`);
+      if (await replaceTab('General', r.items, 'workbook')) toast(`General seeded: ${r.items.length} items`);
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
@@ -2848,7 +2886,7 @@ function useLibraryTools(lib, persist, toast) {
         r = await window.library.seedAmh(pick.path);
       }
       if (!r || !r.ok) { toast((r && r.error) || 'AMH seed failed', 'err'); return; }
-      if (replaceTab('AMH', r.items, 'AMH pricing')) toast(`AMH seeded: ${r.items.length} items`);
+      if (await replaceTab('AMH', r.items, 'AMH pricing')) toast(`AMH seeded: ${r.items.length} items`);
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
@@ -2858,7 +2896,7 @@ function useLibraryTools(lib, persist, toast) {
     try {
       const r = await window.library.seedMsr();
       if (!r || !r.ok) { toast((r && r.error) || 'MSR seed failed', 'err'); return; }
-      if (replaceTab('MSR', r.items, 'MSR HVAC price list')) toast(`MSR seeded: ${r.items.length} items`);
+      if (await replaceTab('MSR', r.items, 'MSR HVAC price list')) toast(`MSR seeded: ${r.items.length} items`);
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
@@ -2872,7 +2910,7 @@ function useLibraryTools(lib, persist, toast) {
       if (!r || !r.ok) { toast((r && r.error) || 'Import failed', 'err'); return; }
       const next = { ...emptyLibrary() };
       for (const k of Object.keys(r.tabs)) if (LIBRARY_TABS.includes(k)) next[k] = r.tabs[k];
-      if (!window.confirm('Replace the current library with the imported file?')) return;
+      if (!(await confirmDialog('Replace the current library with the imported file?', { danger: true, confirmLabel: 'Replace' }))) return;
       persist(next);
       toast('Library imported');
     } catch (e) { toast(String(e.message || e), 'err'); }
@@ -2923,8 +2961,8 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular }) 
     setEditingIdx(null);
   };
 
-  const deleteItem = (idx) => {
-    if (!window.confirm('Remove "' + items[idx] + '"?')) return;
+  const deleteItem = async (idx) => {
+    if (!(await confirmDialog('Remove "' + items[idx] + '"?', { danger: true, confirmLabel: 'Remove' }))) return;
     setItems(items.filter((_, i) => i !== idx));
   };
 
@@ -3861,9 +3899,10 @@ function App() {
   const setTrayEnabled = React.useCallback((v) => updateSettings({ trayEnabled: v !== 'off' }), [updateSettings]);
   const trayBadgeSource = settings.trayBadgeSource || 'attention';
   const setTrayBadgeSource = React.useCallback((v) => updateSettings({ trayBadgeSource: v }), [updateSettings]);
-  const resetSettings = React.useCallback(() => {
-    const ok = window.confirm(
-      'Reset all settings to defaults? Your work orders will NOT be affected. Continue?'
+  const resetSettings = React.useCallback(async () => {
+    const ok = await confirmDialog(
+      'Reset all settings to defaults? Your work orders will NOT be affected. Continue?',
+      { danger: true, confirmLabel: 'Reset' }
     );
     if (!ok) return;
     // Preserve migrationApplied so the migration dialog does not re-fire.
@@ -3896,8 +3935,9 @@ function App() {
       toast('Could not read backup', 'err');
       return;
     }
-    const ok = window.confirm(
-      'Restore pre-migration backup? This REPLACES your current work order data with the snapshot taken just before the migration. Cannot be undone (the current data will be lost). Continue?'
+    const ok = await confirmDialog(
+      'Restore pre-migration backup? This REPLACES your current work order data with the snapshot taken just before the migration. Cannot be undone (the current data will be lost). Continue?',
+      { danger: true, confirmLabel: 'Restore' }
     );
     if (!ok) return;
     try {
@@ -5030,15 +5070,15 @@ function App() {
   // that are NOT in the route are unscheduled (returned to the pool). Note:
   // scheduling never changes a WO's status in this app, so unscheduling already
   // leaves the overridden WOs at their real prior status (no prevStatus dance).
-  const sendRouteToItinerary = React.useCallback((tech, date) => {
+  const sendRouteToItinerary = React.useCallback(async (tech, date) => {
     if (!routeStops.length || !tech || !date) return;
     const slots = itinSlots();
     const inRouteSet = new Set(routeStops);
     const occupied = orders.filter(o => !o.deleted && o.tech === tech
       && o.schedule && o.schedule.date === date && !inRouteSet.has(o.id));
-    if (occupied.length && !window.confirm(
+    if (occupied.length && !(await confirmDialog(
       tech + ' already has ' + occupied.length + ' job(s) scheduled on ' + date +
-      '. Overwrite the day? Those ' + occupied.length + ' will be returned to the unscheduled pool.')) return;
+      '. Overwrite the day? Those ' + occupied.length + ' will be returned to the unscheduled pool.', { danger: true, confirmLabel: 'Overwrite' }))) return;
     occupied.forEach(o => setSchedule(o.id, null));
     routeStops.forEach((id, i) => setSchedule(id, { date, start: slots[Math.min(i, slots.length - 1)] }, tech));
     setRouteStops([]);
@@ -5144,8 +5184,8 @@ function App() {
       toast('View renamed');
     }});
   }, [presets, updatePreset, toast]);
-  const onDeletePreset = React.useCallback((id) => {
-    if (!window.confirm('Delete this saved view?')) return;
+  const onDeletePreset = React.useCallback(async (id) => {
+    if (!(await confirmDialog('Delete this saved view?', { danger: true, confirmLabel: 'Delete' }))) return;
     deletePreset(id);
     if (currentView === 'sv:' + id) setCurrentView('active');
     toast('View deleted');
@@ -5164,8 +5204,8 @@ function App() {
       toast('Inbox renamed');
     }});
   }, [inboxes, renameInbox, toast]);
-  const onDeleteInbox = React.useCallback((id) => {
-    if (!window.confirm('Delete this inbox? (Work orders are not deleted.)')) return;
+  const onDeleteInbox = React.useCallback(async (id) => {
+    if (!(await confirmDialog('Delete this inbox? (Work orders are not deleted.)', { danger: true, confirmLabel: 'Delete' }))) return;
     deleteInbox(id);
     if (currentView === 'ib:' + id) setCurrentView('active');
     toast('Inbox deleted');
@@ -5713,7 +5753,7 @@ function App() {
   }, [updateOrder, captureOrder, createWoSubfolder, openWoFolder, toast, orders, sendToInvoice, markComplete, reopen, updateSettings, statusTags, setScheduleTarget, focusItinerary]);
 
   // ⋯ menu actions on the detail pane.
-  const detailAction = React.useCallback((kind, payload) => {
+  const detailAction = React.useCallback(async (kind, payload) => {
     const id = selectedWO;
     if (!id) return;
     // Delegate shared cases to woAction.
@@ -5743,7 +5783,7 @@ function App() {
         break;
       }
       case 'hardDelete': {
-        if (!window.confirm('Permanently delete this work order? This cannot be undone.')) return;
+        if (!(await confirmDialog('Permanently delete this work order? This cannot be undone.', { danger: true, confirmLabel: 'Delete' }))) return;
         deleteOrderHard(id);
         setSelectedWO(null);
         toast('Deleted permanently');
@@ -6329,6 +6369,7 @@ function App() {
         {/* Module navigation is the fold-out NavWing (nav.jsx), mounted once
             inside the non-overview shell above. */}
         <ToastHost toasts={toasts} />
+        <ConfirmHost />
         </HeaderActionsContext.Provider>
        </ModuleNavContext.Provider>
       </ToastContext.Provider>

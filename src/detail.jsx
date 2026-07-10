@@ -9,7 +9,7 @@ import { formatPhone, openMaps } from './utils.js';
 import { Dot, PMChip, TypeIcon, StatusPill, ActionBtn, FlagGlyph } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG, fmtSchedule,
-  WOContextMenu, Field, MenuItem, MenuDivider, MenuCaption, DEFAULT_STATUSES,
+  WOContextMenu, Field, MenuItem, MenuDivider, MenuCaption, DEFAULT_STATUSES, confirmDialog,
 } from './app.jsx';
 
 // Grow a note textarea to fit its content (#10: fields didn't scale to text).
@@ -827,9 +827,9 @@ export function NoteCard({ id, type, time, body, pinned, edited, legacy, onEdit,
             <div onClick={() => { onPin(); setMenuOpen(false); }} style={menuItemStyle}>{pinned ? 'Unpin' : 'Pin'}</div>
           )}
           {onDelete && (
-            <div onClick={() => {
-              if (window.confirm('Delete this note?')) onDelete();
+            <div onClick={async () => {
               setMenuOpen(false);
+              if (await confirmDialog('Delete this note?', { danger: true, confirmLabel: 'Delete' })) onDelete();
             }} style={{ ...menuItemStyle, color: 'var(--flag-emergency)' }}>Delete</div>
           )}
         </div>
