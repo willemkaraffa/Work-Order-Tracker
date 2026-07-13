@@ -17,7 +17,7 @@ const STATUS_STYLE = {
   unmatched:  { label: 'NO WO',        fg: 'var(--text-2)', bg: 'var(--bg-surface-2)' },
 };
 
-export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBatch, onCaptureAmhForRemittance, onSaveInvoice, onBillMatched }) {
+export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBatch, onCaptureAmhForRemittance, onEnsureMsrOrders, onSaveInvoice, onBillMatched }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [report, setReport] = React.useState(null);   // { blocks, statementTotal, fileName } | null
   const [loading, setLoading] = React.useState(false);
@@ -87,10 +87,15 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
         });
       } else {
         // MSR itemize = the WO folder bid sheet(s), read per-WO via IPC (concurrent).
+        // Parity with AMH: auto-create any paid WO not yet in the app from the remittance
+        // row (ensureMsrOrders) so it lands in the nexus; its line items still come from the
+        // folder bid sheet (MSR's official itemization source; no in-app portal API).
         const msrLib = (lib && Array.isArray(lib.MSR)) ? lib.MSR : [];
         const genLib = (lib && Array.isArray(lib.General)) ? lib.General : null;
+        const ensured = onEnsureMsrOrders ? onEnsureMsrOrders(rows) : {};
         blocks = await Promise.all(rows.map(async (row) => {
-          const match = matchMsrRow(row, orders);
+          const ens = ensured[normWoNum(row.woId)];
+          const match = ens ? { order: ens, matchBy: 'woId' } : matchMsrRow(row, orders);
           let items = [];
           if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
             try {
@@ -132,7 +137,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
     setLoading(false);
-  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance]);
+  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance, onEnsureMsrOrders]);
 
   const updateBlock = React.useCallback((idx, next) => {
     setReport(r => r ? { ...r, blocks: r.blocks.map((b, i) => i === idx ? next : b) } : r);

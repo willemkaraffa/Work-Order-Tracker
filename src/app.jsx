@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice, normWoNum,
+  recomputeInvoice, normWoNum, matchMsrRow,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -5496,6 +5496,33 @@ function App() {
     return { ok: true, byNum };
   }, [orders, applyCapture, upsertOrders]);
 
+  // MSR remittance parity: MSR has no in-app portal API (the extension owns metadata) and
+  // its line items live in the WO-folder bid sheet. So the remittance's official contribution
+  // is the WO itself -- match each paid row to an app order, else AUTO-CREATE it from the row
+  // (upsertOrders keys id=woId, matching resolveWoFolder's "WO <num>"). Returns byNum[baseWO]
+  // = order so the caller reads that WO's bid sheet + reconciles. No portal fetch (unlike AMH).
+  const ensureMsrOrdersForRemittance = React.useCallback((rows) => {
+    const byNum = {};
+    const newIncoming = [];
+    for (const row of (Array.isArray(rows) ? rows : [])) {
+      const key = normWoNum(row && row.woId);
+      const m = matchMsrRow(row, orders);
+      if (m.order) { if (key) byNum[key] = m.order; continue; }
+      if (!(row && (row.woId || row.addressRaw))) continue;   // nothing to create from
+      newIncoming.push({ woId: row.woId, pm: 'MSR', address: row.addressRaw, propertyId: row.propCode });
+    }
+    if (newIncoming.length) {
+      const r = upsertOrders(newIncoming);
+      const byWo = new Map(newIncoming.map(inc => [normWoNum(inc.woId), inc]));
+      for (const bt of (r.batch || [])) {
+        if (!(bt && bt.isNew && bt.woId)) continue;
+        const k = normWoNum(bt.woId); const inc = byWo.get(k);
+        if (inc) byNum[k] = { id: bt.id, woId: inc.woId, pm: 'MSR', address: inc.address, propertyId: inc.propertyId };
+      }
+    }
+    return byNum;
+  }, [orders, upsertOrders]);
+
   // "Go to folder": ensure the OneDrive folder tree (+ MSR bid sheet) exists, then open
   // it. Merges the old separate "Create folder" — one action creates-if-missing + opens.
   const openWoFolder = React.useCallback((id) => {
@@ -6154,7 +6181,7 @@ function App() {
               onRefreshAll={refreshAllInvoices}
             />
           ) : currentModule === 'remittances' ? (
-            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
+            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}
