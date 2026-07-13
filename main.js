@@ -605,7 +605,11 @@ ipcMain.handle('wo-create-folder', async (_e, rec) => {
     const cellDate = `${mm}/${dd}/${String(d.getFullYear()).slice(-2)}`; // in-cell text: MM/DD/YY
 
     let xlsx = null, xlsxSkip = null;
-    if (pm === 'MSR') {
+    // Only seed the bid sheet when the folder is BRAND NEW. "Go to folder" on an existing
+    // folder is a VIEW -- it must not spawn another sheet. The filename is date-stamped
+    // (<addr> Bid DD-MM.xlsx), so re-creating on a later day dropped a duplicate sheet each
+    // visit; gating on !existed makes the folder's first creation own the single sheet.
+    if (pm === 'MSR' && !existed) {
       // Dual (Plumbing+HVAC) and HVAC both use the HVAC sheet; pure Plumbing uses Plumbing.
       const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
       const skel  = path.join(BID_SKELETONS(), BID_SKELETON[trade]);
