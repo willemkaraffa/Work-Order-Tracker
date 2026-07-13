@@ -5,6 +5,7 @@ resources/
 wo-data.json
 chromedriver.exe
 __pycache__/
+.edge-amh-profile/
 scratchpad/
 *.bak-*
 CLAUDE.original.md
