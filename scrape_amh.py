@@ -302,16 +302,55 @@ def service_display_name(service: dict, remedy_map: dict) -> str:
             or normalize_text(service.get("serviceId")))
 
 
-def extract_bids(order: dict, remedy_map: dict):
-    """Return (bidItems, bidTotal) from the APPROVED bid only (no approved bid ->
-    empty); line items deduped by name."""
-    bids = order.get("bids") or []
-    approved = [b for b in bids
+def _bid_universe(order: dict) -> List[dict]:
+    """Every bid reachable from order.bids, INCLUDING nested relatedBids, deduped by
+    id/name. A multi-issue WO has one bid per condition issue, each cross-listing the
+    others as relatedBids; the priced/invoiced bid can be any of them -- not necessarily
+    the first top-level one."""
+    seen, out = set(), []
+    for b in (order.get("bids") or []):
+        for x in [b] + (b.get("relatedBids") or []):
+            key = x.get("id") or x.get("name")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(x)
+    return out
+
+
+def select_billed_bid(order: dict) -> Optional[dict]:
+    """Pick the bid AMH actually INVOICED for this WO -- its approved-option services are
+    the paid lines. The remittance token is W<wo>B<bid>, so PREFER the bid whose invoice
+    number is 'W<thisWO>B...'. This disambiguates (a) paired WOs, whose bid lists include the
+    sibling WO's invoice, and (b) multi-issue WOs, whose first approved bid is often a $0
+    diagnostic stub while the priced/invoiced bid is elsewhere (the old approved[0] pick
+    returned empty for those). Fallbacks: any invoiced bid; then any bid whose approved
+    option has priced services; then the first approved top-level bid (legacy)."""
+    wo = base_wo_num(order.get("name"))
+    bids = _bid_universe(order)
+    def own_invoice(b):
+        return any(normalize_text(inv.get("number")).upper().startswith("W" + wo + "B")
+                   for inv in (b.get("invoices") or []))
+    for b in bids:
+        if own_invoice(b):
+            return b
+    for b in bids:
+        if b.get("invoices"):
+            return b
+    for b in bids:
+        opt = (choose_options_for_bid(b) or [None])[0]
+        if opt and any(float(s.get("unitPrice") or 0) > 0 for s in (opt.get("services") or [])):
+            return b
+    approved = [b for b in (order.get("bids") or [])
                 if normalize_text(b.get("statusName")).lower() == "approved"]
-    # Approved-only: never fall back to a Draft/Pending/Rejected bid. Importing a
-    # non-approved amount silently mismatched the eventual approved total; no
-    # approved bid -> empty items -> the "no bid items" warning surfaces the WO.
-    bid = approved[0] if approved else None
+    return approved[0] if approved else None
+
+
+def extract_bids(order: dict, remedy_map: dict):
+    """Return (bidItems, bidTotal) from the bid AMH INVOICED for this WO (select_billed_bid)
+    -- NOT merely the first approved bid, which on a multi-issue WO is often a $0 diagnostic
+    stub, leaving the real lines unread. Line items deduped by name."""
+    bid = select_billed_bid(order)
 
     items: List[Dict] = []
     total = 0.0
