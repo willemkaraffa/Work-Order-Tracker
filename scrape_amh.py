@@ -138,24 +138,47 @@ def login_and_get_token(driver) -> str:
             if "login" not in low and "b2clogin" not in low:
                 break
 
-    print("[LOGIN] Loading WO list to trigger authenticated API requests...", file=sys.stderr)
-    driver.get(WO_LIST_URL)
-    time.sleep(12)
-
+    # After login the session is authenticated, but the SPA may still be acquiring its API
+    # token when we first scan -> the Bearer isn't in the log yet. This is the cold-login
+    # race: a WARM load catches it (proven -- an app 2nd attempt on a warm profile succeeds
+    # via this same scan). So RE-NAVIGATE the WO list within this already-authenticated
+    # session and re-scan, a few times, instead of one shot -- no re-login needed, it just
+    # gives the token time to be ready and fires fresh authed requests each pass.
     token = None
-    for entry in driver.get_log("performance"):
-        try:
-            msg = json.loads(entry["message"])["message"]
-            if msg.get("method") == "Network.requestWillBeSent":
-                headers = msg["params"]["request"].get("headers", {})
-                auth = headers.get("Authorization", "") or headers.get("authorization", "")
+    seen_requests = 0
+    for pass_n in range(5):
+        print(f"[LOGIN] Loading WO list to trigger authenticated API requests (pass {pass_n + 1})...",
+              file=sys.stderr)
+        driver.get(WO_LIST_URL)
+        time.sleep(6)
+        for entry in driver.get_log("performance"):
+            try:
+                msg = json.loads(entry["message"])["message"]
+                method = msg.get("method")
+                # Scan BOTH events: a cross-origin Authorization (www.amh.com page ->
+                # app.amh.com API) can land in requestWillBeSentExtraInfo, not the main event.
+                if method == "Network.requestWillBeSent":
+                    seen_requests += 1
+                    headers = msg["params"]["request"].get("headers", {})
+                elif method == "Network.requestWillBeSentExtraInfo":
+                    headers = msg["params"].get("headers", {})
+                else:
+                    continue
+                auth = headers.get("Authorization") or headers.get("authorization") or ""
                 if auth.startswith("Bearer "):
                     token = auth
                     break
-        except Exception:
-            pass
+            except Exception:
+                pass
+        if token:
+            break
+
     if not token:
-        raise RuntimeError("Could not capture Bearer token from network logs.")
+        raise RuntimeError(
+            "Could not capture Bearer token from network logs "
+            f"(url={driver.current_url!r}, requests_seen={seen_requests}). "
+            "A /login or b2clogin url means the credentials failed; otherwise no "
+            "authenticated API request surfaced a Bearer across the retries.")
     print(f"[LOGIN] Bearer token captured ({len(token)} chars).", file=sys.stderr)
     return token
 
@@ -176,8 +199,66 @@ def api_get(path: str, token: str, params: Optional[Dict[str, str]] = None):
         return json.loads(resp.read())
 
 
+def api_post(path: str, token: str, body: dict):
+    url = f"{API_BASE}/{path}"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "Authorization": token, "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://www.amh.com", "Referer": "https://www.amh.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    })
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
+
+
 def today_api_value() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT04:00:00.000Z")
+
+
+def as_order_list(resp) -> list:
+    """Normalize an API response to a list of order envelopes. A bare list passes
+    through; a paging wrapper is unwrapped by the first list-valued key we know."""
+    if isinstance(resp, list):
+        return resp
+    if isinstance(resp, dict):
+        for k in ("orders", "items", "data", "results", "value"):
+            v = resp.get(k)
+            if isinstance(v, list):
+                return v
+    return []
+
+
+def index_orders(orders: list, target: Dict[str, dict]) -> None:
+    """Key each envelope by its stripped WO number into target. setdefault: an
+    earlier feed (Order/Query, the fresher active set) wins over a later one."""
+    for item in orders:
+        o = item.get("order") or item
+        name = re.sub(r"^WO-", "", normalize_text(o.get("name")), flags=re.I).strip()
+        if name:
+            target.setdefault(name, item)
+
+
+def fetch_admin_order(token: str, wo_num: str) -> Optional[dict]:
+    """Look up a single WO in the admin Posted feed by WO-number search. Order/Query
+    only returns the ~100 most-recent orders, so old paid WOs age out; this feed
+    reaches them. Request shape captured live 2026-07-13 (see ref-amh-orderquery-api):
+    POST Order/VendorAdminOrders {type,query,paging} -> {orders,filterData,totalCount}.
+    query=<wo#> filters server-side, so no paging loop is needed for a targeted lookup.
+    Returns the envelope whose order.name matches exactly, or None."""
+    body = {"type": "Posted", "query": wo_num,
+            "paging": {"pageIndex": 0, "pageSize": 50, "sortBy": "name", "sortAscending": False}}
+    try:
+        resp = api_post("Order/VendorAdminOrders", token, body)
+    except Exception as exc:
+        print(f"[API] VendorAdminOrders query {wo_num} failed ({exc}).", file=sys.stderr)
+        return None
+    for item in as_order_list(resp):
+        o = item.get("order") or item
+        name = re.sub(r"^WO-", "", normalize_text(o.get("name")), flags=re.I).strip()
+        if name == wo_num:
+            return item
+    return None
 
 
 # ── extraction helpers ─────────────────────────────────────────────────────────
@@ -354,17 +435,16 @@ def main():
         except Exception: pass
 
     print("[API] Fetching Order/Query...", file=sys.stderr)
-    orders = api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"})
-    if not isinstance(orders, list):
-        orders = orders.get("orders") or orders.get("items") or []
-    print(f"[API] Got {len(orders)} order(s).", file=sys.stderr)
+    orders = as_order_list(api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"}))
+    print(f"[API] Order/Query: {len(orders)} order(s).", file=sys.stderr)
 
     order_map: Dict[str, dict] = {}
-    for item in orders:
-        o = item.get("order") or item
-        name = re.sub(r"^WO-", "", normalize_text(o.get("name")), flags=re.I).strip()
-        if name:
-            order_map[name] = item
+    index_orders(orders, order_map)
+
+    # Old paid WOs age out of Order/Query (~100 most-recent only). Targeted lookups below
+    # fall back to fetch_admin_order (VendorAdminOrders WO-number search) to reach them.
+    # The all-open bulk path stays on Order/Query so it isn't flooded with 300+ historical
+    # Posted/Canceled WOs.
 
     results = {}
     if all_open:
@@ -381,10 +461,10 @@ def main():
     else:
         for wo_num in wo_numbers:
             stripped = re.sub(r"^WO-", "", wo_num, flags=re.I).strip()
-            item = order_map.get(stripped)
+            item = order_map.get(stripped) or fetch_admin_order(token, stripped)
             if not item:
                 results[wo_num] = {"ok": False,
-                                   "error": f"WO {stripped} not found in AMH active orders."}
+                                   "error": f"WO {stripped} not found in AMH active or admin (Posted) orders."}
                 continue
             try:
                 results[wo_num] = build_wo(item)
