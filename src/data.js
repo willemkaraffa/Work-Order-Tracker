@@ -444,7 +444,7 @@ export function useWorkOrders() {
           unseen:        { kind: 'new' },
         };
         byId.set(id, wo);
-        batch.push({ id, isNew: true });
+        batch.push({ id, isNew: true, woId: wo.woId });
         if (wo.tech && !techsSet.has(wo.tech)) { techsSet.add(wo.tech); techsChanged = true; }
       }
       imported++;

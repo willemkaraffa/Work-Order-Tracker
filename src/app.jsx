@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice,
+  recomputeInvoice, normWoNum,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -5449,6 +5449,53 @@ function App() {
     return { ok: true, results: resp.results, woById };
   }, [applyCapture]);
 
+  // Remittance import driver: the remittance is the source of truth, so fetch EVERY paid WO
+  // fresh from the portal by its remittance WO number (one Edge login). Known WOs are updated
+  // in place (applyCapture); WOs not yet in the app are AUTO-CREATED (upsertOrders) so a paid
+  // WO reconciles even if it was never captured. Returns byNum[baseWO] = { wo, orderId } for
+  // the caller to reconcile directly against the fresh capture (not stale app data).
+  const captureAmhForRemittance = React.useCallback(async (woNumbers) => {
+    if (!window.scraper || !window.scraper.captureWOs) return { ok: false, error: 'Capture is only available in the desktop app' };
+    const nums = [...new Set((woNumbers || []).map(n => normWoNum(n)).filter(Boolean))];
+    if (!nums.length) return { ok: false, error: 'No AMH work orders in this remittance' };
+    let resp;
+    try { resp = await window.scraper.captureWOs(nums.map(n => ({ woId: n, pm: 'AMH' }))); }
+    catch (e) { return { ok: false, error: e.message }; }
+    if (!resp || !resp.ok) return resp || { ok: false, error: 'fetch failed' };
+
+    const existing = new Map();          // base WO# -> existing order id
+    for (const o of orders) {
+      if (String(o.pm || '').toUpperCase() !== 'AMH') continue;
+      const n = normWoNum(o.woId || o.id); if (n) existing.set(n, o.id);
+    }
+    const byNum = {};
+    const newIncoming = [];
+    for (const [num, res] of Object.entries(resp.results || {})) {
+      if (!res || !res.ok || !res.wo) continue;
+      const key = normWoNum(num);
+      if (existing.has(key)) {
+        const id = existing.get(key);
+        applyCapture(id, res);
+        byNum[key] = { wo: res.wo, orderId: id };
+      } else {
+        const s = res.wo;
+        byNum[key] = { wo: s, orderId: null };
+        newIncoming.push({
+          woId: s.woId, pm: 'AMH', type: s.type, address: s.address, city: s.city,
+          phone: s.phone, notes: s.notes, propertyId: s.propertyId, portalLink: s.portalLink,
+          bidItems: s.bidItems, bidAmount: s.bidAmount, contactName: s.contactName, contacts: s.contacts,
+        });
+      }
+    }
+    if (newIncoming.length) {
+      const r = upsertOrders(newIncoming);
+      for (const bt of (r.batch || [])) {
+        if (bt && bt.isNew && bt.woId) { const k = normWoNum(bt.woId); if (byNum[k]) byNum[k].orderId = bt.id; }
+      }
+    }
+    return { ok: true, byNum };
+  }, [orders, applyCapture, upsertOrders]);
+
   // "Go to folder": ensure the OneDrive folder tree (+ MSR bid sheet) exists, then open
   // it. Merges the old separate "Create folder" — one action creates-if-missing + opens.
   const openWoFolder = React.useCallback((id) => {
@@ -6107,7 +6154,7 @@ function App() {
               onRefreshAll={refreshAllInvoices}
             />
           ) : currentModule === 'remittances' ? (
-            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
+            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}
