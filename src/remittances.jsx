@@ -28,6 +28,16 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
   // non-taxable (tax 0), total still matches (MSR grand = face regardless).
   const [lib] = useServiceLibraryStore();
 
+  // Re-reconcile ONE AMH block from a freshly captured wo (per-line vendorTax). Defined
+  // above run() so the import auto-fetch can reuse it without a dep-array TDZ.
+  const reconcileAmhFromWo = React.useCallback((block, order, wo) => {
+    const bid = Array.isArray(wo && wo.bidItems) ? wo.bidItems : [];
+    const items = bid.map(b => ({ name: String((b && b.name) || ''), unitPrice: b && b.price, vendorTax: (b && b.vendorTax) || 0, qty: b && b.qty }));
+    const inclusive = parseFloat(String((wo && wo.bidAmount) || '').replace(/[^0-9.]/g, ''));
+    const row = { amount: block.paid, woId: block.woId, invoiceNum: block.invoiceNum, bidNum: block.bidNum, revisit: block.revisit };
+    return reconcileAmhRow(row, { order: { ...order, ...wo }, matchBy: block.matchBy }, items, Number.isFinite(inclusive) ? inclusive : null);
+  }, []);
+
   const run = React.useCallback(async (source) => {
     const api = source === 'amh'
       ? (window.remittance && window.remittance.parseAmh)
@@ -84,13 +94,37 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';
       const total = source === 'amh' ? res.paymentTotal : res.statementTotal;
       setReport({ blocks, statementTotal: total, fileName, source });
+
+      // Auto-fetch per-line AMH tax on import so matched WOs reconcile exactly WITHOUT a
+      // manual "Fetch all AMH items" click (one Edge login for the whole set). Re-reconcile
+      // each block in place; captureAmhItemsBatch also merges the fresh bidItems into the
+      // order. The manual button remains for an on-demand re-pull.
+      let finalBlocks = blocks;
+      if (source === 'amh' && onCaptureAmhBatch) {
+        const orderList = blocks.filter(b => b.orderId)
+          .map(b => orders.find(o => o.id === b.orderId)).filter(Boolean);
+        if (orderList.length) {
+          const cap = await Promise.resolve(onCaptureAmhBatch(orderList));
+          if (cap && cap.ok) {
+            const woById = cap.woById || {};
+            finalBlocks = blocks.map(b => {
+              const wo = b.orderId && woById[b.orderId];
+              return wo ? reconcileAmhFromWo(b, orders.find(o => o.id === b.orderId) || {}, wo) : b;
+            });
+            setReport(r => r ? { ...r, blocks: finalBlocks } : r);
+          } else if (cap && cap.error) {
+            toast && toast('Auto-fetch failed: ' + cap.error + ' - use "Fetch all AMH items"', 'warn');
+          }
+        }
+      }
+
       // R5: auto-populate the Invoice record for VERIFIED-ACCURATE WOs (status 'match',
-      // per-line tax present). FILL-EMPTY-ONLY -- never clobber a saved/edited invoice on
-      // a re-parse; the explicit "Bill matched" button does the force-overwrite. Suspect
-      // LINES carry their flag through so they surface for review in the editor.
+      // per-line tax present) from the POST-fetch blocks. FILL-EMPTY-ONLY -- never clobber a
+      // saved/edited invoice on a re-parse; the explicit "Bill matched" button force-overwrites.
+      // Suspect LINES carry their flag through so they surface for review in the editor.
       if (onBillMatched) {
         const auto = [];
-        for (const b of blocks) {
+        for (const b of finalBlocks) {
           if (!b.orderId || b.status !== 'match' || !b.lines.length) continue;
           if (source === 'amh' && b.taxFromBidAmount) continue;
           auto.push({ id: b.orderId, invoice: reconcileBlockToInvoice(b, source) });
@@ -104,19 +138,10 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
     setLoading(false);
-  }, [orders, toast, lib, onBillMatched]);
+  }, [orders, toast, lib, onBillMatched, onCaptureAmhBatch, reconcileAmhFromWo]);
 
   const updateBlock = React.useCallback((idx, next) => {
     setReport(r => r ? { ...r, blocks: r.blocks.map((b, i) => i === idx ? next : b) } : r);
-  }, []);
-
-  // Re-reconcile ONE AMH block from a freshly captured wo (per-line vendorTax).
-  const reconcileAmhFromWo = React.useCallback((block, order, wo) => {
-    const bid = Array.isArray(wo && wo.bidItems) ? wo.bidItems : [];
-    const items = bid.map(b => ({ name: String((b && b.name) || ''), unitPrice: b && b.price, vendorTax: (b && b.vendorTax) || 0, qty: b && b.qty }));
-    const inclusive = parseFloat(String((wo && wo.bidAmount) || '').replace(/[^0-9.]/g, ''));
-    const row = { amount: block.paid, woId: block.woId, invoiceNum: block.invoiceNum, bidNum: block.bidNum, revisit: block.revisit };
-    return reconcileAmhRow(row, { order: { ...order, ...wo }, matchBy: block.matchBy }, items, Number.isFinite(inclusive) ? inclusive : null);
   }, []);
 
   // On-demand single-WO AMH re-fetch: re-capture the WO, re-reconcile this block with
