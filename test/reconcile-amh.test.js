@@ -25,6 +25,15 @@ test('matchAmhRow matches by WO number (digits between W and B)', () => {
   assert.strictEqual(m.order.id, 'WO-201');
 });
 
+test('matchAmhRow: split-WO base joins to a portal "-N" child name (false-negative fix)', () => {
+  // Remittance token W9746663-1B... -> row.woId base '9746663'; the portal/captured
+  // order name is '9746663-1'. Both must normalize to the base and match.
+  const orders = [{ id: 'WO-9', woId: '9746663-1', pm: 'AMH', address: '215 Hickory Glen Ln' }];
+  const m = matchAmhRow(row({ woId: '9746663' }), orders);
+  assert.strictEqual(m.matchBy, 'woId');
+  assert.strictEqual(m.order.id, 'WO-9');
+});
+
 test('inclusive line amount = qty*unitPrice + vendorTax; sums to paid -> match', () => {
   const r = row({ woId: '9692517', invoiceNum: 'W9692517B0042838', bidNum: '0042838', amount: 351.03 });
   const m = matchAmhRow(r, ORDERS);

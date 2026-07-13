@@ -27,6 +27,11 @@ test('normWoNum strips prefix/zeros/non-digits so all forms compare equal', () =
   assert.strictEqual(normWoNum('WO-2045937'), '2045937');
   assert.strictEqual(normWoNum('WO 02045937'), '2045937');
   assert.strictEqual(normWoNum(''), '');
+  // AMH split-WO "-N" child/revisit suffix joins to its base (NOT folded into the
+  // digits: "9746663-1" must be "9746663", not "97466631").
+  assert.strictEqual(normWoNum('9746663-1'), '9746663');
+  assert.strictEqual(normWoNum('WO-9746663-2'), '9746663');
+  assert.strictEqual(normWoNum('9746663'), '9746663');
 });
 
 test('matchMsrRow: Invoice Notes number matches order.woId (primary key)', () => {

@@ -239,24 +239,34 @@ def index_orders(orders: list, target: Dict[str, dict]) -> None:
             target.setdefault(name, item)
 
 
+def base_wo_num(v: object) -> str:
+    """Canonical WO number: strip a WO-/WO prefix and an AMH '-N' child/revisit suffix,
+    so the portal split-WO name '9746663-1' joins to its base '9746663' -- the number the
+    remittance token (W<wo>B) and Order/Query carry. Mirror of orders-logic.normWoNum's
+    base so the Python scraper and the JS matcher agree on WO identity."""
+    s = re.sub(r"^WO[-\s]*", "", normalize_text(v), flags=re.I)
+    return re.sub(r"^(\d+)-\d+$", r"\1", s)
+
+
 def fetch_admin_order(token: str, wo_num: str) -> Optional[dict]:
     """Look up a single WO in the admin Posted feed by WO-number search. Order/Query
     only returns the ~100 most-recent orders, so old paid WOs age out; this feed
     reaches them. Request shape captured live 2026-07-13 (see ref-amh-orderquery-api):
     POST Order/VendorAdminOrders {type,query,paging} -> {orders,filterData,totalCount}.
-    query=<wo#> filters server-side, so no paging loop is needed for a targeted lookup.
-    Returns the envelope whose order.name matches exactly, or None."""
-    body = {"type": "Posted", "query": wo_num,
+    query=<base wo#> filters server-side, so no paging loop is needed. Matches on the
+    BASE number so a split WO (portal name '9746663-1') is found from its base '9746663'
+    -- the exact-name compare was the remittance false-negative. Returns the envelope or None."""
+    base = base_wo_num(wo_num)
+    body = {"type": "Posted", "query": base,
             "paging": {"pageIndex": 0, "pageSize": 50, "sortBy": "name", "sortAscending": False}}
     try:
         resp = api_post("Order/VendorAdminOrders", token, body)
     except Exception as exc:
-        print(f"[API] VendorAdminOrders query {wo_num} failed ({exc}).", file=sys.stderr)
+        print(f"[API] VendorAdminOrders query {base} failed ({exc}).", file=sys.stderr)
         return None
     for item in as_order_list(resp):
         o = item.get("order") or item
-        name = re.sub(r"^WO-", "", normalize_text(o.get("name")), flags=re.I).strip()
-        if name == wo_num:
+        if base_wo_num(o.get("name")) == base:
             return item
     return None
 
@@ -461,7 +471,9 @@ def main():
     else:
         for wo_num in wo_numbers:
             stripped = re.sub(r"^WO-", "", wo_num, flags=re.I).strip()
-            item = order_map.get(stripped) or fetch_admin_order(token, stripped)
+            base = base_wo_num(wo_num)
+            item = (order_map.get(stripped) or order_map.get(base)
+                    or fetch_admin_order(token, base))
             if not item:
                 results[wo_num] = {"ok": False,
                                    "error": f"WO {stripped} not found in AMH active or admin (Posted) orders."}

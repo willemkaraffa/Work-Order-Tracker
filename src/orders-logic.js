@@ -732,11 +732,19 @@ export function invoiceHasServiceCall(lines) {
 
 /* ---------- MSR remittance reconcile (invoice-generation Slice 1) ---------- */
 
-// Normalize a WO number to comparable digits: strip a WO-/WO prefix, drop every
-// non-digit, drop leading zeros. So the remittance "Invoice Notes : 02045937",
-// the order.woId "02045937", and a minted "WO-2045937" all compare equal.
+// Normalize a WO number to comparable digits: strip a WO-/WO prefix, drop an AMH
+// "-N" child/revisit suffix, drop every non-digit, drop leading zeros. So the
+// remittance "Invoice Notes : 02045937", the order.woId "02045937", and a minted
+// "WO-2045937" all compare equal -- AND the portal's split-WO name "9746663-1"
+// joins to its base "9746663" (the remittance token carries the base in W<wo>B and
+// the -N separately). The suffix strip MUST precede the /\D/ removal, which would
+// otherwise fold "9746663-1" into "97466631" -- a different number, the false-negative.
 export function normWoNum(v) {
-  return String(v == null ? '' : v).replace(/\D/g, '').replace(/^0+/, '');
+  return String(v == null ? '' : v)
+    .replace(/^WO[-\s]*/i, '')
+    .replace(/^(\d+)-\d+$/, '$1')
+    .replace(/\D/g, '')
+    .replace(/^0+/, '');
 }
 
 // Normalize an address for a fallback (non-WO-id) match: lowercase, keep only
