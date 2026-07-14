@@ -5,6 +5,7 @@ resources/
 wo-data.json
 chromedriver.exe
 __pycache__/
+.venv-agent/
 .edge-amh-profile/
 scratchpad/
 *.bak-*
