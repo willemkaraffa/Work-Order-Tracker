@@ -79,8 +79,14 @@ export function ageLevelForDays(n) {
 //              ONLY by the Invoices module's aging buckets, not by ageDaysFor
 //              directly (sent rows do not display an age in the WO list).
 // - other:     days since dateCreated (legacy behavior).
+/**
+ * @param {object|null|undefined} o - order record
+ * @returns {number|null} age in days, or null if o is falsy or tab is 'paid'/'sent'
+ */
 export function ageDaysFor(o) {
+  if (!o) return null;
   const tab = o.tab || 'active';
+  if (tab === 'paid') return null;
   if (tab === 'sent') return null;
   if (tab === 'complete') {
     const h = Array.isArray(o.history) ? o.history : [];
