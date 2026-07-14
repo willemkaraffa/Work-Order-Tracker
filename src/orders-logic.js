@@ -69,9 +69,7 @@ export function ageLevelForDays(n) {
   return 0;
 }
 
-// Age in days, scoped to the current tab.
-// - paid:      null (no age, no tint — WO is finalized)
-// - sent:      days since the most recent 'sent to billing queue' history entry.
+// Age in days, scoped to the current tab. Returns null (no age, no tint) or a number.
 // change11:
 // - complete:  days since the most recent 'marked complete' history entry.
 //              Surfaces aging color coding on the Complete tab (not yet paid).
@@ -79,14 +77,13 @@ export function ageLevelForDays(n) {
 //              ONLY by the Invoices module's aging buckets, not by ageDaysFor
 //              directly (sent rows do not display an age in the WO list).
 // - other:     days since dateCreated (legacy behavior).
-/**
- * @param {object|null|undefined} o - order record
- * @returns {number|null} age in days, or null if o is falsy or tab is 'paid'/'sent'
- */
+// There is NO tab='paid'. It is a pre-change11 value that migrateOrders rewrites to
+// 'sent' (see the tab model rework below), so it never reaches this function. Do not
+// re-add a 'paid' branch here; it would be dead code. A stale comment claiming paid
+// returned null is what led a review agent to "fix" an unreachable case.
 export function ageDaysFor(o) {
-  if (!o) return null;
+  if (!o) return null;  // sparse/hand-edited records: o.tab would throw
   const tab = o.tab || 'active';
-  if (tab === 'paid') return null;
   if (tab === 'sent') return null;
   if (tab === 'complete') {
     const h = Array.isArray(o.history) ? o.history : [];

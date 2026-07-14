@@ -40,20 +40,17 @@ test('ageDaysFor: sent tab returns null (no age) without throwing', () => {
 
 // Null order must yield null, NOT 0. Asserted strictly: `assert.ok(!x)` would pass
 // for both and could not tell a regression from correct behavior.
+// This is the real bug this file was written for: ageDaysFor(null) threw
+// "Cannot read properties of null (reading 'tab')".
 test('ageDaysFor: null/undefined order returns null (not 0)', () => {
   assert.strictEqual(ageDaysFor(null), null);
   assert.strictEqual(ageDaysFor(undefined), null);
 });
 
-// The paid contract: a finalized WO shows no age and no tint. This shipped broken
-// on 2026-06-30 -- the comment said null, the code fell through to dateCreated, so
-// paid rows displayed an age. dateCreated is set here on purpose: without the guard
-// this returns a number and the test fails.
-test('ageDaysFor: paid tab returns null even with a dateCreated', () => {
-  assert.strictEqual(ageDaysFor({ tab: 'paid' }), null);
-  assert.strictEqual(ageDaysFor({ tab: 'paid', dateCreated: '2020-01-01' }), null);
-  assert.strictEqual(ageDaysFor({ tab: 'paid', dateCreated: '2020-01-01', history: [] }), null);
-});
+// No tab='paid' test here on purpose. migrateOrders rewrites the deprecated
+// tab='paid' to 'sent', so a paid record never reaches ageDaysFor. Asserting on a
+// hand-built {tab:'paid'} object would be a passing test of an unreachable state --
+// false green. The migration is what guarantees the behavior; change11.test.js owns it.
 
 // ageLevelForDays always returns a number 0-3, never null. Downstream tinting does
 // arithmetic on it, so a null here would break the WO list.
