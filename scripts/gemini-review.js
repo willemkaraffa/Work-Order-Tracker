@@ -19,9 +19,23 @@
  *   node scripts/gemini-review.js --dry-run       assemble + print the request, no API call
  *   node scripts/gemini-review.js --strict        exit 1 if findings (for optional CI gate)
  *
- * ENV: GEMINI_API_KEY (from Google AI Studio; keep the test project billing-OFF).
+ * KEY: GEMINI_API_KEY env var, OR a gitignored `.gemini-key` file at the repo
+ *      root (paste the key there once — never on the CLI, never in chat). From
+ *      Google AI Studio; keep the test project billing-OFF.
  */
 const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+// Key resolution: env var wins, else the gitignored .gemini-key file at repo root.
+function loadKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
+  try {
+    const k = fs.readFileSync(path.join(__dirname, '..', '.gemini-key'), 'utf8').trim();
+    if (k) return k;
+  } catch { /* file absent -> no key */ }
+  return null;
+}
 
 const MODEL = 'gemini-2.5-flash';
 const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
@@ -47,12 +61,13 @@ Output ONLY a JSON array, no prose, no markdown fences. Each finding:
 {"file":"path","line":123,"severity":"high|med|low","rule":"A3|correctness|...","problem":"one sentence","fix":"one sentence"}
 Empty array [] if nothing found. Do not invent issues to fill the array.`;
 
+// Returns diff string, or null on failure (caller maps to exit 2).
 function getDiff(range) {
   try {
     return execSync(`git diff ${range}`, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
   } catch (e) {
     console.error(`[gemini-review] git diff failed: ${e.message}`);
-    process.exit(2);
+    return null;
   }
 }
 
@@ -65,6 +80,10 @@ function parseFindings(text) {
   return JSON.parse(fenced.slice(start, end + 1));
 }
 
+// Returns the exit code. We do NOT call process.exit() after a fetch: on Windows
+// that races undici's still-closing keep-alive socket and trips a libuv assertion
+// (exit 127, breaking the exit-code contract). Instead we return the code and let
+// the event loop drain, setting process.exitCode below.
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
@@ -72,9 +91,10 @@ async function main() {
   const range = args.find(a => !a.startsWith('--')) || 'HEAD';
 
   const diff = getDiff(range);
+  if (diff === null) return 2;
   if (!diff.trim()) {
     console.log(`[gemini-review] empty diff for '${range}' — nothing to review.`);
-    process.exit(0);
+    return 0;
   }
 
   const body = {
@@ -86,13 +106,13 @@ async function main() {
     console.log(`[gemini-review] DRY RUN — model=${MODEL}, range=${range}, diff bytes=${diff.length}`);
     console.log(`[gemini-review] prompt chars=${body.contents[0].parts[0].text.length}`);
     console.log('[gemini-review] (no API call made)');
-    process.exit(0);
+    return 0;
   }
 
-  const key = process.env.GEMINI_API_KEY;
+  const key = loadKey();
   if (!key) {
-    console.error('[gemini-review] GEMINI_API_KEY not set — review DID NOT RUN (exit 2, not a clean pass).');
-    process.exit(2);
+    console.error('[gemini-review] no key (set GEMINI_API_KEY or create .gemini-key) — review DID NOT RUN (exit 2, not a clean pass).');
+    return 2;
   }
 
   let data;
@@ -105,18 +125,18 @@ async function main() {
     if (!res.ok) {
       console.error(`[gemini-review] API ${res.status} ${res.statusText} — review DID NOT RUN (exit 2).`);
       console.error((await res.text()).slice(0, 500));
-      process.exit(2);
+      return 2;
     }
     data = await res.json();
   } catch (e) {
     console.error(`[gemini-review] network/API error: ${e.message} — review DID NOT RUN (exit 2).`);
-    process.exit(2);
+    return 2;
   }
 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     console.error('[gemini-review] empty/blocked response — review DID NOT RUN (exit 2).');
-    process.exit(2);
+    return 2;
   }
 
   let findings;
@@ -125,20 +145,21 @@ async function main() {
   } catch (e) {
     console.error(`[gemini-review] could not parse findings: ${e.message} — DID NOT RUN cleanly (exit 2).`);
     console.error(text.slice(0, 500));
-    process.exit(2);
+    return 2;
   }
 
   console.log(`\n[gemini-review] ADVISORY — ${MODEL}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
   if (findings.length === 0) {
     console.log('  No findings.');
-    process.exit(0);
+    return 0;
   }
   for (const f of findings) {
     console.log(`  ${f.file || '?'}:${f.line ?? '?'}  [${f.severity || '?'}/${f.rule || '?'}]  ${f.problem}`);
     if (f.fix) console.log(`      fix: ${f.fix}`);
   }
   console.log(`\n  ${findings.length} finding(s).`);
-  process.exit(strict ? 1 : 0);
+  return strict ? 1 : 0;
 }
 
-main();
+main().then(code => { process.exitCode = code; })
+      .catch(e => { console.error(`[gemini-review] fatal: ${e.message}`); process.exitCode = 2; });
