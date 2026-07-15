@@ -337,7 +337,7 @@ function FlagResolveModal({ line, onApply, onDismiss, onClose }) {
   };
   // Picking a suspect confirms IDENTITY only: name + taxable from the library item;
   // the price stays the bid price (what we are paid). Category -> labor (catalog items).
-  const useSuspect = (s) => { setName(s.name); setTaxable(!!s.taxable); setCategory('labor'); };
+  const applySuspect = (s) => { setName(s.name); setTaxable(!!s.taxable); setCategory('labor'); };
   const apply = () => onApply({
     name: name.trim() || line.name, desc: desc.trim(), category,
     unitPrice: price === '' ? 0 : (parseFloat(price) || 0), taxable,
@@ -356,7 +356,7 @@ function FlagResolveModal({ line, onApply, onDismiss, onClose }) {
             <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 6 }}>Resembles</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {line.suspects.map((s, i) => (
-                <button key={i} onClick={() => useSuspect(s)} style={{
+                <button key={i} onClick={() => applySuspect(s)} style={{
                   display: 'flex', justifyContent: 'space-between', gap: 12, textAlign: 'left',
                   padding: '7px 10px', borderRadius: 8, cursor: 'pointer',
                   border: '1px solid ' + (name === s.name ? 'var(--accent)' : 'var(--border-1)'),
