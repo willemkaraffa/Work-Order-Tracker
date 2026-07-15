@@ -5,5 +5,17 @@
       "Read(*)",
       "Edit(*)"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/length-check.js"
+          }
+        ]
+      }
+    ]
   }
 }
