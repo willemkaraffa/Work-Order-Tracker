@@ -1,5 +1,5 @@
 """
-scrape_amh.py  --  AMH work-order capture via headless Microsoft EDGE.
+scrape_amh.py  --  AMH work-order capture via real (NOT headless) Microsoft EDGE.
 
 AMH's portal no longer supports Chromium-engine browsers driven as a generic
 browser; real Edge passes. This logs in with Selenium/Edge, captures the Bearer
