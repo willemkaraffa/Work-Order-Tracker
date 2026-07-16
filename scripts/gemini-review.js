@@ -138,6 +138,16 @@ const TRY_NEXT = new Set([429, 404, 503]);
 const RUBRIC = `You are an INDEPENDENT, ADVISORY code reviewer. You do NOT approve, reject,
 or run any gate. You FLAG. Review the unified diff below for defects.
 
+You are given the FULL CURRENT TEXT of every touched file, followed by the diff.
+Review the DIFF, but resolve every question against the FULL FILES.
+
+Do NOT report a symbol as missing, undefined, unimplemented, or not-exported
+merely because it does not appear in the diff. Unchanged code is absent from a
+diff by definition; that is not evidence it does not exist. Search the full file
+text first. If a file is marked TRUNCATED, say you cannot tell rather than
+guessing. Absence of evidence is not evidence of absence, and a confident wrong
+finding costs more than a missed one.
+
 Priority checks (React + JS):
 A1 mirror-state: useState(x)+useEffect(()=>setX(derived),[dep]): should be derived/memoized.
 A2 stale-init: useState(maybeNull) where init is null on first render; later recomputes are lost.
@@ -155,7 +165,7 @@ Empty array [] if nothing found. Do not invent issues to fill the array.`;
 
 // Returns diff string, or null on failure (caller maps to exit 2).
 // execFileSync (arg array, no shell) not execSync: `range` comes from argv, and a
-// template-interpolated execSync would run `HEAD; rm -rf ~` as a shell command.
+// template-interpolated execSync would run a shell separator plus a second command.
 function getDiff(range) {
   try {
     return execFileSync('git', ['diff', range], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
@@ -163,6 +173,60 @@ function getDiff(range) {
     console.error(`[gemini-review] git diff failed: ${e.message}`);
     return null;
   }
+}
+
+function touchedFiles(range) {
+  try {
+    return execFileSync('git', ['diff', range, '--name-only'], { encoding: 'utf8' })
+      .split('\n').map(s => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Budgets. Gemini's context is large but quota and latency are not free, and a
+// giant prompt buys nothing once the reviewer has the file it needs.
+const MAX_FILE_CHARS = 60000;
+const MAX_TOTAL_CHARS = 200000;
+
+// Assembles the FULL CURRENT TEXT of every touched file to sit alongside the diff.
+//
+// WHY: a diff-only reviewer is blind to everything it does not touch, and it does
+// not know that it is blind. Three false positives in a row came from exactly this:
+// it claimed parseFindings was "not defined" (it sits at line 132), and claimed a
+// test would fail because findingId "was not updated" (it was, in an earlier
+// commit). Both are in the file, neither is in the diff. So it reported absence of
+// evidence as evidence of absence, twice, with high confidence.
+//
+// Pure on purpose: `read` is injected so this is testable without git or fs.
+// Returns { text, included, skipped, truncated } so callers can report honestly
+// when the context is PARTIAL rather than quietly reviewing on less than it says.
+function buildFileContext(files, read, maxFile = MAX_FILE_CHARS, maxTotal = MAX_TOTAL_CHARS) {
+  const parts = [];
+  const included = [], skipped = [], truncated = [];
+  let total = 0;
+
+  for (const f of files) {
+    const raw = read(f);
+    if (raw === null || raw === undefined) { skipped.push(f); continue; } // deleted/unreadable
+    if (raw.includes('\0')) { skipped.push(f); continue; }                // binary
+    if (total >= maxTotal) { skipped.push(f); continue; }
+
+    let body = raw;
+    if (body.length > maxFile) {
+      body = body.slice(0, maxFile) + '\n... [TRUNCATED, file longer than the per-file budget]';
+      truncated.push(f);
+    }
+    if (total + body.length > maxTotal) {
+      body = body.slice(0, Math.max(0, maxTotal - total)) + '\n... [TRUNCATED, total context budget reached]';
+      if (!truncated.includes(f)) truncated.push(f);
+    }
+    parts.push(`--- ${f} ---\n${body}`);
+    total += body.length;
+    included.push(f);
+  }
+
+  return { text: parts.join('\n\n'), included, skipped, truncated };
 }
 
 // Gemini may wrap JSON in ```json fences or add stray prose. Extract the array.
@@ -191,14 +255,30 @@ async function main() {
     return 0;
   }
 
+  // Full text of every touched file, so the reviewer stops calling unchanged code
+  // "missing" just because a diff does not repeat it.
+  const ctx = buildFileContext(touchedFiles(range), f => {
+    try { return fs.readFileSync(f, 'utf8'); } catch { return null; }
+  });
+
+  const prompt =
+    `${RUBRIC}\n\n=== FULL TEXT OF TOUCHED FILES ===\n${ctx.text}\n\n=== DIFF (${range}) ===\n${diff}`;
+
   const body = {
-    contents: [{ parts: [{ text: `${RUBRIC}\n\n=== DIFF (${range}) ===\n${diff}` }] }],
+    contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0, responseMimeType: 'application/json' },
   };
 
+  // Report context honestly: a PARTIAL context means the reviewer is still partly
+  // blind, and that must be visible rather than implied by silence.
+  const ctxNote = `${ctx.included.length} file(s) in context` +
+    (ctx.truncated.length ? `, ${ctx.truncated.length} TRUNCATED (${ctx.truncated.join(', ')})` : '') +
+    (ctx.skipped.length ? `, ${ctx.skipped.length} skipped/deleted (${ctx.skipped.join(', ')})` : '');
+
   if (dryRun) {
     console.log(`[gemini-review] DRY RUN: models=[${MODELS.join(', ')}], range=${range}, diff bytes=${diff.length}`);
-    console.log(`[gemini-review] prompt chars=${body.contents[0].parts[0].text.length}`);
+    console.log(`[gemini-review] context: ${ctxNote}`);
+    console.log(`[gemini-review] prompt chars=${prompt.length}`);
     console.log('[gemini-review] (no API call made)');
     return 0;
   }
@@ -254,6 +334,7 @@ async function main() {
   const open = doc.findings.filter(f => f.status === 'open');
 
   console.log(`\n[gemini-review] ADVISORY: ${usedModel}. Its OPINION does not gate; a human + \`npm run verify\` decide.`);
+  console.log(`[gemini-review] context: ${ctxNote}`);
   console.log(`[gemini-review] But every finding must be DISPOSITIONED before commit. Silence is not an option.\n`);
   if (open.length === 0) {
     console.log(`  Nothing open. (${findings.length} raised this run, all already dispositioned.)`);
@@ -281,4 +362,7 @@ if (require.main === module) {
         .catch(e => { console.error(`[gemini-review] fatal: ${e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseFindings, diffHash, findingId, mergeFindings, writeFindings, loadKey, FINDINGS_FILE };
+module.exports = {
+  parseFindings, diffHash, findingId, mergeFindings, writeFindings,
+  buildFileContext, loadKey, FINDINGS_FILE,
+};

@@ -7,7 +7,9 @@
 // already got bitten by (see src/orders-logic.js history).
 const assert = require('assert');
 const { evaluate } = require('../scripts/review-gate.js');
-const { parseFindings, diffHash, findingId, mergeFindings } = require('../scripts/gemini-review.js');
+const {
+  parseFindings, diffHash, findingId, mergeFindings, buildFileContext,
+} = require('../scripts/gemini-review.js');
 
 let failed = 0;
 function t(name, fn) {
@@ -165,6 +167,56 @@ t('merged ledger still blocks the gate while a carried finding is open', () => {
   const second = mergeFindings(first, [], 'h2', 'm');
   const v = evaluate(second, 'h2');
   assert.strictEqual(v.ok, false, 'carried-open finding must refuse the commit');
+});
+
+// --- diff-only blindness: the reviewer must get whole files, not just the diff --
+const reader = (map) => (f) => (f in map ? map[f] : null);
+
+t('BLINDNESS FIXED: unchanged code reaches the reviewer via full file text', () => {
+  // The exact false positive: parseFindings exists in the file, never in the diff.
+  const ctx = buildFileContext(['a.js'], reader({ 'a.js': 'function parseFindings(){}\n' }));
+  assert.match(ctx.text, /function parseFindings/);
+  assert.deepStrictEqual(ctx.included, ['a.js']);
+});
+
+t('each file is labelled with its path', () => {
+  const ctx = buildFileContext(['x/y.js'], reader({ 'x/y.js': 'body' }));
+  assert.match(ctx.text, /--- x\/y\.js ---/);
+});
+
+t('deleted/unreadable files are skipped, not crashed on', () => {
+  const ctx = buildFileContext(['gone.js', 'ok.js'], reader({ 'ok.js': 'kept' }));
+  assert.deepStrictEqual(ctx.skipped, ['gone.js']);
+  assert.deepStrictEqual(ctx.included, ['ok.js']);
+});
+
+t('binary files are skipped', () => {
+  const ctx = buildFileContext(['b.png'], reader({ 'b.png': 'PNG\0\0data' }));
+  assert.deepStrictEqual(ctx.skipped, ['b.png']);
+  assert.strictEqual(ctx.included.length, 0);
+});
+
+t('an over-budget file is truncated AND reported as truncated', () => {
+  const ctx = buildFileContext(['big.js'], reader({ 'big.js': 'x'.repeat(100) }), 10, 1000);
+  assert.deepStrictEqual(ctx.truncated, ['big.js']);
+  assert.match(ctx.text, /TRUNCATED/);
+  assert.ok(ctx.text.length < 100, 'must actually shrink');
+});
+
+t('total budget stops runaway context and reports what it dropped', () => {
+  const ctx = buildFileContext(
+    ['a.js', 'b.js', 'c.js'],
+    reader({ 'a.js': 'x'.repeat(60), 'b.js': 'y'.repeat(60), 'c.js': 'z'.repeat(60) }),
+    100, 100
+  );
+  assert.ok(ctx.included.length < 3, 'must not include everything');
+  assert.ok(ctx.skipped.length > 0, 'dropped files must be reported, not silent');
+});
+
+t('empty file list yields empty context, not a crash', () => {
+  const ctx = buildFileContext([], reader({}));
+  assert.strictEqual(ctx.text, '');
+  assert.strictEqual(ctx.included.length, 0);
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall review-gate tests pass');
