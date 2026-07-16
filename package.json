@@ -8,7 +8,7 @@
     "watch:renderer": "npm run build:renderer -- --watch",
     "test": "node test/run.js",
     "test:logic": "node test/run.js --logic",
-    "lint": "eslint \"src/**/*.{js,jsx}\"",
+    "lint": "eslint \"src/**/*.{js,jsx}\" \"scripts/**/*.js\" \"test/**/*.js\"",
     "verify": "npm run lint && npm run build:renderer && node test/run.js",
     "start": "npm run build:renderer && electron .",
     "build-win": "npm run build:renderer && electron-builder --win --x64",

@@ -45,4 +45,39 @@ export default [
       "react-hooks/exhaustive-deps": "warn",
     },
   },
+  // scripts/ was UNLINTED until 2026-07-16, which is how a command injection
+  // (execSync with an argv value interpolated into a shell string) shipped and had
+  // to be caught by an LLM reviewer instead of by a machine. These are node CJS
+  // tools, not React, so they get their own block. Honest scope: stock ESLint has
+  // no rule for shell injection (that needs eslint-plugin-security's
+  // detect-child-process, which flags EVERY child_process call and is noisy), so
+  // this catches unused/undefined symbols, not that bug class. Do not mistake it
+  // for a security gate.
+  {
+    files: ["scripts/**/*.js", "test/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: "commonjs",
+      globals: {
+        require: "readonly", module: "writable", process: "readonly",
+        console: "readonly", __dirname: "readonly", fetch: "readonly",
+        Buffer: "readonly", setTimeout: "readonly", clearTimeout: "readonly",
+      },
+    },
+    rules: {
+      "no-undef": "error",
+      "no-empty": ["error", { allowEmptyCatch: true }],
+      "no-unused-vars": ["error", { args: "none" }],
+    },
+  },
+  // Same precedent as the React block above: severity is set from what the code
+  // ALREADY passes, so the gate blocks NEW violations without forcing a legacy
+  // cleanup inside an unrelated change. scripts/ is new code with 0 violations, so
+  // it stays a hard error. test/ carries 5 legacy unused-vars (dead destructured
+  // imports, plus a dead `failures` counter in change11). Checked, not assumed:
+  // that counter is NOT a false-green, the harness exits on its own `fail` var.
+  {
+    files: ["test/**/*.js"],
+    rules: { "no-unused-vars": "warn" },
+  },
 ];
