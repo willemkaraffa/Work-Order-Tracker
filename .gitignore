@@ -10,5 +10,6 @@ __pycache__/
 scratchpad/
 *.bak-*
 CLAUDE.original.md
+.gemini-key
 
 .claude/settings.local.json
