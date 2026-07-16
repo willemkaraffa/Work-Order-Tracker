@@ -11,5 +11,6 @@ scratchpad/
 *.bak-*
 CLAUDE.original.md
 .gemini-key
+.perplexity-key
 
 .claude/settings.local.json

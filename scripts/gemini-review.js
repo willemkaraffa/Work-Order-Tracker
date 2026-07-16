@@ -1,16 +1,16 @@
 'use strict';
 /*
- * gemini-review.js — external, advisory code reviewer running on gemini-2.5-flash.
+ * gemini-review.js: external, advisory code reviewer on Gemini (see MODELS).
  *
  * WHY external: Claude Code subagents are Claude-only (the `model:` field takes
- * sonnet/opus/haiku/fable). To run the reviewer OFF Claude — and off the 5-hour
- * subscription window — it must live outside the Task runtime as a plain REST call.
+ * sonnet/opus/haiku/fable). To run the reviewer OFF Claude: and off the 5-hour
+ * subscription window: it must live outside the Task runtime as a plain REST call.
  *
  * SAFETY: advisory only. It NEVER flips the verify gate. The deterministic
  * `npm run verify` gate + a human are the only green light. Exit-code contract:
  *   0 = ran clean (no findings) OR ran with findings in default advisory mode
  *   1 = ran, found issues, AND --strict was passed (opt-in blocking for CI)
- *   2 = did NOT run (no key / API error / bad response). Loud, never silent —
+ *   2 = did NOT run (no key / API error / bad response). Loud, never silent -
  *       a skipped review must not read as a clean review (false confidence).
  *
  * USAGE:
@@ -20,7 +20,7 @@
  *   node scripts/gemini-review.js --strict        exit 1 if findings (for optional CI gate)
  *
  * KEY: GEMINI_API_KEY env var, OR a gitignored `.gemini-key` file at the repo
- *      root (paste the key there once — never on the CLI, never in chat). From
+ *      root (paste the key there once: never on the CLI, never in chat). From
  *      Google AI Studio; keep the test project billing-OFF.
  *
  * MODEL: tries MODELS in order, using whichever answers (free-tier availability
@@ -41,7 +41,7 @@ function loadKey() {
 }
 
 // Free-tier availability is a moving target: a single hardcoded id failed three
-// distinct ways within one session — 429 quota (2.5-flash, 2.0-flash), 404 retired
+// distinct ways within one session: 429 quota (2.5-flash, 2.0-flash), 404 retired
 // ("no longer available to new users": 2.5-flash-lite, still listed by ListModels),
 // and 503 capacity ("high demand": 3.5-flash, flash-latest). So try a chain, newest
 // first, and use whichever answers. GEMINI_MODEL overrides the chain entirely.
@@ -56,13 +56,13 @@ const endpointFor = m => `https://generativelanguage.googleapis.com/v1beta/model
 const TRY_NEXT = new Set([429, 404, 503]);
 
 // The audit rubric Gemini reviews against. Ported from the A1-A7 anti-tech-debt
-// rules (CLAUDE.md) + basic correctness. This is the MECHANISM, not decoration —
+// rules (CLAUDE.md) + basic correctness. This is the MECHANISM, not decoration -
 // the reviewer's signal is only as good as these triggers.
 const RUBRIC = `You are an INDEPENDENT, ADVISORY code reviewer. You do NOT approve, reject,
 or run any gate. You FLAG. Review the unified diff below for defects.
 
 Priority checks (React + JS):
-A1 mirror-state: useState(x)+useEffect(()=>setX(derived),[dep]) — should be derived/memoized.
+A1 mirror-state: useState(x)+useEffect(()=>setX(derived),[dep]): should be derived/memoized.
 A2 stale-init: useState(maybeNull) where init is null on first render; later recomputes are lost.
 A3 render-guard-vs-layoutEffect: conditional render hides an element a useLayoutEffect measures.
 A4 wrong-deps: effect must run post-mount but deps fire pre-mount.
@@ -110,7 +110,7 @@ async function main() {
   const diff = getDiff(range);
   if (diff === null) return 2;
   if (!diff.trim()) {
-    console.log(`[gemini-review] empty diff for '${range}' — nothing to review.`);
+    console.log(`[gemini-review] empty diff for '${range}': nothing to review.`);
     return 0;
   }
 
@@ -120,7 +120,7 @@ async function main() {
   };
 
   if (dryRun) {
-    console.log(`[gemini-review] DRY RUN — models=[${MODELS.join(', ')}], range=${range}, diff bytes=${diff.length}`);
+    console.log(`[gemini-review] DRY RUN: models=[${MODELS.join(', ')}], range=${range}, diff bytes=${diff.length}`);
     console.log(`[gemini-review] prompt chars=${body.contents[0].parts[0].text.length}`);
     console.log('[gemini-review] (no API call made)');
     return 0;
@@ -128,7 +128,7 @@ async function main() {
 
   const key = loadKey();
   if (!key) {
-    console.error('[gemini-review] no key (set GEMINI_API_KEY or create .gemini-key) — review DID NOT RUN (exit 2, not a clean pass).');
+    console.error('[gemini-review] no key (set GEMINI_API_KEY or create .gemini-key): review DID NOT RUN (exit 2, not a clean pass).');
     return 2;
   }
 
@@ -142,24 +142,24 @@ async function main() {
       });
       if (res.ok) { data = await res.json(); usedModel = m; break; }
       if (TRY_NEXT.has(res.status)) {
-        console.error(`[gemini-review] ${m}: ${res.status} ${res.statusText} — trying next model.`);
+        console.error(`[gemini-review] ${m}: ${res.status} ${res.statusText}: trying next model.`);
         continue;
       }
-      console.error(`[gemini-review] ${m}: API ${res.status} ${res.statusText} — review DID NOT RUN (exit 2).`);
+      console.error(`[gemini-review] ${m}: API ${res.status} ${res.statusText}: review DID NOT RUN (exit 2).`);
       console.error((await res.text()).slice(0, 500));
       return 2;
     } catch (e) {
-      console.error(`[gemini-review] ${m}: network error: ${e.message} — trying next model.`);
+      console.error(`[gemini-review] ${m}: network error: ${e.message}: trying next model.`);
     }
   }
   if (!data) {
-    console.error(`[gemini-review] no model in [${MODELS.join(', ')}] was available — review DID NOT RUN (exit 2).`);
+    console.error(`[gemini-review] no model in [${MODELS.join(', ')}] was available: review DID NOT RUN (exit 2).`);
     return 2;
   }
 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    console.error(`[gemini-review] ${usedModel}: empty/blocked response — review DID NOT RUN (exit 2).`);
+    console.error(`[gemini-review] ${usedModel}: empty/blocked response: review DID NOT RUN (exit 2).`);
     return 2;
   }
 
@@ -167,12 +167,12 @@ async function main() {
   try {
     findings = parseFindings(text);
   } catch (e) {
-    console.error(`[gemini-review] could not parse findings: ${e.message} — DID NOT RUN cleanly (exit 2).`);
+    console.error(`[gemini-review] could not parse findings: ${e.message}: DID NOT RUN cleanly (exit 2).`);
     console.error(text.slice(0, 500));
     return 2;
   }
 
-  console.log(`\n[gemini-review] ADVISORY — ${usedModel}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
+  console.log(`\n[gemini-review] ADVISORY: ${usedModel}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
   if (findings.length === 0) {
     console.log('  No findings.');
     return 0;
