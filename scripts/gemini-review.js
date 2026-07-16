@@ -22,8 +22,11 @@
  * KEY: GEMINI_API_KEY env var, OR a gitignored `.gemini-key` file at the repo
  *      root (paste the key there once — never on the CLI, never in chat). From
  *      Google AI Studio; keep the test project billing-OFF.
+ *
+ * MODEL: tries MODELS in order, using whichever answers (free-tier availability
+ *        swings by the minute). GEMINI_MODEL=<id> pins one instead.
  */
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -37,11 +40,20 @@ function loadKey() {
   return null;
 }
 
-// Verified against the live key via ListModels + a probe: 2.5-flash 429s on a new
-// project's free tier and 2.5-flash-lite 404s ("no longer available to new users"),
-// despite both still being listed. 3.5-flash answers 200. Re-probe if this breaks.
-const MODEL = 'gemini-3.5-flash';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+// Free-tier availability is a moving target: a single hardcoded id failed three
+// distinct ways within one session — 429 quota (2.5-flash, 2.0-flash), 404 retired
+// ("no longer available to new users": 2.5-flash-lite, still listed by ListModels),
+// and 503 capacity ("high demand": 3.5-flash, flash-latest). So try a chain, newest
+// first, and use whichever answers. GEMINI_MODEL overrides the chain entirely.
+// Re-probe: GET /v1beta/models with x-goog-api-key, then POST a one-word prompt.
+const MODELS = process.env.GEMINI_MODEL
+  ? [process.env.GEMINI_MODEL]
+  : ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash'];
+const endpointFor = m => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
+
+// 429/404/503 = this model is unusable right now; fall through to the next one.
+// Anything else is a real error worth surfacing immediately.
+const TRY_NEXT = new Set([429, 404, 503]);
 
 // The audit rubric Gemini reviews against. Ported from the A1-A7 anti-tech-debt
 // rules (CLAUDE.md) + basic correctness. This is the MECHANISM, not decoration —
@@ -65,9 +77,11 @@ Output ONLY a JSON array, no prose, no markdown fences. Each finding:
 Empty array [] if nothing found. Do not invent issues to fill the array.`;
 
 // Returns diff string, or null on failure (caller maps to exit 2).
+// execFileSync (arg array, no shell) not execSync: `range` comes from argv, and a
+// template-interpolated execSync would run `HEAD; rm -rf ~` as a shell command.
 function getDiff(range) {
   try {
-    return execSync(`git diff ${range}`, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
+    return execFileSync('git', ['diff', range], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
   } catch (e) {
     console.error(`[gemini-review] git diff failed: ${e.message}`);
     return null;
@@ -106,7 +120,7 @@ async function main() {
   };
 
   if (dryRun) {
-    console.log(`[gemini-review] DRY RUN — model=${MODEL}, range=${range}, diff bytes=${diff.length}`);
+    console.log(`[gemini-review] DRY RUN — models=[${MODELS.join(', ')}], range=${range}, diff bytes=${diff.length}`);
     console.log(`[gemini-review] prompt chars=${body.contents[0].parts[0].text.length}`);
     console.log('[gemini-review] (no API call made)');
     return 0;
@@ -118,27 +132,34 @@ async function main() {
     return 2;
   }
 
-  let data;
-  try {
-    const res = await fetch(ENDPOINT, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.error(`[gemini-review] API ${res.status} ${res.statusText} — review DID NOT RUN (exit 2).`);
+  let data, usedModel;
+  for (const m of MODELS) {
+    try {
+      const res = await fetch(endpointFor(m), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) { data = await res.json(); usedModel = m; break; }
+      if (TRY_NEXT.has(res.status)) {
+        console.error(`[gemini-review] ${m}: ${res.status} ${res.statusText} — trying next model.`);
+        continue;
+      }
+      console.error(`[gemini-review] ${m}: API ${res.status} ${res.statusText} — review DID NOT RUN (exit 2).`);
       console.error((await res.text()).slice(0, 500));
       return 2;
+    } catch (e) {
+      console.error(`[gemini-review] ${m}: network error: ${e.message} — trying next model.`);
     }
-    data = await res.json();
-  } catch (e) {
-    console.error(`[gemini-review] network/API error: ${e.message} — review DID NOT RUN (exit 2).`);
+  }
+  if (!data) {
+    console.error(`[gemini-review] no model in [${MODELS.join(', ')}] was available — review DID NOT RUN (exit 2).`);
     return 2;
   }
 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    console.error('[gemini-review] empty/blocked response — review DID NOT RUN (exit 2).');
+    console.error(`[gemini-review] ${usedModel}: empty/blocked response — review DID NOT RUN (exit 2).`);
     return 2;
   }
 
@@ -151,7 +172,7 @@ async function main() {
     return 2;
   }
 
-  console.log(`\n[gemini-review] ADVISORY — ${MODEL}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
+  console.log(`\n[gemini-review] ADVISORY — ${usedModel}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
   if (findings.length === 0) {
     console.log('  No findings.');
     return 0;
