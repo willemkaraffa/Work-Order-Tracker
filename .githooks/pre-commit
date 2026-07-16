@@ -1,0 +1,35 @@
+#!/bin/sh
+# pre-commit: the deterministic gate. Not advisory.
+#
+# WHY THIS EXISTS: on 2026-07-16 Claude built the verify gate, wrote memory
+# entries calling it "the done-gate", argued through a long session that a
+# deterministic gate plus a human are the only real green light, and then made
+# five commits without running it once. Not by defiance: each skip had a
+# defensible-sounding reason ("verify does not cover scripts/"). Advisory gates
+# lose to rationalization, every time, including from the author of the gate.
+# So this one does not ask.
+#
+# TOOL-AGNOSTIC ON PURPOSE. A PreToolUse hook only sees the tool it is wired to.
+# The same day, a PowerShell call walked straight through a guard that only
+# checked Bash. git runs this hook itself, no matter which shell invoked git, so
+# switching tools does not route around it.
+#
+# --no-verify skips this hook. That flag is BLOCKED in
+# ~/.claude/hooks/pretool-guards.js (GATE_BYPASS), so the two layers cover each
+# other's gap.
+#
+# ACTIVATION (local config, not tracked, so a fresh clone must run it):
+#   git config core.hooksPath .githooks
+# This file lives in .githooks/ rather than .git/hooks/ so that it is version
+# controlled: weakening the gate shows up in a diff a human reads, instead of
+# happening silently.
+#
+# KNOWN LIMIT, stated rather than hidden: this verifies the WORKING TREE, not the
+# staged subset. If you stage part of your changes, the gate still tests
+# everything on disk. That is stricter than a commit needs, never looser, so it
+# does not create false confidence.
+
+set -e
+echo "[pre-commit] deterministic gate: npm run verify"
+npm run verify
+echo "[pre-commit] gate passed."
