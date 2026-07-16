@@ -51,16 +51,29 @@ function findingId(f) {
     .digest('hex').slice(0, 8);
 }
 
-// Every finding lands as status "open". Only a human-authored disposition clears
-// it (scripts/review-disposition.js). Claude cannot silently drop one: the gate
-// blocks the commit while any finding is open, or dismissed with an empty reason.
-function writeFindings(diff, model, findings) {
-  const doc = {
-    diffHash: diffHash(diff),
-    model,
-    generatedAt: new Date().toISOString(),
-    findings: findings.map(f => ({
-      id: findingId(f),
+// The ledger ACCUMULATES. It used to overwrite, which meant a re-run could DROP a
+// previously-raised finding, because the model is non-deterministic. That is
+// laundering: re-roll until the reviewer forgets, then commit clean. Observed for
+// real on 2026-07-16, when a legitimate findingId collision flag vanished on a
+// second run.
+//
+// So: merge by id. A finding already dispositioned KEEPS its disposition. A
+// finding that was open and is absent from this run STAYS OPEN and still blocks.
+// A finding does not stop being true because the next roll forgot it. The only
+// exit is an explicit disposition with a reason (including "obsolete, code gone"),
+// which a human can read.
+function mergeFindings(prevDoc, rawFindings, hash, model) {
+  const byId = new Map(((prevDoc && prevDoc.findings) || []).map(f => [f.id, f]));
+
+  for (const f of rawFindings) {
+    const id = findingId(f);
+    const existing = byId.get(id);
+    if (existing) {
+      existing.lastSeen = hash; // re-raised; keep whatever disposition it already has
+      continue;
+    }
+    byId.set(id, {
+      id,
       file: f.file || '?',
       line: f.line ?? null,
       severity: f.severity || '?',
@@ -69,8 +82,27 @@ function writeFindings(diff, model, findings) {
       fix: f.fix || '',
       status: 'open',
       reason: null,
-    })),
+      firstSeen: hash,
+      lastSeen: hash,
+    });
+  }
+
+  return {
+    diffHash: hash,
+    model,
+    generatedAt: new Date().toISOString(),
+    findings: [...byId.values()],
   };
+}
+
+function readFindings() {
+  try { return JSON.parse(fs.readFileSync(FINDINGS_FILE, 'utf8')); }
+  catch { return null; }
+}
+
+function writeFindings(diff, model, findings) {
+  const hash = diffHash(diff);
+  const doc = mergeFindings(readFindings(), findings, hash, model);
   fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
   return doc;
 }
@@ -219,18 +251,23 @@ async function main() {
 
   const doc = writeFindings(diff, usedModel, findings);
 
+  const open = doc.findings.filter(f => f.status === 'open');
+
   console.log(`\n[gemini-review] ADVISORY: ${usedModel}. Its OPINION does not gate; a human + \`npm run verify\` decide.`);
   console.log(`[gemini-review] But every finding must be DISPOSITIONED before commit. Silence is not an option.\n`);
-  if (findings.length === 0) {
-    console.log('  No findings.');
-    console.log(`  recorded: ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}, 0 open)`);
+  if (open.length === 0) {
+    console.log(`  Nothing open. (${findings.length} raised this run, all already dispositioned.)`);
+    console.log(`  ledger: ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash})`);
     return 0;
   }
-  for (const f of doc.findings) {
-    console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'}  [${f.severity}/${f.rule}]  ${f.problem}`);
+  for (const f of open) {
+    // Carried = raised by an EARLIER run and not re-raised by this one. Kept open
+    // on purpose: the model forgetting a finding is not the finding being wrong.
+    const carried = f.lastSeen !== doc.diffHash ? '  (CARRIED from an earlier review, not re-raised this run)' : '';
+    console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'}  [${f.severity}/${f.rule}]  ${f.problem}${carried}`);
     if (f.fix) console.log(`         fix: ${f.fix}`);
   }
-  console.log(`\n  ${findings.length} finding(s) OPEN, recorded to ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}).`);
+  console.log(`\n  ${open.length} finding(s) OPEN in ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}).`);
   console.log('  Disposition each before committing:');
   console.log('    node scripts/review-disposition.js <id> fixed');
   console.log('    node scripts/review-disposition.js <id> dismissed "why it is not a real defect"');
@@ -244,4 +281,4 @@ if (require.main === module) {
         .catch(e => { console.error(`[gemini-review] fatal: ${e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseFindings, diffHash, findingId, writeFindings, loadKey, FINDINGS_FILE };
+module.exports = { parseFindings, diffHash, findingId, mergeFindings, writeFindings, loadKey, FINDINGS_FILE };

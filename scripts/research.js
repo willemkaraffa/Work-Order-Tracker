@@ -1,11 +1,25 @@
 'use strict';
 /*
- * research.js: external, advisory Researcher. Web-grounded prior-art lookup.
+ * research.js: external Scout. Does the thing we are about to build ALREADY EXIST?
  *
- * WHY: the loop otherwise reasons in a vacuum. This answers "has someone already
- * solved this, and how" BEFORE the architect commits to a design. It targets the
- * one gap model-diversity review does not cover: the reviewer checks the DIFF,
- * never the PREMISE. External evidence checks the premise.
+ * WHY: the loop otherwise codes blind. The user brainstorms a goal in
+ * non-technical terms; without this, the overseer implements that brainstorm from
+ * imagination alone, in a vacuum, and reinvents whatever the world already ships.
+ * This is CLAUDE.md rule 1 ("search for code that already solves this; prefer
+ * wrapping it") widened from the repo to the whole web. It also covers the one gap
+ * model-diversity review does not: the reviewer checks the DIFF, never the
+ * PREMISE. A premise of "we must build this" is checkable here.
+ *
+ * WHEN: the PLANNING phase, queried by the overseer once the user has described
+ * what they want. Not per-commit, not per-iteration, not after code exists.
+ * On demand only.
+ *
+ * WHAT GOOD OUTPUT LOOKS LIKE: names of existing free/open-source tools, their
+ * licenses, whether they are maintained, and what adopting one would cost. The
+ * ideal result is "X already does this, integrate it and write a compatibility
+ * shim" and the second-best is an honest "nothing off-the-shelf fits, build it".
+ * It is NOT a code reviewer: specific line-level findings are out of scope and
+ * belong to scripts/gemini-review.js.
  *
  * PROVIDER SWAP: Tavily today, Gemini google_search grounding later (fewer vendors
  * to pay for). `search()` below is the ONLY provider-specific code. Swapping means
@@ -14,18 +28,32 @@
  * Gemini grounding is NOT free: it 429s on the free tier even when plain calls
  * return 200, so that swap is gated on billing. Verified 2026-07, re-probe first.
  *
- * SCOPE: deliberately narrow. Good for: prior art, architectural patterns, known
- * pitfalls, library tradeoffs. BAD for: model ids, API shapes, versions, flags,
+ * SCOPE: deliberately narrow. GOOD for: does a tool/library/program already exist,
+ * what license, is it maintained, what would integration cost, architectural
+ * patterns, known pitfalls. BAD for: model ids, API shapes, versions, flags,
  * quotas. This repo learned that the hard way: ai.google.dev's own model page was
  * STALE and web aggregators contradicted each other, while one live ListModels
  * probe gave the truth in a single call. For anything with a live endpoint, PROBE
- * IT, do not research it.
+ * IT, do not research it. Also BAD for line-level code review (that is
+ * gemini-review.js) and for anything already answerable by reading this repo.
+ *
+ * SEARCH IS A BLUNT INSTRUMENT. Tavily is an aggregation/reranking layer, not an
+ * oracle, and its synthesis has already overstated its own sources here (it
+ * claimed Danger.js "blocks commits until findings are dismissed"; the sources
+ * said it runs in CI and fails builds). Treat the SYNTHESIS as the weakest part of
+ * the output and the linked SOURCES as the actual evidence. Phrase queries as the
+ * GOAL plus "open source library", not as a yes/no question, since a leading
+ * question gets a leading answer.
  *
  * CREDITS: free tier is 1000/month (~47/workday). Basic search = 1 credit. This
  * script pins search_depth=basic and NEVER touches Tavily's /research endpoint,
  * which costs 4-250 credits per call. Keep the researcher ON DEMAND for novel
- * work; wiring it into every loop iteration is what burns the budget. Actual
- * spend per call is printed from the response `usage` field.
+ * work; wiring it into every loop iteration is what burns the budget.
+ * Tavily's docs claim a top-level `usage` field with credit spend. IT DOES NOT
+ * EXIST: a live call returned keys [query, follow_up_questions, answer, images,
+ * results, response_time, request_id] and nothing else. So per-call spend is NOT
+ * observable here; the script says so loudly rather than printing nothing and
+ * letting an unknown cost read as free. Track the balance in Tavily's dashboard.
  *
  * SAFETY: advisory only, and its output is UNTRUSTED WEB CONTENT (an injection
  * surface the reviewer does not have). It returns evidence, never instructions.
@@ -35,9 +63,10 @@
  * Exit codes: 0 = ran, 2 = DID NOT RUN (no key / API error / bad response). A
  * skipped research pass must never read as "nothing found".
  *
- * USAGE:
- *   node scripts/research.js "electron safeStorage vs keytar for api keys"
- *   node scripts/research.js --dry-run "question"
+ * USAGE (planning phase, phrase it as the GOAL, not as a question):
+ *   node scripts/research.js "open source library to store api keys encrypted in an electron app"
+ *   node scripts/research.js "existing tool that blocks a git commit until code review findings are resolved"
+ *   node scripts/research.js --dry-run "goal"
  *
  * KEY: TAVILY_API_KEY env var, OR a gitignored `.tavily-key` file at repo root
  *      (paste it there once; never on the CLI, never in chat).

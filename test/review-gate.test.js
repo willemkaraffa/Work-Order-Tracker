@@ -7,7 +7,7 @@
 // already got bitten by (see src/orders-logic.js history).
 const assert = require('assert');
 const { evaluate } = require('../scripts/review-gate.js');
-const { parseFindings, diffHash, findingId } = require('../scripts/gemini-review.js');
+const { parseFindings, diffHash, findingId, mergeFindings } = require('../scripts/gemini-review.js');
 
 let failed = 0;
 function t(name, fn) {
@@ -106,6 +106,65 @@ t('findingId is stable per file+line+problem', () => {
   const a = { file: 'x.js', line: 3, problem: 'boom' };
   assert.strictEqual(findingId(a), findingId({ ...a }));
   assert.notStrictEqual(findingId(a), findingId({ ...a, line: 4 }));
+});
+
+t('findingId does not collide across a pipe in the problem text', () => {
+  // The pipe-joined version made these two identical.
+  const a = { file: 'x.js', line: 1, problem: 'a|b' };
+  const b = { file: 'x.js', line: '1|a', problem: 'b' };
+  assert.notStrictEqual(findingId(a), findingId(b));
+});
+
+// --- anti-laundering: a re-roll must not be able to drop a finding ------------
+const raw = (over = {}) => ({ file: 'a.js', line: 1, severity: 'high', rule: 'correctness', problem: 'p', fix: 'x', ...over });
+
+t('LAUNDERING BLOCKED: an open finding absent from a re-run stays open', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  assert.strictEqual(first.findings.length, 1);
+  assert.strictEqual(first.findings[0].status, 'open');
+  // Re-roll returns NOTHING (the model forgot it).
+  const second = mergeFindings(first, [], 'h2', 'm');
+  assert.strictEqual(second.findings.length, 1, 'finding must survive the re-roll');
+  assert.strictEqual(second.findings[0].status, 'open', 'must still block the commit');
+});
+
+t('a carried finding is marked as not-seen-this-run', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  const second = mergeFindings(first, [], 'h2', 'm');
+  assert.strictEqual(second.findings[0].lastSeen, 'h1');
+  assert.notStrictEqual(second.findings[0].lastSeen, second.diffHash);
+});
+
+t('a re-raised finding keeps its existing disposition (no reset to open)', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  first.findings[0].status = 'dismissed';
+  first.findings[0].reason = 'verified false positive';
+  const second = mergeFindings(first, [raw()], 'h2', 'm');
+  assert.strictEqual(second.findings.length, 1);
+  assert.strictEqual(second.findings[0].status, 'dismissed');
+  assert.strictEqual(second.findings[0].reason, 'verified false positive');
+  assert.strictEqual(second.findings[0].lastSeen, 'h2', 're-raised, so lastSeen advances');
+});
+
+t('a fixed finding stays fixed and does not reopen when re-raised', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  first.findings[0].status = 'fixed';
+  const second = mergeFindings(first, [raw()], 'h2', 'm');
+  assert.strictEqual(second.findings[0].status, 'fixed');
+});
+
+t('genuinely new findings are added alongside carried ones', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  const second = mergeFindings(first, [raw({ problem: 'different bug' })], 'h2', 'm');
+  assert.strictEqual(second.findings.length, 2);
+  assert.strictEqual(second.findings.filter(f => f.status === 'open').length, 2);
+});
+
+t('merged ledger still blocks the gate while a carried finding is open', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm');
+  const second = mergeFindings(first, [], 'h2', 'm');
+  const v = evaluate(second, 'h2');
+  assert.strictEqual(v.ok, false, 'carried-open finding must refuse the commit');
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall review-gate tests pass');
