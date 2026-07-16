@@ -78,7 +78,15 @@ async function search(question, key) {
     throw err;
   }
   const j = await res.json();
-  return { answer: j.answer || null, results: j.results || [], usage: j.usage || null };
+  // `usage` is what the docs promise; the live API did not send it. Keep the raw
+  // top-level keys so a missing spend report is LOUD and self-diagnosing on the
+  // next real call, instead of silently reading as "free".
+  return {
+    answer: j.answer || null,
+    results: j.results || [],
+    usage: j.usage || j.usage_metadata || j.credits || null,
+    topLevelKeys: Object.keys(j),
+  };
 }
 
 async function main() {
@@ -87,7 +95,8 @@ async function main() {
   const question = args.filter(a => !a.startsWith('--')).join(' ').trim();
 
   if (!question) {
-    console.error('[research] usage: node scripts/research.js "your question"');
+    console.error('[research] usage: node scripts/research.js "<a real question>"');
+    console.error('[research] example: node scripts/research.js "electron safeStorage vs keytar for api keys"');
     return 2;
   }
 
@@ -134,7 +143,12 @@ async function main() {
     if (r.content) console.log(`     ${r.content.trim().replace(/\s+/g, ' ').slice(0, 220)}`);
   }
 
-  if (out.usage) console.log(`\n  credits: ${JSON.stringify(out.usage)}`);
+  if (out.usage) {
+    console.log(`\n  credits: ${JSON.stringify(out.usage)}`);
+  } else {
+    console.log(`\n  credits: NOT REPORTED by the API (docs claim a 'usage' field; it did not arrive).`);
+    console.log(`  response keys seen: [${out.topLevelKeys.join(', ')}] <- if a spend field is in there, wire it into search().`);
+  }
   return 0;
 }
 
