@@ -37,7 +37,10 @@ function loadKey() {
   return null;
 }
 
-const MODEL = 'gemini-2.5-flash';
+// Verified against the live key via ListModels + a probe: 2.5-flash 429s on a new
+// project's free tier and 2.5-flash-lite 404s ("no longer available to new users"),
+// despite both still being listed. 3.5-flash answers 200. Re-probe if this breaks.
+const MODEL = 'gemini-3.5-flash';
 const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 // The audit rubric Gemini reviews against. Ported from the A1-A7 anti-tech-debt
