@@ -32,4 +32,12 @@
 set -e
 echo "[pre-commit] deterministic gate: npm run verify"
 npm run verify
+
+# Second gate: every reviewer finding must be fixed, or dismissed with a written
+# reason. Blocks the silent drop. It does not judge whether a reason is GOOD (that
+# needs judgment); it guarantees the reason exists, is attributable, and gets
+# printed here for a human to overrule.
+echo "[pre-commit] review gate: findings must be dispositioned"
+node scripts/review-gate.js
+
 echo "[pre-commit] gate passed."

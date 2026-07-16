@@ -12,5 +12,6 @@ scratchpad/
 CLAUDE.original.md
 .gemini-key
 .tavily-key
+.review-findings.json
 
 .claude/settings.local.json

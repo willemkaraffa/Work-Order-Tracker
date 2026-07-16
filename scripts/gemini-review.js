@@ -29,6 +29,51 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+const FINDINGS_FILE = path.join(__dirname, '..', '.review-findings.json');
+
+// Identity of the reviewed tree. The gate re-derives this at commit time; if it
+// moved, the review is stale and the gate refuses. Fixing a finding changes the
+// diff, so a fix REQUIRES a fresh review. That is the point, not a bug.
+function diffHash(diff) {
+  return crypto.createHash('sha256').update(diff).digest('hex').slice(0, 16);
+}
+
+// JSON.stringify, not a `|`-joined template: a problem string containing a pipe
+// could otherwise collide with a different file/line/problem split. Flagged by the
+// reviewer, then LAUNDERED when a re-run of the non-deterministic model dropped
+// the finding. Fixed anyway; a finding does not stop being true because the next
+// roll forgot it.
+function findingId(f) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify([f.file, f.line, f.problem]))
+    .digest('hex').slice(0, 8);
+}
+
+// Every finding lands as status "open". Only a human-authored disposition clears
+// it (scripts/review-disposition.js). Claude cannot silently drop one: the gate
+// blocks the commit while any finding is open, or dismissed with an empty reason.
+function writeFindings(diff, model, findings) {
+  const doc = {
+    diffHash: diffHash(diff),
+    model,
+    generatedAt: new Date().toISOString(),
+    findings: findings.map(f => ({
+      id: findingId(f),
+      file: f.file || '?',
+      line: f.line ?? null,
+      severity: f.severity || '?',
+      rule: f.rule || '?',
+      problem: f.problem || '',
+      fix: f.fix || '',
+      status: 'open',
+      reason: null,
+    })),
+  };
+  fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
+  return doc;
+}
 
 // Key resolution: env var wins, else the gitignored .gemini-key file at repo root.
 function loadKey() {
@@ -172,18 +217,31 @@ async function main() {
     return 2;
   }
 
-  console.log(`\n[gemini-review] ADVISORY: ${usedModel}. Does NOT gate. Human + \`npm run verify\` decide.\n`);
+  const doc = writeFindings(diff, usedModel, findings);
+
+  console.log(`\n[gemini-review] ADVISORY: ${usedModel}. Its OPINION does not gate; a human + \`npm run verify\` decide.`);
+  console.log(`[gemini-review] But every finding must be DISPOSITIONED before commit. Silence is not an option.\n`);
   if (findings.length === 0) {
     console.log('  No findings.');
+    console.log(`  recorded: ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}, 0 open)`);
     return 0;
   }
-  for (const f of findings) {
-    console.log(`  ${f.file || '?'}:${f.line ?? '?'}  [${f.severity || '?'}/${f.rule || '?'}]  ${f.problem}`);
-    if (f.fix) console.log(`      fix: ${f.fix}`);
+  for (const f of doc.findings) {
+    console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'}  [${f.severity}/${f.rule}]  ${f.problem}`);
+    if (f.fix) console.log(`         fix: ${f.fix}`);
   }
-  console.log(`\n  ${findings.length} finding(s).`);
+  console.log(`\n  ${findings.length} finding(s) OPEN, recorded to ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}).`);
+  console.log('  Disposition each before committing:');
+  console.log('    node scripts/review-disposition.js <id> fixed');
+  console.log('    node scripts/review-disposition.js <id> dismissed "why it is not a real defect"');
   return strict ? 1 : 0;
 }
 
-main().then(code => { process.exitCode = code; })
-      .catch(e => { console.error(`[gemini-review] fatal: ${e.message}`); process.exitCode = 2; });
+// Only run as a CLI. Without this guard, `require()`ing this file from a test
+// fires a live API call as a side effect.
+if (require.main === module) {
+  main().then(code => { process.exitCode = code; })
+        .catch(e => { console.error(`[gemini-review] fatal: ${e.message}`); process.exitCode = 2; });
+}
+
+module.exports = { parseFindings, diffHash, findingId, writeFindings, loadKey, FINDINGS_FILE };
