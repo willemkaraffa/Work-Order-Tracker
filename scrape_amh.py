@@ -16,7 +16,7 @@ env   : AMH_EMAIL / AMH_PASSWORD (required for fresh login)
         EDGE_BINARY / EDGE_DRIVER (optional explicit paths; for packaged app)
 """
 from __future__ import annotations
-import datetime, json, os, re, sys, time, urllib.request
+import datetime, json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,7 +26,7 @@ from selenium.webdriver.edge.options import Options
 from selenium.webdriver.edge.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, WebDriverException
 
 SCRIPT_DIR  = Path(os.path.dirname(os.path.abspath(__file__)))
 EMAIL       = os.environ.get("AMH_EMAIL")
@@ -56,6 +56,56 @@ def _edge_driver_path() -> Optional[str]:
         if cand and os.path.exists(cand):
             return cand
     return None
+
+
+def clear_stale_profile(profile_dir: str) -> None:
+    """Kill Edge processes holding this profile, then drop its stale lock files.
+
+    A capture that dies without driver.quit() (app closed mid-run, driver killed)
+    leaves its Edge alive. That orphan keeps the profile's SingletonLock, so every
+    later capture launches a second Edge on the same --user-data-dir, hits the lock,
+    and dies at startup as "GetHandleVerifier" -- a generic launch crash that reads
+    like a code break. One crash then poisons every run until a human kills the
+    orphan by hand.
+
+    ONLY call this after a launch has already FAILED (see make_driver). It cannot
+    tell an orphan from a live concurrent capture on the same profile, so calling
+    it eagerly would kill a working run's browser. After a failed launch that risk
+    is moot: the lock proves nothing else can run here anyway.
+
+    Scoped by command line to THIS profile dir, so the user's own Edge is untouched.
+    Match uses .Contains(), NOT -like: a path segment containing [ or ] is a legal
+    Windows filename but a PowerShell wildcard character class, which would silently
+    match nothing and leave the orphan in place. Matched lowercased because the
+    orphan may come from an earlier build whose userData path cased differently --
+    Edge echoes --user-data-dir back verbatim (verified), so only a cross-run change
+    in the path's own casing can desync it, and Windows paths are case-insensitive.
+
+    Best-effort: a failed sweep must not block the retry, which might still work.
+    """
+    if sys.platform != "win32" or not profile_dir:
+        return
+    ps_dir = profile_dir.lower().replace("'", "''")
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -and $_.CommandLine.ToLower().Contains('{ps_dir}') }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                       creationflags=_NO_WINDOW, timeout=30,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        time.sleep(1)  # let the OS release the lock handles before we unlink them
+    except Exception as exc:
+        print(f"[PROFILE] stale-Edge sweep failed ({exc}); continuing.", file=sys.stderr)
+    # Only safe AFTER the sweep: these files are meaningless once no Edge holds them.
+    for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        try:
+            p = Path(profile_dir) / fname
+            if p.is_symlink() or p.exists():
+                p.unlink()
+        except Exception:
+            pass
 
 
 def make_driver():
@@ -92,10 +142,27 @@ def make_driver():
     # (selenium 4.6+) auto-resolve the binary. Without this, the no-driver fallback
     # spawned msedgedriver with a visible blank console window.
     driver_path = _edge_driver_path()
-    service = Service(driver_path) if driver_path else Service()
-    if sys.platform == "win32":
-        service.creation_flags = _NO_WINDOW
-    return webdriver.Edge(service=service, options=opts)
+
+    def _service():
+        # Fresh Service per attempt: a Service that failed to start cannot be reused.
+        s = Service(driver_path) if driver_path else Service()
+        if sys.platform == "win32":
+            s.creation_flags = _NO_WINDOW
+        return s
+
+    try:
+        return webdriver.Edge(service=_service(), options=opts)
+    except WebDriverException as exc:
+        # Edge died at launch. The overwhelmingly common cause is an orphaned Edge
+        # from a crashed prior capture still holding this profile's SingletonLock
+        # ("session not created: Chrome instance exited" / GetHandleVerifier).
+        # Sweep the profile's owners and retry ONCE. Healing here rather than before
+        # every launch keeps the sweep off the healthy path, where it could kill a
+        # concurrent capture's live browser.
+        print(f"[PROFILE] Edge launch failed ({normalize_text(str(exc))[:140]}); "
+              "sweeping stale profile owners and retrying once.", file=sys.stderr)
+        clear_stale_profile(profile_dir)
+        return webdriver.Edge(service=_service(), options=opts)
 
 
 # ── login + token capture ──────────────────────────────────────────────────────

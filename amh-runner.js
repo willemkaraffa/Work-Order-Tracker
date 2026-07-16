@@ -4,7 +4,7 @@
 // in-app Electron BrowserWindow scraper (AMH now blocks Chromium-engine
 // browsers; the Python path drives real Edge).
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { app } = require('electron');
 
 // Resolve interpreter + script. Packaged: bundled embeddable Python + script
@@ -30,6 +30,30 @@ function pythonPaths() {
 // profile SingletonLock and the second crashes, so serialize — reject a second
 // capture while one is running rather than corrupt the profile.
 let captureInFlight = false;
+
+// Quitting the app mid-capture kills nothing by itself: the Python child keeps
+// running, and the Edge IT drives outlives both and keeps holding the profile's
+// SingletonLock. Every later capture then dies at Edge launch (GetHandleVerifier)
+// until someone kills the orphan by hand. Kill the whole child TREE on quit
+// (taskkill /T reaches python -> msedgedriver -> msedge), so the crash never
+// happens. scrape_amh.clear_stale_profile is the other half: it heals orphans
+// that got past this (hard kill, power loss).
+let activeProc = null;
+function killActiveCapture() {
+  const proc = activeProc;
+  if (!proc) return;
+  activeProc = null;
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true });
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch (_) { /* quitting anyway; nothing useful to do */ }
+}
+// Registered at require time: app.on works before ready, and 'before-quit' fires
+// early enough to still have a live pid.
+try { app.on('before-quit', killActiveCapture); } catch (_) {}
 
 // Run the scraper for an array of WO numbers in ONE login. creds =
 // { username, password } | null. Resolves the parsed result map; rejects on
@@ -61,12 +85,14 @@ function runAmhCapture(woNumbers, creds) {
     try {
       proc = spawn(python, [script], { stdio: ['pipe', 'pipe', 'pipe'], env, windowsHide: true });
     } catch (e) { return reject(new Error('Could not start Python: ' + e.message)); }
+    activeProc = proc;
 
     let out = '', err = '';
     proc.stdout.on('data', d => { out += d.toString(); });
     proc.stderr.on('data', d => { err += d.toString(); });
     proc.on('error', e => reject(new Error('Python spawn failed: ' + e.message)));
     proc.on('close', code => {
+      activeProc = null;
       if (code !== 0) return reject(new Error(`Python exited ${code}: ${err.slice(-300)}`));
       try { resolve(JSON.parse(out)); }
       catch (e) { reject(new Error('Could not parse Python output: ' + out.slice(0, 200))); }
