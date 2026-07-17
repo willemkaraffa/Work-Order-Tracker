@@ -43,13 +43,15 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/verify-budget-guard.js" }
         ]
       },
       {
         "matcher": "PowerShell",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/verify-budget-guard.js" }
         ]
       }
     ],

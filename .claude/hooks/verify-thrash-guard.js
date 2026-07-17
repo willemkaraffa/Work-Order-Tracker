@@ -35,12 +35,25 @@ function main() {
   if (/\bnpm (run (verify|build[\w:-]*|watch[\w:-]*)|test|ci)\b/.test(cmd)) return;
   if (/^\s*git\b/.test(cmd)) return;
 
+  // The Overseer's OWN tools are re-run BY DESIGN, not thrash. The review gate forces a
+  // FRESH gemini-review after every fix (staleness is deliberate: a fix changes the diff),
+  // and cite/disposition run once PER finding. Counting them turns the sanctioned review
+  // loop into a self-block -- proven: fixing 3 findings one-by-one trips this on the 3rd
+  // reviewer run. The test runner is re-run freely too (npm test is whitelisted above;
+  // this covers the bare `node test/run.js` spelling). These are not ad-hoc scratch.
+  const SANCTIONED = new Set([
+    'gemini-review.js', 'review-gate.js', 'review-disposition.js', 'cite.js', 'run.js',
+  ]);
+
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.
   // Match the file token, take its basename so different cwd spellings collapse.
   const targets = new Set();
   const re = /(?:^|\s)(?:node|python3?|py|deno|bun|ts-node|tsx)\s+(?:[^\s]*[\\/])?([\w.-]+\.(?:m?js|cjs|py|ts))\b/gi;
   let m;
-  while ((m = re.exec(cmd))) targets.add(m[1].toLowerCase());
+  while ((m = re.exec(cmd))) {
+    const base = m[1].toLowerCase();
+    if (!SANCTIONED.has(base)) targets.add(base); // sanctioned tools bypass the counter
+  }
   if (!targets.size) return; // not an ad-hoc script run
 
   const session = String(input.session_id || 'nosession').replace(/[^\w.-]/g, '_');
@@ -48,6 +61,7 @@ function main() {
 
   let state = {};
   try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch {}
+  if (!state || typeof state !== 'object') state = {}; // corrupt file (null/non-object) must not throw
 
   const now = Date.now();
   let blockedTarget = null;
