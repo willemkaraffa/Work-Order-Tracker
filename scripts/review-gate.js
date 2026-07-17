@@ -30,6 +30,18 @@ const { execFileSync } = require('child_process');
 
 const FINDINGS_FILE = path.join(__dirname, '..', '.review-findings.json');
 
+// Files whose change carries no code risk an LLM reviewer could catch: docs, and the
+// Overseer's own config/hooks (markdown, .claude/**, roadmap-handoffs/**). A commit
+// touching ONLY these skips the gemini review REQUIREMENT -- the LLM adds nothing on
+// prose or JSON and running it there is pure tax. The deterministic gates (tests, this
+// findings gate for code) are untouched: they are cheap guards, not the tax. If even
+// one code file is in the set, the full review is required as before.
+function reviewExempt(files) {
+  if (!files || !files.length) return false;
+  return files.every(f =>
+    /\.md$/i.test(f) || f.startsWith('.claude/') || f.startsWith('roadmap-handoffs/'));
+}
+
 // Pure: takes state, returns a verdict. Kept free of fs/git so it is testable.
 // doc = parsed findings file (or null). currentHash = hash of the tree being committed.
 function evaluate(doc, currentHash) {
@@ -99,8 +111,24 @@ function readDoc() {
   }
 }
 
+function changedFiles(range = 'HEAD') {
+  try {
+    return execFileSync('git', ['diff', range, '--name-only'], { encoding: 'utf8' })
+      .split('\n').map(s => s.trim()).filter(Boolean);
+  } catch { return []; }
+}
+
 function main() {
   const doc = readDoc();
+  // Docs/config-only commit: skip the LLM-review requirement (see reviewExempt).
+  // doc?.range (not doc && doc.range): a docs-only commit usually has NO review doc,
+  // so doc is null -> undefined -> HEAD default fires and changedFiles returns the real
+  // files. `doc && doc.range` would pass null -> `git diff null` fails -> [] -> the
+  // exemption never triggers for the exact case it exists to serve.
+  if (reviewExempt(changedFiles(doc?.range))) {
+    console.log('[review-gate] passed. Docs/config-only change; LLM review not required.');
+    return 0;
+  }
   // Only hash when there is a doc: a null doc is refused by evaluate regardless, so
   // spawning git first is wasted. When there IS a doc, a null hash means git failed
   // on its range -> refuse with a clear message, not a stack trace.
@@ -129,4 +157,4 @@ function main() {
 
 if (require.main === module) process.exitCode = main();
 
-module.exports = { evaluate };
+module.exports = { evaluate, reviewExempt };

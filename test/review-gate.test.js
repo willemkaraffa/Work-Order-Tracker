@@ -6,7 +6,7 @@
 // pass while the real one is broken, which is exactly the false-green this repo
 // already got bitten by (see src/orders-logic.js history).
 const assert = require('assert');
-const { evaluate } = require('../scripts/review-gate.js');
+const { evaluate, reviewExempt } = require('../scripts/review-gate.js');
 const {
   parseFindings, diffHash, findingId, mergeFindings, buildFileContext,
 } = require('../scripts/gemini-review.js');
@@ -108,6 +108,18 @@ t('uncitable is reported before generic-open so its message wins', () => {
   assert.strictEqual(v.ok, false);
   assert.match(v.reason, /NO symbol/);
   assert.match(v.reason, /nosym/);
+});
+
+// --- review exemption: docs/config skip the LLM review, code never does --------
+t('docs/config-only change is review-exempt', () => {
+  assert.strictEqual(reviewExempt(['README.md', '.claude/settings.json', 'roadmap-handoffs/x.md']), true);
+});
+t('any code file forces the full review', () => {
+  assert.strictEqual(reviewExempt(['README.md', 'src/app.jsx']), false);
+  assert.strictEqual(reviewExempt(['scripts/cite.js']), false);
+});
+t('empty file list is NOT exempt (no free pass on an unknown diff)', () => {
+  assert.strictEqual(reviewExempt([]), false);
 });
 
 // --- reviewer helpers --------------------------------------------------------
