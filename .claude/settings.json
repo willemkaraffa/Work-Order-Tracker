@@ -7,6 +7,20 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
