@@ -4199,7 +4199,7 @@ function App() {
           if (!n || known.has(n) || seen.has(n)) continue;
           seen.add(n);
           if (trashed.has(n)) { trashedSkipped++; continue; }
-          fresh.push({ num: it.num, url: it.url });
+          fresh.push({ num: it.num, url: it.url, address: it.address || '' });
         }
         // Notification instead of auto-popping the modal; click opens the list.
         pushNotif({ kind: 'capture', captureType: 'msr', title: fresh.length ? (fresh.length + ' new MSR WO' + (fresh.length === 1 ? '' : 's')) : 'MSR scan: no new WOs',
@@ -6341,7 +6341,12 @@ function App() {
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     gap: 10, padding: '7px 0', borderBottom: '1px solid var(--border-1)',
                   }}>
-                    <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{it.num}</span>
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                      <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{it.num}</span>
+                      {it.address && (
+                        <span style={{ fontSize: 12, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.address}</span>
+                      )}
+                    </span>
                     {it.url && (
                       <button onClick={() => window.shell && window.shell.openExternal && window.shell.openExternal(it.url)}
                         style={{
