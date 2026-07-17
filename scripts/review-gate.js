@@ -74,8 +74,20 @@ function evaluate(doc, currentHash) {
   return { ok: true, dismissed };
 }
 
-function currentDiffHash() {
-  const diff = execFileSync('git', ['diff', 'HEAD'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
+// Hash the SAME range the review covered (persisted as doc.range), not a hardcoded
+// HEAD: a review run against a custom ref (e.g. origin/main) would otherwise be
+// falsely reported STALE because the gate diffed a different range. Default HEAD for
+// older ledgers that predate the range field.
+// Returns the hash, or null if git fails (e.g. a persisted range that names a ref
+// which no longer exists). A null must REFUSE with a clear message, never crash the
+// gate with a raw stack -- the caller handles that.
+function currentDiffHash(range = 'HEAD') {
+  let diff;
+  try {
+    diff = execFileSync('git', ['diff', range], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
   return require('./gemini-review.js').diffHash(diff);
 }
 
@@ -88,7 +100,16 @@ function readDoc() {
 }
 
 function main() {
-  const verdict = evaluate(readDoc(), currentDiffHash());
+  const doc = readDoc();
+  // Only hash when there is a doc: a null doc is refused by evaluate regardless, so
+  // spawning git first is wasted. When there IS a doc, a null hash means git failed
+  // on its range -> refuse with a clear message, not a stack trace.
+  const hash = doc ? currentDiffHash(doc.range) : null;
+  if (doc && hash === null) {
+    console.error(`[review-gate] COMMIT REFUSED: could not diff range '${doc.range}' (git failed; ref gone?). Re-run: node scripts/gemini-review.js`);
+    return 1;
+  }
+  const verdict = evaluate(doc, hash);
   if (!verdict.ok) {
     console.error(`[review-gate] COMMIT REFUSED: ${verdict.reason}`);
     return 1;

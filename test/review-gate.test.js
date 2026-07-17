@@ -164,6 +164,22 @@ t('LAUNDERING BLOCKED: an open finding absent from a re-run stays open', () => {
   assert.strictEqual(second.findings[0].status, 'open', 'must still block the commit');
 });
 
+t('mergeFindings persists the review range', () => {
+  const d = mergeFindings(null, [raw()], 'h1', 'm', 'origin/main');
+  assert.strictEqual(d.range, 'origin/main');
+});
+
+t('mergeFindings defaults range to HEAD when omitted', () => {
+  const d = mergeFindings(null, [raw()], 'h1', 'm');
+  assert.strictEqual(d.range, 'HEAD');
+});
+
+t('mergeFindings carries a prior range when a re-run omits it', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm', 'origin/main');
+  const second = mergeFindings(first, [raw()], 'h2', 'm'); // no range this run
+  assert.strictEqual(second.range, 'origin/main', 'range must not reset to HEAD on re-run');
+});
+
 t('a carried finding is marked as not-seen-this-run', () => {
   const first = mergeFindings(null, [raw()], 'h1', 'm');
   const second = mergeFindings(first, [], 'h2', 'm');

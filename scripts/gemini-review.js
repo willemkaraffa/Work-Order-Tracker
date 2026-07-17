@@ -31,7 +31,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const FINDINGS_FILE = path.join(__dirname, '..', '.review-findings.json');
+const REPO_ROOT = path.join(__dirname, '..');
+const FINDINGS_FILE = path.join(REPO_ROOT, '.review-findings.json');
 
 // Identity of the reviewed tree. The gate re-derives this at commit time; if it
 // moved, the review is stale and the gate refuses. Fixing a finding changes the
@@ -67,7 +68,7 @@ function findingId(f) {
 // A finding does not stop being true because the next roll forgot it. The only
 // exit is an explicit disposition with a reason (including "obsolete, code gone"),
 // which a human can read.
-function mergeFindings(prevDoc, rawFindings, hash, model) {
+function mergeFindings(prevDoc, rawFindings, hash, model, range) {
   const byId = new Map(((prevDoc && prevDoc.findings) || []).map(f => [f.id, f]));
 
   for (const f of rawFindings) {
@@ -100,6 +101,10 @@ function mergeFindings(prevDoc, rawFindings, hash, model) {
 
   return {
     diffHash: hash,
+    // The git range this review covered. The gate re-hashes THIS range, not a
+    // hardcoded HEAD, so a review of a custom ref (e.g. origin/main) is not falsely
+    // reported STALE. Default HEAD; carry a prior doc's range if this call omits one.
+    range: range || (prevDoc && prevDoc.range) || 'HEAD',
     model,
     generatedAt: new Date().toISOString(),
     findings: [...byId.values()],
@@ -111,9 +116,9 @@ function readFindings() {
   catch { return null; }
 }
 
-function writeFindings(diff, model, findings) {
+function writeFindings(diff, model, findings, range) {
   const hash = diffHash(diff);
-  const doc = mergeFindings(readFindings(), findings, hash, model);
+  const doc = mergeFindings(readFindings(), findings, hash, model, range);
   fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
   return doc;
 }
@@ -274,8 +279,11 @@ async function main() {
 
   // Full text of every touched file, so the reviewer stops calling unchanged code
   // "missing" just because a diff does not repeat it.
+  // `f` is repo-root-relative (from git diff --name-only). Resolve against REPO_ROOT,
+  // not process.cwd(): run from a subdirectory, a cwd-relative read fails and the file
+  // is silently skipped as "unreadable" -> the reviewer reviews on partial context.
   const ctx = buildFileContext(touchedFiles(range), f => {
-    try { return fs.readFileSync(f, 'utf8'); } catch { return null; }
+    try { return fs.readFileSync(path.join(REPO_ROOT, f), 'utf8'); } catch { return null; }
   });
 
   const prompt =
@@ -346,7 +354,7 @@ async function main() {
     return 2;
   }
 
-  const doc = writeFindings(diff, usedModel, findings);
+  const doc = writeFindings(diff, usedModel, findings, range);
 
   const open = doc.findings.filter(f => f.status === 'open');
 
