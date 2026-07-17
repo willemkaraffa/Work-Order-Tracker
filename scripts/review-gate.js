@@ -43,10 +43,22 @@ function evaluate(doc, currentHash) {
     };
   }
   const open = (doc.findings || []).filter(f => f.status === 'open');
+  // An OPEN finding with no symbol cannot be located or verified by cite.js. It is
+  // NOT auto-dropped (that would bias toward silencing true findings); it blocks,
+  // open, until a human gets a real citation or dispositions it with a reason. Same
+  // spirit as the bare-dismissal check: a claim the pipeline cannot check must not
+  // pass silently. Reported first so its message is the actionable one.
+  const uncitable = open.filter(f => !String(f.symbol || '').trim());
+  if (uncitable.length) {
+    return {
+      ok: false,
+      reason: `${uncitable.length} OPEN finding(s) with NO symbol (cannot be cite-verified): ${uncitable.map(f => f.id).join(', ')}. Re-run review so it emits a verbatim symbol, or disposition manually: node scripts/review-disposition.js <id> fixed|dismissed "reason"`,
+    };
+  }
   if (open.length) {
     return {
       ok: false,
-      reason: `${open.length} finding(s) still OPEN: ${open.map(f => f.id).join(', ')}. Disposition each: node scripts/review-disposition.js <id> fixed|dismissed "reason"`,
+      reason: `${open.length} finding(s) still OPEN: ${open.map(f => f.id).join(', ')}. Cite them: node scripts/cite.js. Then disposition each: node scripts/review-disposition.js <id> fixed|dismissed "reason"`,
     };
   }
   const bare = (doc.findings || []).filter(

@@ -20,7 +20,7 @@ function t(name, fn) {
 const HASH = 'abc123';
 const doc = (findings, hash = HASH) => ({ diffHash: hash, findings });
 const finding = (over = {}) => ({
-  id: 'f1', file: 'a.js', line: 1, severity: 'high', rule: 'correctness',
+  id: 'f1', file: 'a.js', line: 1, symbol: 'sym', severity: 'high', rule: 'correctness',
   problem: 'p', fix: 'x', status: 'open', reason: null, ...over,
 });
 
@@ -82,6 +82,34 @@ t('one open among several dispositioned still blocks', () => {
   assert.match(v.reason, /c/);
 });
 
+// --- symbol discipline: an uncitable open finding blocks, is NOT auto-dropped --
+t('open finding with NO symbol blocks as uncitable', () => {
+  const v = evaluate(doc([finding({ symbol: '' })]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /NO symbol/);
+});
+
+t('whitespace-only symbol is treated as no symbol', () => {
+  const v = evaluate(doc([finding({ symbol: '   ' })]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /NO symbol/);
+});
+
+t('a symbol-less finding that is DISMISSED with a reason passes (uncitable only gates open)', () => {
+  const v = evaluate(doc([finding({ symbol: '', status: 'dismissed', reason: 'not real' })]), HASH);
+  assert.strictEqual(v.ok, true);
+});
+
+t('uncitable is reported before generic-open so its message wins', () => {
+  const v = evaluate(doc([
+    finding({ id: 'withsym', symbol: 'x' }),
+    finding({ id: 'nosym', symbol: '' }),
+  ]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /NO symbol/);
+  assert.match(v.reason, /nosym/);
+});
+
 // --- reviewer helpers --------------------------------------------------------
 t('parseFindings handles a bare array', () => {
   assert.strictEqual(parseFindings('[{"file":"a"}]').length, 1);
@@ -110,6 +138,12 @@ t('findingId is stable per file+line+problem', () => {
   assert.notStrictEqual(findingId(a), findingId({ ...a, line: 4 }));
 });
 
+t('findingId IGNORES symbol (an unstable symbol must not fracture identity)', () => {
+  const a = { file: 'x.js', line: 3, problem: 'boom', symbol: 'quote' };
+  const b = { file: 'x.js', line: 3, problem: 'boom', symbol: 'quote(y)' };
+  assert.strictEqual(findingId(a), findingId(b), 'same finding, differing symbol -> one id');
+});
+
 t('findingId does not collide across a pipe in the problem text', () => {
   // The pipe-joined version made these two identical.
   const a = { file: 'x.js', line: 1, problem: 'a|b' };
@@ -118,7 +152,7 @@ t('findingId does not collide across a pipe in the problem text', () => {
 });
 
 // --- anti-laundering: a re-roll must not be able to drop a finding ------------
-const raw = (over = {}) => ({ file: 'a.js', line: 1, severity: 'high', rule: 'correctness', problem: 'p', fix: 'x', ...over });
+const raw = (over = {}) => ({ file: 'a.js', line: 1, symbol: 'sym', severity: 'high', rule: 'correctness', problem: 'p', fix: 'x', ...over });
 
 t('LAUNDERING BLOCKED: an open finding absent from a re-run stays open', () => {
   const first = mergeFindings(null, [raw()], 'h1', 'm');
@@ -146,6 +180,20 @@ t('a re-raised finding keeps its existing disposition (no reset to open)', () =>
   assert.strictEqual(second.findings[0].status, 'dismissed');
   assert.strictEqual(second.findings[0].reason, 'verified false positive');
   assert.strictEqual(second.findings[0].lastSeen, 'h2', 're-raised, so lastSeen advances');
+});
+
+t('re-raise BACKFILLS a missing symbol so an uncitable finding becomes citable', () => {
+  const first = mergeFindings(null, [raw({ symbol: '' })], 'h1', 'm');
+  assert.strictEqual(first.findings[0].symbol, '');
+  const second = mergeFindings(first, [raw({ symbol: 'realSymbol' })], 'h2', 'm');
+  assert.strictEqual(second.findings.length, 1, 'same finding, not a duplicate');
+  assert.strictEqual(second.findings[0].symbol, 'realSymbol', 'missing symbol filled on re-raise');
+});
+
+t('re-raise does NOT overwrite an existing symbol', () => {
+  const first = mergeFindings(null, [raw({ symbol: 'original' })], 'h1', 'm');
+  const second = mergeFindings(first, [raw({ symbol: 'drifted' })], 'h2', 'm');
+  assert.strictEqual(second.findings[0].symbol, 'original', 'a known finding keeps its symbol');
 });
 
 t('a fixed finding stays fixed and does not reopen when re-raised', () => {

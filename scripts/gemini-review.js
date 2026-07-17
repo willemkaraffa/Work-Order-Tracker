@@ -45,6 +45,11 @@ function diffHash(diff) {
 // reviewer, then LAUNDERED when a re-run of the non-deterministic model dropped
 // the finding. Fixed anyway; a finding does not stop being true because the next
 // roll forgot it.
+// Identity is file+line+problem, NOT symbol. The symbol is the model's verbatim
+// copy and can vary run-to-run ("quote" vs "quote(y)"); folding it into the id would
+// make a re-raise of the same finding hash differently -> the old one carried open by
+// the anti-laundering merge PLUS a new duplicate, both blocking. So symbol is stored
+// and refreshed (see mergeFindings), never part of identity.
 function findingId(f) {
   return crypto.createHash('sha256')
     .update(JSON.stringify([f.file, f.line, f.problem]))
@@ -70,12 +75,18 @@ function mergeFindings(prevDoc, rawFindings, hash, model) {
     const existing = byId.get(id);
     if (existing) {
       existing.lastSeen = hash; // re-raised; keep whatever disposition it already has
+      // Backfill a missing symbol so a finding first raised symbol-less (uncitable,
+      // blocking) becomes citable once a later run supplies one. Never OVERWRITE an
+      // existing symbol: identity is stable (findingId ignores symbol), so a changed
+      // symbol on a known finding is noise, and clobbering could unpick a human's cite.
+      if (!String(existing.symbol || '').trim() && f.symbol) existing.symbol = f.symbol;
       continue;
     }
     byId.set(id, {
       id,
       file: f.file || '?',
       line: f.line ?? null,
+      symbol: f.symbol || '',
       severity: f.severity || '?',
       rule: f.rule || '?',
       problem: f.problem || '',
@@ -160,8 +171,14 @@ Also: correctness bugs (off-by-one, wrong operator, null deref, bad boundary), a
 mismatches (copied pattern whose precondition the new site does not preserve).
 
 Output ONLY a JSON array, no prose, no markdown fences. Each finding:
-{"file":"path","line":123,"severity":"high|med|low","rule":"A3|correctness|...","problem":"one sentence","fix":"one sentence"}
-Empty array [] if nothing found. Do not invent issues to fill the array.`;
+{"file":"path","line":123,"symbol":"exact source substring","severity":"high|med|low","rule":"A3|correctness|...","problem":"one sentence","fix":"one sentence"}
+"symbol" MUST be a short, VERBATIM substring copied from the current file text at the
+problem site (a call, declaration, or expression, e.g. "urllib.request.quote" or
+"useEffect(() => setX"). It is how a downstream tool locates and verifies your finding
+by CONTENT, not by line number (line numbers drift). Copy it exactly, including case and
+punctuation; do not paraphrase, summarize, or reconstruct it. A finding whose symbol is
+not found verbatim in the file is auto-dismissed as unlocatable, so a wrong symbol is a
+dropped finding. Empty array [] if nothing found. Do not invent issues to fill the array.`;
 
 // Returns diff string, or null on failure (caller maps to exit 2).
 // execFileSync (arg array, no shell) not execSync: `range` comes from argv, and a
