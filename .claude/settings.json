@@ -19,6 +19,38 @@
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
         ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+        ]
       }
     ],
     "Stop": [
