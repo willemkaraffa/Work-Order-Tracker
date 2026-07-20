@@ -461,6 +461,44 @@ detects and proposes; the human keeps the approval button.
   `.claude/hookify.*.local.md` rules currently carry no measurement data, so
   steps 6-7 (MEASURE, RETIRE) have nothing to read.
 
+## Step 5 as built (2026-07-20), and where it deviates from this doc
+
+**DEVIATION, decided by the human: enforce ONLY while a plan is active.** This doc
+specified a PreToolUse block whenever no approved plan covers the file. Built
+literally, that bricks every ad-hoc session and makes the repo unusable whenever
+the human is not around to approve something. A gate nobody can pass without a
+human standing by is not a gate, it is an outage. So: no plan, or a plan still in
+`draft`, means NO constraint. Once approved, scope is enforced hard.
+
+Pieces: `scripts/plan.js` (scope matcher, dependency-free on purpose),
+`plan-approve.js`, `plan-rule.js`, `plan-step.js`, `plan-check.js`, and the
+`.claude/hooks/plan-scope-guard.js` PreToolUse guard. `architect.js` gained a
+`scope` subcommand.
+
+**Approval rides the unforgeable channel.** `plan-approve.js` refuses unless the
+transcript carries a human answer to `Approve plan <id>?`. The reader was
+extracted from `length-check.js` into `scripts/user-grant.js`, so the verbose gate
+and plan approval share ONE implementation of "did the human actually say this".
+
+**LIVE PROOF (this is the part the doc kept asking for):**
+- Approval refused with no human grant; accepted after a real button press.
+- An out-of-scope Edit was BLOCKED through the real harness. The edit did not happen.
+- The architect ruled REVERT on a deliberately vague justification. It did not
+  widen on request.
+
+**The live test found a bug the 17-suite gate did not.** The guard treated ANY
+ruling as clearing the file, so a `revert` would have unblocked the file it had
+just rejected, while the architect was printing "still blocked". The unit test
+asserted the same wrong behaviour, because the test encoded the same wrong
+assumption as the code. **A test written by the author of a bug tends to agree
+with it.** Only `widen` clears now.
+
+**NOT enforced, stated rather than skipped quietly:** the verify BUDGET. The
+counter is keyed by `session_id` in tmpdir and a git hook has no session_id, so
+any commit-time check would read the wrong bucket and pass for the wrong reason.
+Enforcing it needs the counter moved to plan-scoped state first. Check 3 of the
+three deterministic checks above is therefore still advisory.
+
 ## What is PROVEN vs merely built (2026-07-20)
 
 The prior handoff's caveat applies to this one too: most of a design doc is
@@ -492,9 +530,8 @@ NOT proven:
   branches on `fixed` vs `dismissed`, sharpen the rubric first.
 - The verbose-permission gate has never been exercised by a human pressing the
   real button. Its tests use synthesized transcripts.
-- Nothing enforces plan scope yet. `.plan.json` is written and validated, but no
-  PreToolUse or pre-commit hook reads it, so checks 1-3 do not bite. The plan is
-  currently a document, not a gate. Step 5 is where the chain first has teeth.
+- ~~Nothing enforces plan scope yet.~~ FIXED 2026-07-20; see "Step 5 as built".
+  Checks 1 and 2 bite. Check 3 (budget) does not, for a stated reason.
 
 ## Non-negotiables (inherited, do not regress)
 
@@ -543,8 +580,8 @@ NOT proven:
    `gemini-review.js` (rule B3: the 429/404/503 chain is hard-won, not boilerplate).
    No read-check was built: Q2 rejected receipts as attestation-theater.
 4. Wire reviewer -> architect. Reject-up path to the human.
-5. Confirm the chain BITES: stage a plan violation, confirm it is caught and
-   escalated, not silently absorbed.
+5. ~~Confirm the chain BITES.~~ **DONE 2026-07-20.** It bites, and the live test
+   found a bug the unit tests missed. See "Step 5 as built" below.
 6. Adaptivity loop LAST, and only after the chain runs: rule registry (the
    backing store above), then DETECT/CLASSIFY/PROPOSE wired into the architect's
    review pass, then MEASURE/RETIRE. Built before the chain exists, it would be a
