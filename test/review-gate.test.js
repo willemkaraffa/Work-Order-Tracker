@@ -37,8 +37,12 @@ t('stale review blocks (code moved after review)', () => {
   assert.match(v.reason, /STALE/);
 });
 
+// These fixtures carry ruledBy:'architect' so they reach the branch they are
+// actually testing. Without it the newer untriaged check fires first: still a
+// block, but reporting "run triage" instead of the open/uncitable message. The
+// safety property is unchanged either way; only which message wins.
 t('an open finding blocks', () => {
-  const v = evaluate(doc([finding()]), HASH);
+  const v = evaluate(doc([finding({ ruledBy: 'architect' })]), HASH);
   assert.strictEqual(v.ok, false);
   assert.match(v.reason, /OPEN/);
 });
@@ -84,13 +88,13 @@ t('one open among several dispositioned still blocks', () => {
 
 // --- symbol discipline: an uncitable open finding blocks, is NOT auto-dropped --
 t('open finding with NO symbol blocks as uncitable', () => {
-  const v = evaluate(doc([finding({ symbol: '' })]), HASH);
+  const v = evaluate(doc([finding({ symbol: '', ruledBy: 'architect' })]), HASH);
   assert.strictEqual(v.ok, false);
   assert.match(v.reason, /NO symbol/);
 });
 
 t('whitespace-only symbol is treated as no symbol', () => {
-  const v = evaluate(doc([finding({ symbol: '   ' })]), HASH);
+  const v = evaluate(doc([finding({ symbol: '   ', ruledBy: 'architect' })]), HASH);
   assert.strictEqual(v.ok, false);
   assert.match(v.reason, /NO symbol/);
 });
@@ -102,8 +106,8 @@ t('a symbol-less finding that is DISMISSED with a reason passes (uncitable only 
 
 t('uncitable is reported before generic-open so its message wins', () => {
   const v = evaluate(doc([
-    finding({ id: 'withsym', symbol: 'x' }),
-    finding({ id: 'nosym', symbol: '' }),
+    finding({ id: 'withsym', symbol: 'x', ruledBy: 'architect' }),
+    finding({ id: 'nosym', symbol: '', ruledBy: 'architect' }),
   ]), HASH);
   assert.strictEqual(v.ok, false);
   assert.match(v.reason, /NO symbol/);
@@ -328,6 +332,57 @@ t('merge: a FIXED finding NOT re-raised stays fixed', () => {
   const again = mergeFindings(first, [raw({ file: 'other.js' })], 'h2', 'm', 'HEAD');
   const original = again.findings.find(f => f.file === 'a.js');
   assert.strictEqual(original.status, 'fixed', 'not re-raised -> the fix stands');
+});
+
+// --- the reviewer reports UP: triage before the coder acts --------------------
+
+const triaged = (over = {}) => finding({ ruledBy: 'architect', ...over });
+
+t('gate: an OPEN finding the architect has never seen blocks, demanding triage', () => {
+  const v = evaluate(doc([finding({ status: 'open' })]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /not yet triaged/);
+  assert.match(v.reason, /architect\.js triage/, 'must name the way forward');
+});
+
+t('gate: an ESCALATED finding blocks, and says it is the human call', () => {
+  // Without an explicit branch this would fall through every check and PASS:
+  // `escalated` is neither open nor dismissed. The one finding the architect
+  // flagged for human attention would have been the one the gate ignored.
+  const v = evaluate(doc([triaged({ status: 'escalated', reason: 'design change' })]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /ESCALATED/);
+  assert.match(v.reason, /not yours to fix or dismiss/);
+});
+
+t('gate: an escalated finding blocks even when everything else is clean', () => {
+  const v = evaluate(doc([
+    triaged({ id: 'f1', status: 'fixed' }),
+    triaged({ id: 'f2', status: 'dismissed', reason: 'fp' }),
+    triaged({ id: 'f3', status: 'escalated', reason: 'needs a human' }),
+  ]), HASH);
+  assert.strictEqual(v.ok, false, 'one escalation is enough to refuse the commit');
+});
+
+t('gate: a triaged finding that STANDS still blocks as a normal open finding', () => {
+  const v = evaluate(doc([triaged({ status: 'open', reason: 'real defect' })]), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /still OPEN/, 'triaged-and-standing is the ordinary open path');
+});
+
+t('gate: architect-triaged dismissals and fixes pass', () => {
+  const v = evaluate(doc([
+    triaged({ id: 'f1', status: 'dismissed', reason: 'false positive' }),
+    triaged({ id: 'f2', status: 'fixed' }),
+  ]), HASH);
+  assert.strictEqual(v.ok, true);
+});
+
+t('gate: a legacy dismissal with no ruledBy is NOT re-blocked as untriaged', () => {
+  // Only OPEN findings need triage. Re-opening historical dispositions would make
+  // the new rule retroactively brick every old ledger.
+  const v = evaluate(doc([finding({ status: 'dismissed', reason: 'judged before triage existed' })]), HASH);
+  assert.strictEqual(v.ok, true);
 });
 
 // --- dismissal PROVENANCE: who actually ruled --------------------------------

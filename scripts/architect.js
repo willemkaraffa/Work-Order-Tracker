@@ -331,6 +331,161 @@ async function draftPlan(args) {
 }
 
 // ---------------------------------------------------------------------------
+// TRIAGE: the reviewer reports to the architect BEFORE the coder engages
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS NOT JUST RE-ORDERING. Before triage, every raw finding landed as
+// `open` and the coder argued them one at a time, which meant N architect calls,
+// each one anchored by the coder's framing of that finding. Triage is ONE call
+// over all of them, made before the coder says anything. Two concrete gains:
+// the architect's first read of a finding is not shaped by the reviewed party,
+// and a reviewer with a known false-positive rate (diff-blindness produced three
+// consecutive FPs historically) stops spending the coder's time on them.
+//
+// The coder can still argue afterwards, via review-disposition.js. Triage decides
+// what reaches the coder; it does not remove the coder's right of reply.
+
+const TRIAGE_RUBRIC = `You are the ARCHITECT. An INDEPENDENT reviewer has raised findings against code
+your coder wrote. You see them BEFORE the coder does. Triage each one.
+
+The reviewer is a cheaper model and is known to produce false positives, especially by
+claiming that code "does not exist" when it simply is not in the diff. You are given the FULL
+CURRENT TEXT of the cited files: resolve every question against that text, not against the
+diff. Unchanged code is absent from a diff by definition; that is not evidence of absence.
+
+For each finding return one verdict:
+- "stands": a real defect. The coder must fix it.
+- "dismissed": not a real defect (false positive, or correct by design). Say why in terms a
+  human can check.
+- "escalate": real, but it is NOT the coder's call. Use this when fixing it would change the
+  design, break a documented deliberate decision, or reach outside the current work. This
+  goes to the human, not to the coder.
+
+Be decisive but not generous: "stands" is the right default when you are unsure. Dismissing a
+real defect costs more than making the coder argue an unnecessary one.
+
+Output ONLY a JSON array, no prose, no markdown fences. One object per finding, in the SAME
+ORDER you received them:
+[{"id":"<the id you were given>","verdict":"stands|dismissed|escalate","reason":"one or two sentences"}]`;
+
+const TRIAGE_VERDICTS = new Set(['stands', 'dismissed', 'escalate']);
+
+// Pure, exported for tests. Maps the architect's triage verdicts onto ledger
+// statuses. `stands` stays `open` because that is what the gate already blocks on;
+// inventing a fourth status would mean teaching every reader a new word for a
+// state that already exists (rule 5: reuse the field that holds the concept).
+const TRIAGE_STATUS = { stands: 'open', dismissed: 'dismissed', escalate: 'escalated' };
+
+function parseTriage(text, expectedIds) {
+  const arr = extractJson(text, 'array');
+  if (!Array.isArray(arr)) throw new Error('triage did not return an array');
+  const byId = new Map();
+  for (const r of arr) {
+    const id = String(r.id || '').trim();
+    const verdict = String(r.verdict || '').trim().toLowerCase();
+    const reason = String(r.reason || '').trim();
+    if (!TRIAGE_VERDICTS.has(verdict)) {
+      throw new Error(`unknown triage verdict '${r.verdict}' for ${id || '(no id)'}`);
+    }
+    if (!reason) throw new Error(`triage of ${id || '(no id)'} carried no reason`);
+    byId.set(id, { verdict, reason });
+  }
+  // Every finding must come back. A missing one would otherwise stay silently
+  // untriaged and, once the gate demands triage, block with no explanation.
+  const missing = (expectedIds || []).filter(id => !byId.has(id));
+  if (missing.length) throw new Error(`triage omitted ${missing.length} finding(s): ${missing.join(', ')}`);
+  return byId;
+}
+
+// A finding the architect has never looked at. `ruledBy` is written only by this
+// script, so its absence is the marker; no new field is needed.
+const isUntriaged = f => f.status === 'open' && f.ruledBy !== 'architect';
+
+async function triage(args) {
+  const dryRun = args.includes('--dry-run');
+  const doc = readJson(FINDINGS_FILE);
+  if (!doc) {
+    console.error('[architect] no findings file. Run: node scripts/gemini-review.js');
+    return 2;
+  }
+
+  const pending = (doc.findings || []).filter(isUntriaged);
+  if (!pending.length) {
+    console.log('[architect] nothing to triage; every open finding has already been ruled on.');
+    return 0;
+  }
+
+  const files = [...new Set(pending.map(f => f.file))];
+  const ctx = buildFileContext(files, p => {
+    try { return fs.readFileSync(path.join(REPO_ROOT, p), 'utf8'); } catch { return null; }
+  });
+
+  const prompt = `${TRIAGE_RUBRIC}
+
+=== FINDINGS TO TRIAGE (${pending.length}) ===
+${JSON.stringify(pending.map(f => ({
+    id: f.id, file: f.file, line: f.line, symbol: f.symbol,
+    severity: f.severity, rule: f.rule, problem: f.problem, fix: f.fix,
+  })), null, 2)}
+
+=== FULL TEXT OF THE CITED FILES ===
+${ctx.text || '(unreadable)'}
+
+=== DIFF (${doc.range || 'HEAD'}) ===
+${gitDiff(doc.range || 'HEAD')}`;
+
+  if (dryRun) {
+    console.log(`[architect] DRY RUN: would triage ${pending.length} finding(s), prompt chars=${prompt.length}`);
+    return 0;
+  }
+
+  const call = await callGemini(prompt, { tag: 'architect' });
+  if (!call.ok) {
+    console.error(`[architect] ${call.why}: NO TRIAGE (exit 2). Findings stay untriaged and the gate stays shut.`);
+    return 2;
+  }
+
+  let rulings;
+  try {
+    rulings = parseTriage(call.text, pending.map(f => f.id));
+  } catch (e) {
+    console.error(`[architect] unusable triage: ${e.message}: NO TRIAGE (exit 2).`);
+    console.error(call.text.slice(0, 500));
+    return 2;
+  }
+
+  const at = new Date().toISOString();
+  const counts = { stands: 0, dismissed: 0, escalate: 0 };
+  for (const f of pending) {
+    const r = rulings.get(f.id);
+    f.status = TRIAGE_STATUS[r.verdict];
+    f.reason = r.reason;
+    f.ruledBy = 'architect';
+    f.ruledAt = at;
+    counts[r.verdict]++;
+  }
+  fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
+
+  console.log(`\n[architect] ${call.model} TRIAGED ${pending.length} finding(s) before the coder saw them.`);
+  console.log(`[architect] ${counts.stands} stand, ${counts.dismissed} dismissed, ${counts.escalate} escalated.\n`);
+  for (const f of pending) {
+    const r = rulings.get(f.id);
+    console.log(`  [${f.id}] ${r.verdict.toUpperCase()}  ${f.file}:${f.line ?? '?'}`);
+    console.log(`         ${r.reason}`);
+  }
+  if (counts.escalate) {
+    console.log(`\n[architect] ${counts.escalate} finding(s) ESCALATED to the human. These are NOT yours to fix or`);
+    console.log('[architect] dismiss. Show them to the user and stop; the commit stays blocked until they decide.');
+    return 1;
+  }
+  if (counts.stands) {
+    console.log(`\n[architect] ${counts.stands} finding(s) STAND. Fix them.`);
+    console.log('[architect] If you believe one is wrong, argue it: node scripts/review-disposition.js <id> "your argument"');
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Ruling on a SCOPE violation
 // ---------------------------------------------------------------------------
 
@@ -455,7 +610,8 @@ async function main() {
   if (cmd === 'rule') return ruleOnFinding(args);
   if (cmd === 'plan') return draftPlan(args);
   if (cmd === 'scope') return ruleOnScope(args);
-  console.error('usage: node scripts/architect.js plan "<goal>" | rule <findingId> ["argument"] | scope <file> ["argument"]');
+  if (cmd === 'triage') return triage(args);
+  console.error('usage: node scripts/architect.js plan "<goal>" | triage | rule <findingId> ["argument"] | scope <file> ["argument"]');
   return 2;
 }
 
@@ -467,5 +623,6 @@ if (require.main === module) {
 
 module.exports = {
   parseRuling, applyRuling, validatePlan, planId, parseScopeRuling,
-  PLAN_FILE, VERDICTS, SCOPE_VERDICTS,
+  parseTriage, isUntriaged, TRIAGE_STATUS,
+  PLAN_FILE, VERDICTS, SCOPE_VERDICTS, TRIAGE_VERDICTS,
 };

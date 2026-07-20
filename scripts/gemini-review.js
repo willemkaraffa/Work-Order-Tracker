@@ -325,7 +325,10 @@ async function main() {
     if (f.fix) console.log(`         fix: ${f.fix}`);
   }
   console.log(`\n  ${open.length} finding(s) OPEN in ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}).`);
-  console.log('  Get the ARCHITECT to rule on each before committing (you argue, it decides):');
+  console.log('  These report UP to the architect, not to you. Triage FIRST, one call for all of them:');
+  console.log('    node scripts/architect.js triage');
+  console.log('  It will mark each stands / dismissed / escalated. Fix what stands. If you think a');
+  console.log('  surviving one is wrong, you may then argue it (the architect still decides):');
   console.log('    node scripts/review-disposition.js <id> "why you believe this is not a defect"');
   return strict ? 1 : 0;
 }

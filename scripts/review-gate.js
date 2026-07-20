@@ -54,6 +54,37 @@ function evaluate(doc, currentHash) {
       reason: `review is STALE (reviewed ${doc.diffHash}, committing ${currentHash}). The code moved since review. Re-run: node scripts/gemini-review.js`,
     };
   }
+  // ESCALATED: the architect judged this real but NOT the coder's call. It blocks,
+  // and it blocks differently: there is no fix the coder can apply and no argument
+  // it can make. Only the human resolves it.
+  //
+  // This is checked FIRST and explicitly. `escalated` is neither `open` nor
+  // `dismissed`, so without this branch it would fall straight through every other
+  // check and PASS silently: a finding the architect flagged for human attention
+  // would have been the one thing the gate ignored.
+  const escalated = (doc.findings || []).filter(f => f.status === 'escalated');
+  if (escalated.length) {
+    const lines = escalated.map(f => `${f.id} (${f.file}:${f.line ?? '?'}): ${f.reason || f.problem}`);
+    return {
+      ok: false,
+      reason: `${escalated.length} finding(s) ESCALATED by the architect to the HUMAN:\n    ` +
+        lines.join('\n    ') +
+        `\n  These are not yours to fix or dismiss. Show them to the user and stop.`,
+    };
+  }
+
+  // The reviewer reports to the ARCHITECT before the coder. A finding the architect
+  // has never seen must not be actionable yet, or the ordering is advisory and the
+  // coder simply engages first anyway. `ruledBy` is written only by architect.js.
+  const untriaged = (doc.findings || []).filter(f => f.status === 'open' && f.ruledBy !== 'architect');
+  if (untriaged.length) {
+    return {
+      ok: false,
+      reason: `${untriaged.length} finding(s) not yet triaged by the architect: ${untriaged.map(f => f.id).join(', ')}. ` +
+        `The reviewer reports UP, not to you. Run: node scripts/architect.js triage`,
+    };
+  }
+
   const open = (doc.findings || []).filter(f => f.status === 'open');
   // An OPEN finding with no symbol cannot be located or verified by cite.js. It is
   // NOT auto-dropped (that would bias toward silencing true findings); it blocks,

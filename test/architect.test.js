@@ -13,7 +13,9 @@
 const assert = require('assert');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseRuling, applyRuling, validatePlan, planId } = require('../scripts/architect.js');
+const {
+  parseRuling, applyRuling, validatePlan, planId, parseTriage, isUntriaged, TRIAGE_STATUS,
+} = require('../scripts/architect.js');
 const { evaluate } = require('../scripts/review-gate.js');
 
 let failed = 0;
@@ -54,6 +56,48 @@ t('ruling: a verdict with NO reason THROWS', () => {
 
 t('ruling: unparseable output THROWS rather than returning something', () => {
   throws(() => parseRuling('the API is down, sorry'), /no JSON object/);
+});
+
+// ============================================================================
+// parseTriage: the architect's one-shot pass over the reviewer's raw findings.
+// ============================================================================
+
+t('triage: verdicts parse and map to ledger statuses', () => {
+  const r = parseTriage('[{"id":"a","verdict":"stands","reason":"real"},{"id":"b","verdict":"dismissed","reason":"fp"}]', ['a', 'b']);
+  assert.strictEqual(r.get('a').verdict, 'stands');
+  assert.strictEqual(r.get('b').verdict, 'dismissed');
+  // `stands` reuses the existing `open` status rather than inventing a fourth word
+  // for a state the gate already blocks on.
+  assert.strictEqual(TRIAGE_STATUS.stands, 'open');
+  assert.strictEqual(TRIAGE_STATUS.dismissed, 'dismissed');
+  assert.strictEqual(TRIAGE_STATUS.escalate, 'escalated');
+});
+
+t('triage: a finding the architect SKIPPED throws', () => {
+  // Silently dropping one would leave it untriaged, and the gate would then block
+  // with no explanation of which finding or why.
+  assert.throws(
+    () => parseTriage('[{"id":"a","verdict":"stands","reason":"r"}]', ['a', 'b']),
+    /omitted 1 finding/);
+});
+
+t('triage: an unknown verdict throws rather than defaulting', () => {
+  assert.throws(() => parseTriage('[{"id":"a","verdict":"ok","reason":"r"}]', ['a']), /unknown triage verdict/);
+});
+
+t('triage: a verdict with no reason throws', () => {
+  assert.throws(() => parseTriage('[{"id":"a","verdict":"dismissed"}]', ['a']), /no reason/);
+});
+
+t('triage: unparseable output throws', () => {
+  assert.throws(() => parseTriage('the API fell over', ['a']), /no JSON array/);
+});
+
+t('isUntriaged: only OPEN findings the architect has not ruled on', () => {
+  assert.strictEqual(isUntriaged({ status: 'open' }), true);
+  assert.strictEqual(isUntriaged({ status: 'open', ruledBy: 'architect' }), false);
+  assert.strictEqual(isUntriaged({ status: 'dismissed' }), false, 'legacy dispositions are not re-opened');
+  assert.strictEqual(isUntriaged({ status: 'escalated', ruledBy: 'architect' }), false);
 });
 
 // ============================================================================
