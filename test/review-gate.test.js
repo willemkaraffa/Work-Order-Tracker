@@ -6,7 +6,7 @@
 // pass while the real one is broken, which is exactly the false-green this repo
 // already got bitten by (see src/orders-logic.js history).
 const assert = require('assert');
-const { evaluate, reviewExempt } = require('../scripts/review-gate.js');
+const { evaluate, reviewExempt, splitDismissals } = require('../scripts/review-gate.js');
 const {
   parseFindings, diffHash, findingId, mergeFindings, buildFileContext,
 } = require('../scripts/gemini-review.js');
@@ -383,6 +383,47 @@ t('gate: a legacy dismissal with no ruledBy is NOT re-blocked as untriaged', () 
   // the new rule retroactively brick every old ledger.
   const v = evaluate(doc([finding({ status: 'dismissed', reason: 'judged before triage existed' })]), HASH);
   assert.strictEqual(v.ok, true);
+});
+
+// --- what the human is shown at commit ----------------------------------------
+// The gate used to reprint EVERY dismissal ever, on every commit, so the output
+// grew without bound and what actually changed drowned in the history. The fix is
+// to the DISPLAY, never to the ledger: pruning dismissed findings would be
+// laundering on a timer, which is what mergeFindings exists to prevent.
+
+const AFTER = '2026-07-20T12:00:00Z';
+const dismissedAt = (id, at) => finding({ id, status: 'dismissed', reason: 'r', ruledBy: 'architect', ruledAt: at });
+
+t('display: only dismissals ruled AFTER the last commit are reprinted', () => {
+  const { recent, older } = splitDismissals([
+    dismissedAt('new', '2026-07-20T13:00:00Z'),
+    dismissedAt('old', '2026-07-20T09:00:00Z'),
+  ], AFTER);
+  assert.deepStrictEqual(recent.map(f => f.id), ['new']);
+  assert.deepStrictEqual(older.map(f => f.id), ['old']);
+});
+
+t('display: a dismissal with NO ruledAt is treated as recent (fail toward showing)', () => {
+  const { recent } = splitDismissals([finding({ status: 'dismissed', reason: 'r' })], AFTER);
+  assert.strictEqual(recent.length, 1, 'never hide a finding just because it lacks a timestamp');
+});
+
+t('display: an unparseable ruledAt is also treated as recent', () => {
+  const { recent } = splitDismissals([dismissedAt('bad', 'not-a-date')], AFTER);
+  assert.strictEqual(recent.length, 1);
+});
+
+t('display: with no last commit (fresh repo) everything is shown', () => {
+  const all = [dismissedAt('a', '2020-01-01T00:00:00Z'), dismissedAt('b', '2026-07-20T13:00:00Z')];
+  const { recent, older } = splitDismissals(all, null);
+  assert.strictEqual(recent.length, 2);
+  assert.strictEqual(older.length, 0);
+});
+
+t('display: nothing is DROPPED, only not reprinted', () => {
+  const all = [dismissedAt('a', '2020-01-01T00:00:00Z'), dismissedAt('b', '2026-07-20T13:00:00Z')];
+  const { recent, older } = splitDismissals(all, AFTER);
+  assert.strictEqual(recent.length + older.length, all.length, 'every dismissal must still be accounted for');
 });
 
 // --- dismissal PROVENANCE: who actually ruled --------------------------------

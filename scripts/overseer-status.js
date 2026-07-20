@@ -118,6 +118,20 @@ function findings() {
   if (by('escalated')) out.push(`  ${by('escalated')} ESCALATED to you. Not the coder's to fix or dismiss.`);
   // The provenance split is the honest answer to "was the architect involved?"
   out.push(`  dismissals: ${dismissed.length - selfJudged} architect-ruled, ${selfJudged} Claude self-judged`);
+  if (selfJudged) out.push('  re-rule the self-judged ones: node scripts/architect.js retriage');
+
+  // THE FULL LIST LIVES HERE. review-gate.js stopped reprinting every dismissal on
+  // every commit (its output grew without bound and buried what actually changed),
+  // so this is now the place a human reads the whole history. Nothing was pruned
+  // from the ledger; dropping dismissals would be laundering on a timer.
+  if (dismissed.length) {
+    out.push('', '  ALL DISMISSALS:');
+    for (const f of dismissed) {
+      out.push(`  [${f.id}] ${f.ruledBy === 'architect' ? 'architect' : 'Claude (self-judged)'}  ${f.file}:${f.line ?? '?'}`);
+      out.push(`         ${f.problem}`);
+      out.push(`         reason: ${f.reason}`);
+    }
+  }
   return out;
 }
 

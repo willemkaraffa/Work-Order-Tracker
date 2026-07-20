@@ -13,6 +13,7 @@ CLAUDE.original.md
 .gemini-key
 .tavily-key
 .review-findings.json
+.review-findings.backup
 .plan.json
 
 .claude/settings.local.json

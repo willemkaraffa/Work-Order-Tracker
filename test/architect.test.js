@@ -14,7 +14,8 @@ const assert = require('assert');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
-  parseRuling, applyRuling, validatePlan, planId, parseTriage, isUntriaged, TRIAGE_STATUS,
+  parseRuling, applyRuling, validatePlan, planId, parseTriage, isUntriaged, isSelfJudged,
+  TRIAGE_STATUS,
 } = require('../scripts/architect.js');
 const { evaluate } = require('../scripts/review-gate.js');
 
@@ -91,6 +92,15 @@ t('triage: a verdict with no reason throws', () => {
 
 t('triage: unparseable output throws', () => {
   assert.throws(() => parseTriage('the API fell over', ['a']), /no JSON array/);
+});
+
+t('isSelfJudged: dismissals closed WITHOUT independent review', () => {
+  // These are the sole-judge leftovers: the coder closed findings raised against
+  // its own code before an architect existed. retriage reopens that question.
+  assert.strictEqual(isSelfJudged({ status: 'dismissed' }), true);
+  assert.strictEqual(isSelfJudged({ status: 'dismissed', ruledBy: 'architect' }), false);
+  assert.strictEqual(isSelfJudged({ status: 'open' }), false, 'open findings go through triage, not retriage');
+  assert.strictEqual(isSelfJudged({ status: 'fixed' }), false);
 });
 
 t('isUntriaged: only OPEN findings the architect has not ruled on', () => {

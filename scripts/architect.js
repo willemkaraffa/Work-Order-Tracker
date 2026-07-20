@@ -401,17 +401,30 @@ function parseTriage(text, expectedIds) {
 // script, so its absence is the marker; no new field is needed.
 const isUntriaged = f => f.status === 'open' && f.ruledBy !== 'architect';
 
-async function triage(args) {
+// A finding CLOSED without independent review. These are historical: before the
+// architect existed, the coder dispositioned findings raised against its own code,
+// which is the sole-judge hole this whole chain was built to close. They sit in the
+// ledger as settled, but nobody except the reviewed party ever agreed they were.
+//
+// `retriage` reopens that question. It is deliberately NOT automatic cleanup: the
+// architect can rule that a past dismissal was WRONG, which reopens the finding and
+// blocks the commit. Clearing a warning by earning it, not by hiding it.
+const isSelfJudged = f => f.status === 'dismissed' && f.ruledBy !== 'architect';
+
+async function triage(args, mode = 'new') {
   const dryRun = args.includes('--dry-run');
+  const redo = mode === 'redo';
   const doc = readJson(FINDINGS_FILE);
   if (!doc) {
     console.error('[architect] no findings file. Run: node scripts/gemini-review.js');
     return 2;
   }
 
-  const pending = (doc.findings || []).filter(isUntriaged);
+  const pending = (doc.findings || []).filter(redo ? isSelfJudged : isUntriaged);
   if (!pending.length) {
-    console.log('[architect] nothing to triage; every open finding has already been ruled on.');
+    console.log(redo
+      ? '[architect] nothing to re-rule; every dismissal on record was ruled by the architect.'
+      : '[architect] nothing to triage; every open finding has already been ruled on.');
     return 0;
   }
 
@@ -420,12 +433,25 @@ async function triage(args) {
     try { return fs.readFileSync(path.join(REPO_ROOT, p), 'utf8'); } catch { return null; }
   });
 
-  const prompt = `${TRIAGE_RUBRIC}
+  // On a re-rule, the coder's ORIGINAL dismissal reason is handed over as evidence,
+  // clearly labelled as the reviewed party's own argument. It is the most relevant
+  // thing available and often correct, but the whole point is that it was never
+  // independently checked, so it must not be presented as a settled finding.
+  const redoNote = redo ? `
+
+=== THESE WERE DISMISSED WITHOUT INDEPENDENT REVIEW ===
+Each finding below was closed by the CODER, judging findings raised against its own code, before
+an architect existed. Their stated reasons are included as prior_reason. Treat prior_reason as the
+reviewed party's ARGUMENT, not as an established fact. Re-decide each on the current file text:
+uphold it with "dismissed", or overturn it with "stands" if the dismissal does not hold up.` : '';
+
+  const prompt = `${TRIAGE_RUBRIC}${redoNote}
 
 === FINDINGS TO TRIAGE (${pending.length}) ===
 ${JSON.stringify(pending.map(f => ({
     id: f.id, file: f.file, line: f.line, symbol: f.symbol,
     severity: f.severity, rule: f.rule, problem: f.problem, fix: f.fix,
+    ...(redo ? { prior_reason: f.reason } : {}),
   })), null, 2)}
 
 === FULL TEXT OF THE CITED FILES ===
@@ -466,7 +492,9 @@ ${gitDiff(doc.range || 'HEAD')}`;
   }
   fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
 
-  console.log(`\n[architect] ${call.model} TRIAGED ${pending.length} finding(s) before the coder saw them.`);
+  console.log(redo
+    ? `\n[architect] ${call.model} RE-RULED ${pending.length} dismissal(s) that had no independent review.`
+    : `\n[architect] ${call.model} TRIAGED ${pending.length} finding(s) before the coder saw them.`);
   console.log(`[architect] ${counts.stands} stand, ${counts.dismissed} dismissed, ${counts.escalate} escalated.\n`);
   for (const f of pending) {
     const r = rulings.get(f.id);
@@ -479,7 +507,9 @@ ${gitDiff(doc.range || 'HEAD')}`;
     return 1;
   }
   if (counts.stands) {
-    console.log(`\n[architect] ${counts.stands} finding(s) STAND. Fix them.`);
+    console.log(redo
+      ? `\n[architect] ${counts.stands} past dismissal(s) OVERTURNED. They are open again and now block the commit.`
+      : `\n[architect] ${counts.stands} finding(s) STAND. Fix them.`);
     console.log('[architect] If you believe one is wrong, argue it: node scripts/review-disposition.js <id> "your argument"');
   }
   return 0;
@@ -611,7 +641,8 @@ async function main() {
   if (cmd === 'plan') return draftPlan(args);
   if (cmd === 'scope') return ruleOnScope(args);
   if (cmd === 'triage') return triage(args);
-  console.error('usage: node scripts/architect.js plan "<goal>" | triage | rule <findingId> ["argument"] | scope <file> ["argument"]');
+  if (cmd === 'retriage') return triage(args, 'redo');
+  console.error('usage: node scripts/architect.js plan "<goal>" | triage | retriage | rule <findingId> ["argument"] | scope <file> ["argument"]');
   return 2;
 }
 
@@ -623,6 +654,6 @@ if (require.main === module) {
 
 module.exports = {
   parseRuling, applyRuling, validatePlan, planId, parseScopeRuling,
-  parseTriage, isUntriaged, TRIAGE_STATUS,
+  parseTriage, isUntriaged, isSelfJudged, TRIAGE_STATUS,
   PLAN_FILE, VERDICTS, SCOPE_VERDICTS, TRIAGE_VERDICTS,
 };

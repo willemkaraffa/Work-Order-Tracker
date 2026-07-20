@@ -134,6 +134,39 @@ function currentDiffHash(range = 'HEAD') {
   return require('./gemini-review.js').diffHash(diff);
 }
 
+// Split dismissals into what the human has NOT seen yet and what they have.
+//
+// WHY NOT PRUNE THE LEDGER: dropping old dismissals would be laundering on a timer.
+// The ledger accumulates precisely because a re-roll used to silently forget
+// findings (observed 2026-07-16), and mergeFindings exists to stop that. The
+// problem was never the ledger's length, it was that this gate reprinted EVERY
+// dismissal ever on EVERY commit, so the output grew without bound and the signal
+// (what changed) drowned in the history.
+//
+// STATELESS ON PURPOSE. "New" means ruled after the last commit was made, which git
+// already knows. The alternative was a stored `announcedAt`, which would need a new
+// field AND would mislead whenever the gate printed but a LATER gate refused the
+// commit: the findings would count as announced for a commit that never happened.
+//
+// A finding with no ruledAt is treated as recent. Fail toward showing the human
+// more, never less.
+function splitDismissals(dismissed, sinceIso) {
+  if (!sinceIso) return { recent: dismissed, older: [] };
+  const since = Date.parse(sinceIso);
+  const recent = [], older = [];
+  for (const f of dismissed) {
+    const at = f.ruledAt ? Date.parse(f.ruledAt) : NaN;
+    (Number.isNaN(at) || at > since ? recent : older).push(f);
+  }
+  return { recent, older };
+}
+
+function lastCommitIso() {
+  try {
+    return execFileSync('git', ['log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim() || null;
+  } catch { return null; } // no commits yet -> show everything
+}
+
 function readDoc() {
   try {
     return JSON.parse(fs.readFileSync(FINDINGS_FILE, 'utf8'));
@@ -181,17 +214,28 @@ function main() {
   // never ruled on them. That is exactly the false provenance this chain exists to
   // stop, so the label reads off `ruledBy`, which only architect.js writes.
   if (verdict.dismissed.length) {
-    const ruled = verdict.dismissed.filter(f => f.ruledBy === 'architect').length;
-    const selfJudged = verdict.dismissed.length - ruled;
-    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) DISMISSED, read the reasons:`);
+    const selfJudged = verdict.dismissed.filter(f => f.ruledBy !== 'architect').length;
+    const { recent, older } = splitDismissals(verdict.dismissed, lastCommitIso());
+
+    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) dismissed in total.`);
     if (selfJudged) {
-      console.log(`  NOTE: ${selfJudged} of these were self-dispositioned by Claude, NOT ruled by the architect.`);
+      console.log(`  NOTE: ${selfJudged} were self-dispositioned by Claude, NOT ruled by the architect.`);
+      console.log('  Get them independently re-ruled: node scripts/architect.js retriage');
     }
-    for (const f of verdict.dismissed) {
-      const by = f.ruledBy === 'architect' ? 'architect' : 'Claude (self-judged)';
-      console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'} ${f.problem}`);
-      console.log(`         dismissed by: ${by}`);
-      console.log(`         reason: ${f.reason}`);
+    if (recent.length) {
+      console.log(`\n  ${recent.length} dismissed SINCE THE LAST COMMIT, read the reasons:`);
+      for (const f of recent) {
+        const by = f.ruledBy === 'architect' ? 'architect' : 'Claude (self-judged)';
+        console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'} ${f.problem}`);
+        console.log(`         dismissed by: ${by}`);
+        console.log(`         reason: ${f.reason}`);
+      }
+    } else {
+      console.log('  Nothing newly dismissed since the last commit.');
+    }
+    if (older.length) {
+      // Not hidden, just not reprinted. The full list stays one command away.
+      console.log(`\n  (${older.length} older dismissal(s) not reprinted: node scripts/overseer-status.js)`);
     }
   } else {
     console.log('[review-gate] passed. All findings fixed, none dismissed.');
@@ -201,4 +245,4 @@ function main() {
 
 if (require.main === module) process.exitCode = main();
 
-module.exports = { evaluate, reviewExempt };
+module.exports = { evaluate, reviewExempt, splitDismissals };
