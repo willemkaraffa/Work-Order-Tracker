@@ -48,6 +48,9 @@ function main() {
   const SANCTIONED = new Set([
     'gemini-review.js', 'review-gate.js', 'review-disposition.js', 'cite.js', 'run.js',
     'architect.js',
+    // Plan tools run once PER FILE or PER STEP, so a plan touching 3+ files would
+    // otherwise trip this on its own governance calls.
+    'plan-rule.js', 'plan-approve.js', 'plan-step.js', 'plan-check.js',
   ]);
 
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.

@@ -54,46 +54,17 @@ function lastAssistantText(transcriptPath) {
 //   1. the entry's `toolUseResult.answers` map (harness-written, absent on Bash), and
 //   2. the tool_use_id resolving to a tool_use block whose name is AskUserQuestion.
 // A Bash result cannot carry an AskUserQuestion tool_use_id, so shell output is out.
+// The reader itself now lives in scripts/user-grant.js, shared with plan approval,
+// so there is ONE implementation of "did the human actually say this" rather than
+// two that can drift apart. The forge reasoning is documented there.
 const GRANT_Q = "Speak verbosely here?";
 const GRANT_ON = "Verbose ON";
 
 function lastUserGrant(transcriptPath) {
-  let lines;
-  try {
-    lines = fs.readFileSync(transcriptPath, "utf8").split("\n").filter(Boolean);
-  } catch { return null; }
-
-  const askIds = new Set();
-  const events = [];
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    events.push(ev);
-    const content = ev.message && ev.message.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (b && b.type === "tool_use" && b.name === "AskUserQuestion") askIds.add(b.id);
-    }
-  }
-
-  let grant = null; // last one wins; a later "Stay caveman" revokes an earlier lift
-  for (const ev of events) {
-    const role = (ev.message && ev.message.role) || ev.type;
-    if (role !== "user") continue;
-    const answers = ev.toolUseResult && ev.toolUseResult.answers;
-    if (!answers || typeof answers !== "object") continue;
-
-    // The answer must have come from an AskUserQuestion call, not any other tool.
-    const content = ev.message && ev.message.content;
-    const ids = Array.isArray(content)
-      ? content.filter(b => b && b.type === "tool_result").map(b => b.tool_use_id)
-      : [];
-    if (!ids.some(id => askIds.has(id))) continue;
-
-    if (!Object.prototype.hasOwnProperty.call(answers, GRANT_Q)) continue;
-    grant = answers[GRANT_Q] === GRANT_ON ? "ON" : "OFF";
-  }
-  return grant;
+  const { lastUserGrant: read } = require("../../scripts/user-grant.js");
+  const answer = read(transcriptPath, GRANT_Q);
+  if (answer === null || answer === undefined) return null;
+  return answer === GRANT_ON ? "ON" : "OFF"; // anything else revokes the lift
 }
 
 function main() {

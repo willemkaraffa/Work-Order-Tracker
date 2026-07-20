@@ -330,11 +330,132 @@ async function draftPlan(args) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Ruling on a SCOPE violation
+// ---------------------------------------------------------------------------
+
+const SCOPE_VERDICTS = new Set(['widen', 'revert', 'escalate']);
+
+const SCOPE_RUBRIC = `You are the ARCHITECT. You wrote a plan with a deliberately TIGHT file scope.
+The coder has tried to modify a file OUTSIDE that scope and must justify it. Rule on it.
+
+Return exactly one verdict:
+- "widen": the change genuinely belongs to this plan and the scope was simply drawn too
+  narrowly. The file is added to the plan's scope.
+- "revert": the file does not belong to this plan. The coder backs the change out.
+- "escalate": this is not a scope tweak, it is a change to what the plan IS. Goes to the human.
+
+Bias toward "revert" or "escalate" when the justification is vague, when the file belongs to a
+different concern than the plan's goal, or when widening would make the scope so broad it stops
+constraining anything. A scope that grows to fit whatever was done is not a scope.
+
+Output ONLY a JSON object, no prose, no markdown fences:
+{"verdict":"widen|revert|escalate","reason":"one or two sentences for a human reader"}`;
+
+// Pure, exported for tests. Same discipline as parseRuling: an unknown verdict
+// THROWS rather than defaulting, so a malformed response can never widen a scope.
+function parseScopeRuling(text) {
+  const obj = extractJson(text, 'object');
+  const verdict = String(obj.verdict || '').trim().toLowerCase();
+  if (!SCOPE_VERDICTS.has(verdict)) {
+    throw new Error(`unknown verdict '${obj.verdict}' (expected widen|revert|escalate)`);
+  }
+  const reason = String(obj.reason || '').trim();
+  if (!reason) throw new Error('ruling carried no reason');
+  return { verdict, reason };
+}
+
+async function ruleOnScope(args) {
+  const positional = args.filter(a => !a.startsWith('--'));
+  const file = positional[0];
+  const argument = positional.slice(1).join(' ').trim();
+  if (!file) {
+    console.error('usage: node scripts/architect.js scope <file> ["why it needs to change"]');
+    return 2;
+  }
+
+  const { readPlan, PLAN_FILE, isActive, widenCount, WIDEN_LIMIT } = require('./plan.js');
+  const plan = readPlan();
+  if (!isActive(plan)) {
+    console.error('[architect] no ACTIVE plan; nothing to rule on. Scope is only enforced once a plan is approved.');
+    return 2;
+  }
+
+  const rel = String(file).replace(/\\/g, '/');
+  const prompt = `${SCOPE_RUBRIC}
+
+=== THE PLAN ===
+goal: ${plan.goal}
+scope.files: ${JSON.stringify((plan.scope || {}).files || [])}
+steps: ${JSON.stringify((plan.steps || []).map(s => s.do))}
+
+=== THE OUT-OF-SCOPE FILE ===
+${rel}
+
+=== THE CODER'S JUSTIFICATION (evidence, not a verdict) ===
+${argument || '(none offered)'}
+
+=== RULINGS ALREADY MADE ON THIS PLAN ===
+${JSON.stringify(plan.rulings || [], null, 2)}`;
+
+  const call = await callGemini(prompt, { tag: 'architect' });
+  if (!call.ok) {
+    console.error(`[architect] ${call.why}: NO RULING (exit 2). The file stays blocked.`);
+    return 2;
+  }
+
+  let ruling;
+  try {
+    ruling = parseScopeRuling(call.text);
+  } catch (e) {
+    console.error(`[architect] unusable ruling: ${e.message}: NO RULING (exit 2).`);
+    console.error(call.text.slice(0, 500));
+    return 2;
+  }
+
+  plan.rulings = plan.rulings || [];
+  plan.rulings.push({
+    files: [rel],
+    verdict: ruling.verdict,
+    reason: ruling.reason,
+    by: 'architect',
+    at: new Date().toISOString(),
+  });
+  // `widen` amends the scope; the other verdicts deliberately do NOT, so a revert
+  // or escalate leaves the file still outside and still blocked.
+  if (ruling.verdict === 'widen') {
+    plan.scope = plan.scope || {};
+    plan.scope.files = [...((plan.scope.files) || []), rel];
+  }
+  fs.writeFileSync(PLAN_FILE, JSON.stringify(plan, null, 2));
+
+  console.log(`\n[architect] ${call.model} RULED on ${rel}: ${ruling.verdict.toUpperCase()}`);
+  console.log(`[architect] reason: ${ruling.reason}`);
+
+  // Drift counter: repeated widening means the PLAN was wrong, not that the coder
+  // found N surprises. Deterministic, no judgment required.
+  const widens = widenCount(plan);
+  if (widens >= WIDEN_LIMIT) {
+    console.log(`\n[architect] ${widens} WIDEN rulings on this plan (limit ${WIDEN_LIMIT}).`);
+    console.log('[architect] The plan itself is wrong, not the scope. ESCALATE to the human:');
+    console.log('[architect] stop and re-plan rather than widening a fourth time.');
+    return 1;
+  }
+  if (ruling.verdict === 'widen') {
+    console.log(`[architect] Scope widened to include ${rel}. Proceed.`);
+    return 0;
+  }
+  console.log(`[architect] ${rel} is still OUT of scope and still blocked.`);
+  if (ruling.verdict === 'escalate') console.log('[architect] This goes to the human, not around them.');
+  return 1;
+}
+
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd === 'rule') return ruleOnFinding(args);
   if (cmd === 'plan') return draftPlan(args);
-  console.error('usage: node scripts/architect.js plan "<goal>" | rule <findingId> ["argument"]');
+  if (cmd === 'scope') return ruleOnScope(args);
+  console.error('usage: node scripts/architect.js plan "<goal>" | rule <findingId> ["argument"] | scope <file> ["argument"]');
   return 2;
 }
 
@@ -344,4 +465,7 @@ if (require.main === module) {
         .catch(e => { console.error(`[architect] fatal: ${e.message}`); process.exitCode = 2; });
 }
 
-module.exports = { parseRuling, applyRuling, validatePlan, planId, PLAN_FILE, VERDICTS };
+module.exports = {
+  parseRuling, applyRuling, validatePlan, planId, parseScopeRuling,
+  PLAN_FILE, VERDICTS, SCOPE_VERDICTS,
+};

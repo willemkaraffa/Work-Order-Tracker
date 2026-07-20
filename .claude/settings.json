@@ -23,13 +23,15 @@
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/plan-scope-guard.js" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" }
+          { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/plan-scope-guard.js" }
         ]
       }
     ],

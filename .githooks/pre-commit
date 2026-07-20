@@ -40,4 +40,11 @@ npm run verify
 echo "[pre-commit] review gate: findings must be dispositioned"
 node scripts/review-gate.js
 
+# Third gate: if a plan is APPROVED and therefore being enforced, the commit must
+# stay inside its scope and its done-steps must cite evidence that really exists.
+# No approved plan means this is a no-op, by the human's decision on 2026-07-20:
+# blocking all work whenever no plan exists would be an outage, not a gate.
+echo "[pre-commit] plan gate: scope + step evidence"
+node scripts/plan-check.js
+
 echo "[pre-commit] gate passed."
