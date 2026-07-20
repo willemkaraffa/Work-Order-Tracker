@@ -21,12 +21,27 @@ const os = require('os');
 const WINDOW_MS = 10 * 60 * 1000; // only count runs within the last 10 min (thrash is bursty)
 const LIMIT = 2;                  // allow 2 runs of a script; BLOCK the 3rd (C2)
 
+// RETIREMENT WITH TEETH. This guard is rule G1 in the registry. If the accumulated
+// evidence retires it (enough architect-labelled false positives at poor
+// precision), it stops firing. Without this check, "retired" would be a word in a
+// JSON file while the rule kept blocking forever, which is how a rule registry
+// decays into the reminder pile nobody reads.
+//
+// isRuleActive fails ACTIVE: a missing or corrupt registry leaves the guard on. A
+// registry problem must never be a silent way to switch off every gate at once.
+function ruleRetired() {
+  try {
+    return !require('../../scripts/rule-registry.js').isRuleActive('G1');
+  } catch { return false; } // cannot tell -> keep guarding
+}
+
 function main() {
   let input;
   try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { return; }
 
   const tool = input.tool_name || '';
   if (tool !== 'Bash' && tool !== 'PowerShell') return; // guard BOTH shells (coverage-hole lesson)
+  if (ruleRetired()) return;                            // evidence retired this rule
 
   const cmd = (input.tool_input && input.tool_input.command) || '';
   if (!cmd) return;
@@ -51,6 +66,7 @@ function main() {
     // Plan tools run once PER FILE or PER STEP, so a plan touching 3+ files would
     // otherwise trip this on its own governance calls.
     'plan-rule.js', 'plan-approve.js', 'plan-step.js', 'plan-check.js',
+    'rule-label.js',
   ]);
 
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.

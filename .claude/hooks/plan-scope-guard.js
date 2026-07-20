@@ -30,6 +30,12 @@ function main() {
   const file = (input.tool_input && input.tool_input.file_path) || "";
   if (!file) return;
 
+  // Rule G3 in the registry. Retired by accumulated evidence -> stand down. Fails
+  // ACTIVE, so a missing or corrupt registry leaves the guard enforcing.
+  try {
+    if (!require("../../scripts/rule-registry.js").isRuleActive("G3")) return;
+  } catch { /* cannot tell -> keep guarding */ }
+
   // Required lazily so a missing/broken lib cannot wedge every Edit in the repo.
   let plan, isActive, matchesScope, ruledVerdict;
   try {
