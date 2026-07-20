@@ -58,17 +58,30 @@ ${incident}
 === CURRENT EVIDENCE ===
 true positives: ${rule.true_positive || 0}, false positives: ${rule.false_positive || 0}
 
-Label it:
+Answer TWO independent questions.
+
+1. label: was the DETECTION right?
 - "tp" (true positive): the rule fired on the thing it exists to catch. The block or nudge was
-  correct and useful, even if inconvenient.
+  correct, even if inconvenient.
 - "fp" (false positive): the rule fired on something it should not have. The work was legitimate
   and the rule got in the way for no benefit.
 
 A rule being ANNOYING is not a false positive. A rule being WRONG about what it detected is.
 Inconvenience is often the rule working as intended.
 
+2. collateral: did the REMEDY itself harm the user, separately from the detection being right?
+- true: acting on the rule imposed a real cost on the USER, not merely on the coder. Examples:
+  the intervention made the user see something twice, destroyed work, or forced a roundtrip that
+  produced nothing.
+- false: the cost fell on the coder, or there was no cost. This is the normal case.
+
+These are INDEPENDENT. A rule is often tp with collateral false. A rule can also be tp with
+collateral true, which is the interesting case: the rule is RIGHT and its mechanism is wrong.
+That does not make it a false positive and must not be reported as one. Do not set collateral
+true merely because the coder was inconvenienced; the cost has to land on the user.
+
 Output ONLY a JSON object, no prose, no fences:
-{"label":"tp|fp","reason":"one sentence"}`;
+{"label":"tp|fp","collateral":true|false,"reason":"one sentence"}`;
 
   // Reuse architect.js's Gemini plumbing by shelling out to a tiny inline judge,
   // rather than duplicating the model-fallback chain here (rule B3).
@@ -83,7 +96,7 @@ Output ONLY a JSON object, no prose, no fences:
         if (label !== 'tp' && label !== 'fp') throw new Error('unknown label ' + o.label);
         const reason = String(o.reason || '').trim();
         if (!reason) throw new Error('no reason');
-        console.log(JSON.stringify({ label, reason, model: call.model }));
+        console.log(JSON.stringify({ label, collateral: o.collateral === true, reason, model: call.model }));
       } catch (e) { console.error('BADJSON ' + e.message); process.exitCode = 2; }
     })();
   `, prompt], { encoding: 'utf8' });
@@ -98,11 +111,20 @@ Output ONLY a JSON object, no prose, no fences:
   try { verdict = JSON.parse(r.stdout.trim().split('\n').pop()); }
   catch { console.error('[rule-label] unreadable architect output; nothing recorded.'); return 2; }
 
-  const res = recordFiring(ruleId, verdict.label, `${verdict.reason} (architect, ${verdict.model})`);
+  const note = `${verdict.reason} (architect, ${verdict.model}${verdict.collateral ? ', COLLATERAL' : ''})`;
+  const res = recordFiring(ruleId, verdict.label, note, undefined, verdict.collateral);
 
-  console.log(`\n[rule-label] ${verdict.model} labelled ${ruleId} firing: ${verdict.label.toUpperCase()}`);
+  console.log(`\n[rule-label] ${verdict.model} labelled ${ruleId} firing: ${verdict.label.toUpperCase()}` +
+    (verdict.collateral ? ' + COLLATERAL (the remedy itself cost the user)' : ''));
   console.log(`[rule-label] reason: ${verdict.reason}`);
-  console.log(`[rule-label] ${ruleId} now TP=${res.rule.true_positive} FP=${res.rule.false_positive}`);
+  console.log(`[rule-label] ${ruleId} now TP=${res.rule.true_positive} FP=${res.rule.false_positive}` +
+    (res.rule.collateral ? ` collateral=${res.rule.collateral}` : ''));
+
+  if (res.redesignTripped) {
+    console.log(`\n[rule-label] ${ruleId} NEEDS REDESIGN: it is accurate, and its remedy keeps hurting the user.`);
+    console.log('[rule-label] It is NOT retired and NOT disabled: the rule is right, the mechanism is wrong.');
+    console.log('[rule-label] Silencing it would drop a correct check. Rebuilding it is a human decision. Tell the user.');
+  }
 
   if (res.changed) {
     console.log(`\n[rule-label] STATUS CHANGE: ${res.before} -> ${res.after}`);

@@ -12,7 +12,8 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
-  precision, effectiveStatus, isRuleActive, recordFiring, scoreboard, DEFAULT_THRESHOLDS,
+  precision, effectiveStatus, isRuleActive, recordFiring, scoreboard,
+  collateralRate, needsRedesign, DEFAULT_THRESHOLDS,
 } = require('../scripts/rule-registry.js');
 
 let failed = 0;
@@ -67,6 +68,72 @@ t('status: many false positives alone does NOT retire an accurate rule', () => {
   // 50 TP / 6 FP is 0.89 precision. A raw FP count would kill a high-traffic rule
   // that is right nine times out of ten.
   assert.strictEqual(effectiveStatus(rule({ true_positive: 50, false_positive: 6 })), 'validated');
+});
+
+// ============================================================================
+// collateral: a rule can be RIGHT and still be worth rebuilding
+//
+// The gap this closes, found by the style gate on 2026-07-20: it fired 3 times,
+// was correct all 3 times, and produced a user-visible double print on every one,
+// because a Stop hook cannot unsend the message it objects to. Precision 1.00, and
+// still the wrong mechanism. On a TP/FP-only scoreboard that rule looks perfect.
+// ============================================================================
+
+t('collateral: rate is null with no correct firings, NOT zero', () => {
+  assert.strictEqual(collateralRate(rule()), null);
+  assert.strictEqual(collateralRate(rule({ true_positive: 4, collateral: 1 })), 0.25);
+});
+
+t('collateral: an accurate rule whose remedy always hurts is flagged for REDESIGN', () => {
+  const r = rule({ true_positive: 3, false_positive: 0, collateral: 3 });
+  assert.strictEqual(precision(r), 1, 'precision is perfect');
+  assert.strictEqual(needsRedesign(r), true, 'and it still needs rebuilding');
+});
+
+t('collateral: a rule that fires cleanly is NOT flagged', () => {
+  assert.strictEqual(needsRedesign(rule({ true_positive: 5, collateral: 0 })), false);
+});
+
+t('collateral: one costly firing is not enough to flag (needs a floor)', () => {
+  assert.strictEqual(needsRedesign(rule({ true_positive: 1, collateral: 1 })), false);
+});
+
+t('collateral: REDESIGN NEVER DISARMS THE GUARD', () => {
+  // The whole point. Retired means the rule is WRONG, so silencing it is right.
+  // Redesign means the rule is RIGHT and the remedy is wrong, so silencing it would
+  // drop a correct check and keep the defect it catches.
+  const f = tmpRegistry([rule({ true_positive: 3, collateral: 3 })]);
+  assert.strictEqual(needsRedesign(rule({ true_positive: 3, collateral: 3 })), true);
+  assert.strictEqual(isRuleActive('G1', f), true, 'a flagged rule must keep firing');
+});
+
+t('collateral: only counted on a CORRECT firing, never on a false positive', () => {
+  // An FP already counts as harm through precision. Counting it twice would retire
+  // and flag the same rule for the same failure.
+  const f = tmpRegistry([rule()]);
+  recordFiring('G1', 'fp', 'wrong hit that also annoyed the user', f, true);
+  assert.strictEqual(JSON.parse(fs.readFileSync(f, 'utf8')).rules[0].collateral || 0, 0);
+});
+
+t('collateral: recordFiring announces the moment a rule crosses into redesign', () => {
+  const f = tmpRegistry([rule({ true_positive: 1, collateral: 1 })]);
+  const res = recordFiring('G1', 'tp', 'correct again, and hurt again', f, true);
+  assert.strictEqual(res.redesign, true);
+  assert.strictEqual(res.redesignTripped, true, 'the crossing must be announced, not just the state');
+});
+
+t('collateral: an already-flagged rule does not re-announce every firing', () => {
+  const f = tmpRegistry([rule({ true_positive: 3, collateral: 3 })]);
+  const res = recordFiring('G1', 'tp', 'still hurting', f, true);
+  assert.strictEqual(res.redesign, true);
+  assert.strictEqual(res.redesignTripped, false, 'announce the crossing once, not forever');
+});
+
+t('collateral: scoreboard surfaces it beside precision, not folded into it', () => {
+  const f = tmpRegistry([rule({ true_positive: 3, collateral: 3 })]);
+  const s = scoreboard(f)[0];
+  assert.strictEqual(s.precision, 1);
+  assert.strictEqual(s.redesign, true, 'a perfect precision score must not hide it');
 });
 
 // ============================================================================

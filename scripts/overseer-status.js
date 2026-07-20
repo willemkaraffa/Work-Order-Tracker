@@ -145,10 +145,17 @@ function rules() {
   for (const r of board) {
     const p = r.precision === null ? '-' : r.precision.toFixed(2);
     const drift = r.stored !== r.derived ? `  <-- stored says ${r.stored}` : '';
-    out.push(`  ${r.derived === 'retired' ? 'DEAD' : 'live'} ${r.id.padEnd(3)} TP=${r.tp} FP=${r.fp} prec=${p}  ${r.derived}${drift}`);
+    // A rule can be accurate AND worth rebuilding, so collateral is shown next to
+    // precision rather than folded into it. Hiding it behind a healthy precision
+    // column is exactly how the style gate went unexamined at precision 1.00.
+    const coll = r.collateral ? `  collateral=${r.collateral}/${r.tp}` : '';
+    const flag = r.redesign ? '  <-- NEEDS REDESIGN: correct rule, harmful remedy' : '';
+    out.push(`  ${r.derived === 'retired' ? 'DEAD' : 'live'} ${r.id.padEnd(3)} TP=${r.tp} FP=${r.fp} prec=${p}  ${r.derived}${coll}${drift}${flag}`);
   }
   const dead = board.filter(r => r.derived === 'retired').length;
-  out.push(`  ${board.length} rules, ${dead} retired by evidence.`);
+  const redo = board.filter(r => r.redesign).length;
+  out.push(`  ${board.length} rules, ${dead} retired by evidence, ${redo} flagged for redesign.`);
+  if (redo) out.push('  A redesign flag does NOT disable the rule; it is right, its mechanism is not.');
   return out;
 }
 

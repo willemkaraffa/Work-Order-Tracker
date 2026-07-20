@@ -38,6 +38,8 @@ const REGISTRY = process.env.WOT_RULE_REGISTRY || path.join(
 const DEFAULT_THRESHOLDS = {
   promote_to_validated: { true_positive_min: 3, precision_min: 0.5 },
   retire: { false_positive_min: 5, precision_max: 0.4 },
+  // A rule can be RIGHT and still be worth rebuilding. See needsRedesign.
+  redesign: { collateral_rate_min: 0.5, true_positive_min: 2 },
 };
 
 function readRegistry(file = REGISTRY) {
@@ -78,6 +80,39 @@ function effectiveStatus(rule, thresholds = DEFAULT_THRESHOLDS) {
   return 'hypothesis';
 }
 
+// collateralRate = correct firings that HURT the user / all correct firings.
+//
+// WHY A NEW FIELD (rule 5 asks for a stated reason). No existing field holds this.
+// `false_negative` is a MISSED detection; this is the opposite, a HIT whose remedy
+// cost something. TP/FP measure whether the rule was RIGHT, and nothing measured
+// whether being right was worth it.
+//
+// The gap was found by the style gate on 2026-07-20: it fired 3 times, was correct
+// all 3 times, and produced a user-visible double print on 100% of those firings,
+// because a Stop hook cannot unsend the message it objects to. Precision 1.00, and
+// still the wrong mechanism. On the old scoreboard that rule looked perfect.
+function collateralRate(rule) {
+  const tp = Number(rule.true_positive) || 0;
+  const c = Number(rule.collateral) || 0;
+  return tp === 0 ? null : c / tp;
+}
+
+// A rule that is ACCURATE but whose intervention keeps hurting. Reported, never
+// enforced.
+//
+// CRITICAL: this must NOT disarm the guard, which is why it is separate from
+// effectiveStatus and why isRuleActive ignores it entirely. Retirement means the
+// rule is WRONG, so silencing it is right. Redesign means the rule is RIGHT and the
+// remedy is wrong, so silencing it would remove a correct check and keep the defect
+// it catches. The answer is to rebuild the mechanism, and that is a human's call.
+function needsRedesign(rule, thresholds = DEFAULT_THRESHOLDS) {
+  const cfg = (thresholds && thresholds.redesign) || DEFAULT_THRESHOLDS.redesign;
+  const rate = collateralRate(rule);
+  const tp = Number(rule.true_positive) || 0;
+  if (rate === null) return false;
+  return tp >= (cfg.true_positive_min ?? 2) && rate >= (cfg.collateral_rate_min ?? 0.5);
+}
+
 // THE ONE FUNCTION THAT MAKES RETIREMENT REAL. A guard calls this and stands down
 // when its rule has been retired by the evidence. Without this, "retired" is a word
 // in a file nobody consults and the rule keeps firing forever.
@@ -100,7 +135,7 @@ function isRuleActive(ruleId, file = REGISTRY) {
 // would retire whichever rule annoyed it most, which is precisely the incentive
 // the doc warns about ("NOT the coder; it is biased toward killing rules that
 // constrain it").
-function recordFiring(ruleId, label, note, file = REGISTRY) {
+function recordFiring(ruleId, label, note, file = REGISTRY, collateral = false) {
   const doc = readRegistry(file);
   if (!doc) throw new Error(`no rule registry at ${file}`);
   const rule = doc.rules.find(r => r.id === ruleId);
@@ -108,8 +143,13 @@ function recordFiring(ruleId, label, note, file = REGISTRY) {
   if (label !== 'tp' && label !== 'fp') throw new Error(`label must be tp or fp, got '${label}'`);
 
   const before = effectiveStatus(rule, doc.thresholds);
+  const redesignBefore = needsRedesign(rule, doc.thresholds);
   if (label === 'tp') rule.true_positive = (Number(rule.true_positive) || 0) + 1;
   else rule.false_positive = (Number(rule.false_positive) || 0) + 1;
+  // Collateral is only meaningful on a CORRECT firing. A false positive already
+  // counts as harm through precision; counting it twice would retire and flag the
+  // same rule for the same failure.
+  if (collateral && label === 'tp') rule.collateral = (Number(rule.collateral) || 0) + 1;
 
   rule.notes = rule.notes || [];
   if (note) rule.notes.push(`${new Date().toISOString().slice(0, 10)} [${label}] ${note}`);
@@ -123,7 +163,15 @@ function recordFiring(ruleId, label, note, file = REGISTRY) {
   doc.updated_at = new Date().toISOString();
 
   fs.writeFileSync(file, JSON.stringify(doc, null, 2));
-  return { rule, before, after, changed: before !== after };
+  const redesignAfter = needsRedesign(rule, doc.thresholds);
+  return {
+    rule, before, after, changed: before !== after,
+    redesign: redesignAfter,
+    // Surfaced separately so a caller can announce the moment a correct rule
+    // crosses into "the remedy is the problem", which is easy to miss when the
+    // precision column still looks healthy.
+    redesignTripped: redesignAfter && !redesignBefore,
+  };
 }
 
 function scoreboard(file = REGISTRY) {
@@ -136,11 +184,15 @@ function scoreboard(file = REGISTRY) {
     derived: effectiveStatus(r, doc.thresholds),
     tp: Number(r.true_positive) || 0,
     fp: Number(r.false_positive) || 0,
+    collateral: Number(r.collateral) || 0,
     precision: precision(r),
+    collateralRate: collateralRate(r),
+    redesign: needsRedesign(r, doc.thresholds),
   }));
 }
 
 module.exports = {
   readRegistry, precision, effectiveStatus, isRuleActive, recordFiring, scoreboard,
+  collateralRate, needsRedesign,
   REGISTRY, DEFAULT_THRESHOLDS,
 };
