@@ -142,13 +142,24 @@ function main() {
     console.error(`[review-gate] COMMIT REFUSED: ${verdict.reason}`);
     return 1;
   }
-  // Surface dismissals so a human sees what was waved off, and why. The reason is
-  // now the ARCHITECT's words, not Claude's (see review-disposition.js), so a
-  // dismissal here is a superior's ruling rather than the coder's own opinion.
+  // Surface dismissals so a human sees what was waved off, and why.
+  //
+  // ATTRIBUTE PER FINDING, never blanket. A blanket "DISMISSED by the architect"
+  // banner shipped briefly and was wrong: findings dismissed by Claude in earlier
+  // sessions (before the architect existed) were retro-credited to a superior that
+  // never ruled on them. That is exactly the false provenance this chain exists to
+  // stop, so the label reads off `ruledBy`, which only architect.js writes.
   if (verdict.dismissed.length) {
-    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) DISMISSED by the architect, read the reasons:`);
+    const ruled = verdict.dismissed.filter(f => f.ruledBy === 'architect').length;
+    const selfJudged = verdict.dismissed.length - ruled;
+    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) DISMISSED, read the reasons:`);
+    if (selfJudged) {
+      console.log(`  NOTE: ${selfJudged} of these were self-dispositioned by Claude, NOT ruled by the architect.`);
+    }
     for (const f of verdict.dismissed) {
+      const by = f.ruledBy === 'architect' ? 'architect' : 'Claude (self-judged)';
       console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'} ${f.problem}`);
+      console.log(`         dismissed by: ${by}`);
       console.log(`         reason: ${f.reason}`);
     }
   } else {

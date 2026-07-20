@@ -330,5 +330,20 @@ t('merge: a FIXED finding NOT re-raised stays fixed', () => {
   assert.strictEqual(original.status, 'fixed', 'not re-raised -> the fix stands');
 });
 
+// --- dismissal PROVENANCE: who actually ruled --------------------------------
+// A blanket "DISMISSED by the architect" banner shipped briefly and retro-credited
+// Claude's own older dismissals to a superior that never saw them. evaluate() is
+// what feeds that banner, so it must carry ruledBy through untouched.
+
+t('gate: a dismissal carries its ruledBy through to the caller', () => {
+  const architectRuled = finding({ status: 'dismissed', reason: 'not a defect', ruledBy: 'architect' });
+  const selfJudged = finding({ id: 'f2', status: 'dismissed', reason: 'looked fine to me' });
+  const v = evaluate(doc([architectRuled, selfJudged]), HASH);
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.dismissed.length, 2);
+  assert.strictEqual(v.dismissed.filter(f => f.ruledBy === 'architect').length, 1,
+    'exactly one was architect-ruled; the other must NOT be credited to it');
+});
+
 console.log(failed ? `\n${failed} failed` : '\nall review-gate tests pass');
 process.exit(failed ? 1 : 0);

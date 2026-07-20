@@ -68,6 +68,38 @@ function main() {
   try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch {}
   if (!state || typeof state !== 'object') state = {}; // corrupt file (null/non-object) must not throw
 
+  // A run that never EXECUTED is not an attempt. PostToolUse un-counts it.
+  //
+  // This closes a real false positive (observed 2026-07-20): a test file with a
+  // syntax error was run, crashed on parse, re-run once to read the error, and the
+  // 3rd invocation -- the first one that would have actually tested anything -- was
+  // BLOCKED. Two crashes on a file that never parsed are one broken file, not two
+  // failed verification attempts, which is what rule C2 is actually about.
+  //
+  // KNOWN LIMITS, stated rather than discovered later:
+  //  - Detection is by node's crash signature in the output. The probed fact that
+  //    Bash tool_response carries NO exit code still holds, so content is all there
+  //    is. Python parse errors are NOT matched (different shape).
+  //  - A script that legitimately prints these strings gets un-counted. That errs
+  //    toward ALLOWING one more run, which is the safe direction for a guard: a
+  //    wrongly-permitted run costs a few seconds, a wrongly-blocked one strands work.
+  //  - Only ever removes ONE timestamp, and only the one this run just added.
+  if (input.hook_event_name === 'PostToolUse') {
+    const res = input.tool_response || {};
+    const out = `${res.stderr || ''}\n${res.stdout || ''}`;
+    // Parse/load failures only: the process died before running a single line.
+    // A RUNTIME error (assertion, TypeError mid-test) IS a real attempt and stays counted.
+    const neverRan = /\bSyntaxError\b/.test(out) ||
+                     /Cannot find module|MODULE_NOT_FOUND/.test(out);
+    if (neverRan) {
+      for (const t of targets) {
+        if (Array.isArray(state[t]) && state[t].length) state[t].pop();
+      }
+      try { fs.writeFileSync(stateFile, JSON.stringify(state)); } catch {}
+    }
+    return; // PostToolUse never blocks
+  }
+
   const now = Date.now();
   let blockedTarget = null;
   for (const t of targets) {

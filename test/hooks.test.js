@@ -112,6 +112,56 @@ t('thrash: a sanctioned tool does not shield a scratch script in the same sessio
   assert.strictEqual(bash(s, 'node scratch/harness.js').status, 2, 'scratch still blocks on its own 3rd');
 });
 
+// --- a run that never EXECUTED is not an attempt (false positive, 2026-07-20) ---
+// A file with a syntax error crashed twice, and the 3rd run -- the first that would
+// have actually tested anything -- was blocked. Two crashes on an unparseable file
+// are one broken file, not two failed verification attempts.
+const postBash = (session, command, tool_response) =>
+  run(THRASH, { hook_event_name: 'PostToolUse', tool_name: 'Bash', session_id: session, tool_input: { command }, tool_response });
+
+t('thrash: a run that died on a SyntaxError is not counted', () => {
+  const s = sid();
+  bash(s, 'node test/broken.test.js');
+  postBash(s, 'node test/broken.test.js', { stderr: 'SyntaxError: Identifier already declared' });
+  bash(s, 'node test/broken.test.js');
+  postBash(s, 'node test/broken.test.js', { stderr: 'SyntaxError: Identifier already declared' });
+  // Both crashes un-counted, so a real run is still allowed.
+  assert.strictEqual(bash(s, 'node test/broken.test.js').status, 0, 'crashes must not burn the budget');
+});
+
+t('thrash: a missing-module crash is not counted either', () => {
+  const s = sid();
+  bash(s, 'node scratch/x.js');
+  postBash(s, 'node scratch/x.js', { stderr: "Error: Cannot find module 'foo'" });
+  bash(s, 'node scratch/x.js');
+  postBash(s, 'node scratch/x.js', { stderr: 'MODULE_NOT_FOUND' });
+  assert.strictEqual(bash(s, 'node scratch/x.js').status, 0);
+});
+
+t('thrash: a RUNTIME failure IS a real attempt and stays counted', () => {
+  // The guard exists for this case: the script ran, the approach failed, twice.
+  const s = sid();
+  bash(s, 'node scratch/probe.js');
+  postBash(s, 'node scratch/probe.js', { stderr: 'AssertionError: expected 1 to equal 2' });
+  bash(s, 'node scratch/probe.js');
+  postBash(s, 'node scratch/probe.js', { stderr: 'AssertionError: expected 1 to equal 2' });
+  assert.strictEqual(bash(s, 'node scratch/probe.js').status, 2, '3rd real attempt still blocks');
+});
+
+t('thrash: PostToolUse never blocks, whatever the output', () => {
+  const s = sid();
+  for (let i = 0; i < 5; i++) {
+    assert.strictEqual(postBash(s, 'node scratch/y.js', { stderr: 'SyntaxError: x' }).status, 0);
+  }
+});
+
+t('thrash: un-counting never underflows past an empty history', () => {
+  const s = sid();
+  // PostToolUse with no matching PreToolUse entry must not corrupt state or throw.
+  postBash(s, 'node scratch/z.js', { stderr: 'SyntaxError: x' });
+  assert.strictEqual(bash(s, 'node scratch/z.js').status, 0);
+});
+
 // ============================================================================
 // scraper-data-gate: BLOCKS editing extraction code until a real DOM dump has
 // been read this session. Fails open on anything unrelated.
