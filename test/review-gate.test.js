@@ -224,12 +224,14 @@ t('re-raise does NOT overwrite an existing symbol', () => {
   assert.strictEqual(second.findings[0].symbol, 'original', 'a known finding keeps its symbol');
 });
 
-t('a fixed finding stays fixed and does not reopen when re-raised', () => {
-  const first = mergeFindings(null, [raw()], 'h1', 'm');
-  first.findings[0].status = 'fixed';
-  const second = mergeFindings(first, [raw()], 'h2', 'm');
-  assert.strictEqual(second.findings[0].status, 'fixed');
-});
+// REVERSED 2026-07-20. This used to assert the opposite ('a fixed finding stays
+// fixed and does not reopen when re-raised'), locking in mergeFindings' behaviour
+// with no stated reason for it. The reviewer flagged that behaviour as a hole and
+// the ARCHITECT ruled the finding OPEN (f9801698): a reviewer that still sees the
+// defect in the CURRENT tree is evidence the fix did not hold, so "fixed" would
+// clear the gate on a claim the reviewer just contradicted.
+// The re-raise cases now live together further down; see 'merge: a re-raised FIXED
+// finding is reset to open' and its dismissed/not-re-raised counterparts.
 
 t('genuinely new findings are added alongside carried ones', () => {
   const first = mergeFindings(null, [raw()], 'h1', 'm');
@@ -293,6 +295,39 @@ t('empty file list yields empty context, not a crash', () => {
   const ctx = buildFileContext([], reader({}));
   assert.strictEqual(ctx.text, '');
   assert.strictEqual(ctx.included.length, 0);
+});
+
+// --- re-raise after "fixed": the regression hole the architect ruled on ---------
+// A finding marked fixed, then seen AGAIN by the reviewer on the current tree, is
+// evidence the fix did not hold. It must not keep sailing through on the old claim.
+
+t('merge: a re-raised FIXED finding is reset to open', () => {
+  const first = mergeFindings(null, [raw()], 'h1', 'm', 'HEAD');
+  first.findings[0].status = 'fixed';
+  const again = mergeFindings(first, [raw()], 'h2', 'm', 'HEAD');
+  assert.strictEqual(again.findings[0].status, 'open', 'still present -> the fix did not hold');
+  assert.strictEqual(again.findings[0].reason, null, 'the stale reason must not survive');
+});
+
+t('merge: a re-raised DISMISSED finding KEEPS its dismissal', () => {
+  // A non-deterministic model re-reports false positives forever. Resetting these
+  // would make a known-false finding block the gate on every roll.
+  const first = mergeFindings(null, [raw()], 'h1', 'm', 'HEAD');
+  first.findings[0].status = 'dismissed';
+  first.findings[0].reason = 'correct by design';
+  const again = mergeFindings(first, [raw()], 'h2', 'm', 'HEAD');
+  assert.strictEqual(again.findings[0].status, 'dismissed');
+  assert.strictEqual(again.findings[0].reason, 'correct by design');
+});
+
+t('merge: a FIXED finding NOT re-raised stays fixed', () => {
+  // The anti-laundering rule cuts the other way too: absence is not evidence, but a
+  // genuine fix must not be reopened just because a later run reviewed other code.
+  const first = mergeFindings(null, [raw()], 'h1', 'm', 'HEAD');
+  first.findings[0].status = 'fixed';
+  const again = mergeFindings(first, [raw({ file: 'other.js' })], 'h2', 'm', 'HEAD');
+  const original = again.findings.find(f => f.file === 'a.js');
+  assert.strictEqual(original.status, 'fixed', 'not re-raised -> the fix stands');
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall review-gate tests pass');

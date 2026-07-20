@@ -64,13 +64,13 @@ function evaluate(doc, currentHash) {
   if (uncitable.length) {
     return {
       ok: false,
-      reason: `${uncitable.length} OPEN finding(s) with NO symbol (cannot be cite-verified): ${uncitable.map(f => f.id).join(', ')}. Re-run review so it emits a verbatim symbol, or disposition manually: node scripts/review-disposition.js <id> fixed|dismissed "reason"`,
+      reason: `${uncitable.length} OPEN finding(s) with NO symbol (cannot be cite-verified): ${uncitable.map(f => f.id).join(', ')}. Re-run review so it emits a verbatim symbol, or send it to the architect: node scripts/review-disposition.js <id> "argument"`,
     };
   }
   if (open.length) {
     return {
       ok: false,
-      reason: `${open.length} finding(s) still OPEN: ${open.map(f => f.id).join(', ')}. Cite them: node scripts/cite.js. Then disposition each: node scripts/review-disposition.js <id> fixed|dismissed "reason"`,
+      reason: `${open.length} finding(s) still OPEN: ${open.map(f => f.id).join(', ')}. Cite them: node scripts/cite.js. Then get the architect to rule on each: node scripts/review-disposition.js <id> "your argument"`,
     };
   }
   const bare = (doc.findings || []).filter(
@@ -142,9 +142,11 @@ function main() {
     console.error(`[review-gate] COMMIT REFUSED: ${verdict.reason}`);
     return 1;
   }
-  // Surface dismissals so a human sees what Claude waved off, and why.
+  // Surface dismissals so a human sees what was waved off, and why. The reason is
+  // now the ARCHITECT's words, not Claude's (see review-disposition.js), so a
+  // dismissal here is a superior's ruling rather than the coder's own opinion.
   if (verdict.dismissed.length) {
-    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) DISMISSED by Claude, read the reasons:`);
+    console.log(`[review-gate] passed. ${verdict.dismissed.length} finding(s) DISMISSED by the architect, read the reasons:`);
     for (const f of verdict.dismissed) {
       console.log(`  [${f.id}] ${f.file}:${f.line ?? '?'} ${f.problem}`);
       console.log(`         reason: ${f.reason}`);

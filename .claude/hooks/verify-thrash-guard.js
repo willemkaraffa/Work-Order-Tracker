@@ -41,8 +41,13 @@ function main() {
   // loop into a self-block -- proven: fixing 3 findings one-by-one trips this on the 3rd
   // reviewer run. The test runner is re-run freely too (npm test is whitelisted above;
   // this covers the bare `node test/run.js` spelling). These are not ad-hoc scratch.
+  // architect.js rules on findings ONE AT A TIME (review-disposition.js shells out to
+  // it), so an N-finding review means N architect runs. Counting it would self-block
+  // the very loop this project requires -- the same bug this guard already shipped
+  // once against gemini-review.js.
   const SANCTIONED = new Set([
     'gemini-review.js', 'review-gate.js', 'review-disposition.js', 'cite.js', 'run.js',
+    'architect.js',
   ]);
 
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.

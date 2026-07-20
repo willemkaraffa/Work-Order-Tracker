@@ -40,6 +40,62 @@ function lastAssistantText(transcriptPath) {
   return "";
 }
 
+// The human can lift the LENGTH budget (only the length budget) by answering an
+// AskUserQuestion. Claude emits the question; only the harness can write the answer.
+//
+// FORGE NOTE (probed 2026-07-20, and it killed the original design): the handoff
+// spec said "match user-role tool_result entries" -- that is NOT forge-proof. A Bash
+// tool_result is ALSO a user-role entry, and its stdout is whatever Claude told the
+// command to print, so `echo 'been answered: "..."="Verbose ON"'` would have granted
+// Claude its own lift. Confirmed in a live transcript: the phrase appears in a
+// tool_result whose originating tool is Bash.
+//
+// So the grant is read STRUCTURALLY, from two things Claude cannot author:
+//   1. the entry's `toolUseResult.answers` map (harness-written, absent on Bash), and
+//   2. the tool_use_id resolving to a tool_use block whose name is AskUserQuestion.
+// A Bash result cannot carry an AskUserQuestion tool_use_id, so shell output is out.
+const GRANT_Q = "Speak verbosely here?";
+const GRANT_ON = "Verbose ON";
+
+function lastUserGrant(transcriptPath) {
+  let lines;
+  try {
+    lines = fs.readFileSync(transcriptPath, "utf8").split("\n").filter(Boolean);
+  } catch { return null; }
+
+  const askIds = new Set();
+  const events = [];
+  for (const line of lines) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    events.push(ev);
+    const content = ev.message && ev.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b && b.type === "tool_use" && b.name === "AskUserQuestion") askIds.add(b.id);
+    }
+  }
+
+  let grant = null; // last one wins; a later "Stay caveman" revokes an earlier lift
+  for (const ev of events) {
+    const role = (ev.message && ev.message.role) || ev.type;
+    if (role !== "user") continue;
+    const answers = ev.toolUseResult && ev.toolUseResult.answers;
+    if (!answers || typeof answers !== "object") continue;
+
+    // The answer must have come from an AskUserQuestion call, not any other tool.
+    const content = ev.message && ev.message.content;
+    const ids = Array.isArray(content)
+      ? content.filter(b => b && b.type === "tool_result").map(b => b.tool_use_id)
+      : [];
+    if (!ids.some(id => askIds.has(id))) continue;
+
+    if (!Object.prototype.hasOwnProperty.call(answers, GRANT_Q)) continue;
+    grant = answers[GRANT_Q] === GRANT_ON ? "ON" : "OFF";
+  }
+  return grant;
+}
+
 function main() {
   let input;
   try { input = JSON.parse(fs.readFileSync(0, "utf8")); } catch { return; }
@@ -55,8 +111,11 @@ function main() {
   // Measure PROSE only: strip fenced code so legit code/long snippets do not trip it.
   const prose = text.replace(/```[\s\S]*?```/g, "");
 
+  // Verbose lift: skips the LENGTH check only. The glyph rules never lift.
+  const verbose = lastUserGrant(tp) === "ON";
+
   const problems = [];
-  if (prose.length > BUDGET) problems.push(`${prose.length} chars of prose, over the ${BUDGET} budget`);
+  if (!verbose && prose.length > BUDGET) problems.push(`${prose.length} chars of prose, over the ${BUDGET} budget`);
   if (EM_DASH.test(prose)) problems.push("contains an em-dash (banned)");
   if (EMOJI.test(prose)) problems.push("contains an emoji (banned)");
 

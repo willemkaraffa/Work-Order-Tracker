@@ -1,54 +1,55 @@
 'use strict';
 /*
- * review-disposition.js: record what was done about a reviewer finding.
+ * review-disposition.js: ask the ARCHITECT to rule on a reviewer finding.
  *
- *   node scripts/review-disposition.js <id> fixed
- *   node scripts/review-disposition.js <id> dismissed "why this is not a real defect"
+ *   node scripts/review-disposition.js <id> ["the argument for why this is not a defect"]
  *
- * A dismissal REQUIRES a reason. That reason is written down, printed by the gate
- * at commit time, and read by a human who can overrule it. The point is not to
- * stop Claude from being wrong; it is to stop Claude from being wrong invisibly.
+ * WHAT CHANGED, AND WHY IT IS THE WHOLE POINT. This script used to take the verdict
+ * as a CLI argument (`<id> fixed|dismissed "reason"`), which meant whoever ran it
+ * decided the outcome. In practice that was Claude dispositioning findings raised
+ * against Claude's own code: sole judge, and observed going wrong on 2026-07-16.
+ *
+ * Now it takes NO verdict. It forwards the finding, the current file text, and your
+ * ARGUMENT to the architect (external Gemini), and writes back whatever the
+ * architect returns. You can TRIGGER a ruling; you cannot dictate one.
+ *
+ * The argument is EVIDENCE, not a verdict. Passing a genuinely good reason still
+ * works: the architect reads it and can rule "dismissed". What no longer works is
+ * asserting the conclusion. Argument versus ruling is the entire distinction.
+ *
+ * NOT a "who may run it" restriction: that is unimplementable, because a Task
+ * subagent shares the parent's session_id and no hook can tell the coder from the
+ * overseer. It does not matter WHO runs this, because the runner does not decide.
+ *
+ * Exit: 0 ruled (fixed/dismissed), 1 the finding STANDS, 2 no ruling (API down).
+ * A dead API blocks dispositions on purpose. A knob Claude may turn is not a gate.
  */
-const fs = require('fs');
 const path = require('path');
-
-const FINDINGS_FILE = path.join(__dirname, '..', '.review-findings.json');
+const { spawnSync } = require('child_process');
 
 function main() {
-  const [id, status, ...rest] = process.argv.slice(2);
-  const reason = rest.join(' ').trim();
+  const [id, ...rest] = process.argv.slice(2);
+  const argument = rest.join(' ').trim();
 
-  if (!id || !['fixed', 'dismissed'].includes(status)) {
-    console.error('usage: node scripts/review-disposition.js <id> fixed|dismissed ["reason"]');
+  if (!id) {
+    console.error('usage: node scripts/review-disposition.js <id> ["argument for the architect"]');
     return 2;
   }
-  if (status === 'dismissed' && !reason) {
-    console.error('[disposition] dismissing REQUIRES a reason. A dismissal with no stated reason is a silent drop.');
-    return 2;
-  }
-
-  let doc;
-  try {
-    doc = JSON.parse(fs.readFileSync(FINDINGS_FILE, 'utf8'));
-  } catch {
-    console.error(`[disposition] no findings file. Run: node scripts/gemini-review.js`);
+  // Catch the OLD calling convention rather than silently forwarding "fixed" as if
+  // it were an argument. Muscle memory (and stale docs) will keep producing it.
+  if (['fixed', 'dismissed', 'open'].includes(rest[0])) {
+    console.error(`[disposition] '${rest[0]}' is a VERDICT, and you no longer supply one.`);
+    console.error('[disposition] The architect rules; you may only argue. Re-run with your reasoning:');
+    console.error(`[disposition]   node scripts/review-disposition.js ${id} "why you believe this is not a defect"`);
     return 2;
   }
 
-  const f = (doc.findings || []).find(x => x.id === id);
-  if (!f) {
-    console.error(`[disposition] no finding with id ${id}. Known: ${(doc.findings || []).map(x => x.id).join(', ') || '(none)'}`);
-    return 2;
-  }
-
-  f.status = status;
-  f.reason = status === 'dismissed' ? reason : null;
-  fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
-
-  const open = (doc.findings || []).filter(x => x.status === 'open').length;
-  console.log(`[disposition] ${id} -> ${status}${reason ? `: ${reason}` : ''}`);
-  console.log(`[disposition] ${open} finding(s) still open.`);
-  return 0;
+  const r = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'architect.js'), 'rule', id, ...(argument ? [argument] : [])],
+    { stdio: 'inherit' }
+  );
+  return r.status === null ? 2 : r.status;
 }
 
 process.exitCode = main();

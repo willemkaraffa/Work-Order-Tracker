@@ -202,6 +202,87 @@ t('length: a missing transcript path fails open (no block, no crash)', () => {
   assert.strictEqual(blocked(r), false);
 });
 
+// --- the verbose-permission lift: the human, and ONLY the human, can lift the
+// LENGTH budget by answering an AskUserQuestion. Every forge path must still block.
+const GRANT_Q = 'Speak verbosely here?';
+
+// Build a transcript: `grants` is a list of {answer, tool} entries replayed in order,
+// followed by an assistant message `text`. tool defaults to AskUserQuestion (the real
+// path); pass 'Bash' to simulate Claude printing the grant from shell output.
+function transcriptWithGrants(grants, text, opts = {}) {
+  const p = path.join(os.tmpdir(), `wot-transcript-${process.pid}-${seq++}.jsonl`);
+  const lines = [];
+  grants.forEach((g, i) => {
+    const id = `toolu_${i}`;
+    const tool = g.tool || 'AskUserQuestion';
+    lines.push(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name: tool, input: {} }] },
+    }));
+    const entry = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'x' }] },
+      toolUseResult: { questions: [], answers: { [GRANT_Q]: g.answer } },
+    };
+    if (opts.assistantRole) { entry.type = 'assistant'; entry.message.role = 'assistant'; }
+    lines.push(JSON.stringify(entry));
+  });
+  lines.push(JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } }));
+  fs.writeFileSync(p, lines.join('\n') + '\n');
+  return p;
+}
+const stopWithGrants = (grants, text, opts) =>
+  run(LENGTH, { transcript_path: transcriptWithGrants(grants, text, opts) });
+
+t('length: a human "Verbose ON" grant lifts the length budget', () => {
+  const r = stopWithGrants([{ answer: 'Verbose ON' }], 'x'.repeat(5000));
+  assert.strictEqual(blocked(r), false, 'granted verbose -> no length block');
+});
+
+t('length: FORGE -- the same grant carried by a Bash tool_result still blocks', () => {
+  // Bash stdout is a user-role tool_result whose content Claude dictates. This is the
+  // hole the original spec would have shipped; the grant must be tied to the
+  // AskUserQuestion tool_use id, not merely to a user-role entry.
+  const r = stopWithGrants([{ answer: 'Verbose ON', tool: 'Bash' }], 'x'.repeat(5000));
+  assert.ok(blocked(r), 'a shell-authored grant must NOT lift the budget');
+});
+
+t('length: FORGE -- the grant in an ASSISTANT entry still blocks', () => {
+  const r = stopWithGrants([{ answer: 'Verbose ON' }], 'x'.repeat(5000), { assistantRole: true });
+  assert.ok(blocked(r), 'Claude-authored entries can never grant');
+});
+
+t('length: "Stay caveman" after an earlier grant revokes the lift', () => {
+  const r = stopWithGrants([{ answer: 'Verbose ON' }, { answer: 'Stay caveman' }], 'x'.repeat(5000));
+  assert.ok(blocked(r), 'last answer wins -> budget is back');
+});
+
+t('length: a re-grant after a revoke lifts again (last answer wins)', () => {
+  const r = stopWithGrants(
+    [{ answer: 'Verbose ON' }, { answer: 'Stay caveman' }, { answer: 'Verbose ON' }],
+    'x'.repeat(5000));
+  assert.strictEqual(blocked(r), false);
+});
+
+t('length: an em-dash blocks even under a verbose grant (glyph rule never lifts)', () => {
+  const r = stopWithGrants([{ answer: 'Verbose ON' }], `done ${EM_DASH} gate green`);
+  assert.ok(blocked(r), 'verbosity lifts LENGTH only');
+});
+
+t('length: an emoji blocks even under a verbose grant', () => {
+  assert.ok(blocked(stopWithGrants([{ answer: 'Verbose ON' }], `done ${EMOJI}`)));
+});
+
+t('length: an answer to some OTHER question does not lift the budget', () => {
+  const p = path.join(os.tmpdir(), `wot-transcript-${process.pid}-${seq++}.jsonl`);
+  fs.writeFileSync(p, [
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'a1', name: 'AskUserQuestion', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a1', content: 'x' }] }, toolUseResult: { answers: { 'Ship it?': 'Verbose ON' } } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(5000) }] } }),
+  ].join('\n') + '\n');
+  assert.ok(blocked(run(LENGTH, { transcript_path: p })), 'only the grant question counts');
+});
+
 // ============================================================================
 // verify-budget-guard (PostToolUse nudge): past ~2 heavy-verify runs per window,
 // injects a VISIBLE additionalContext message. Never blocks (exit 0 always).

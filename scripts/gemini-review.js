@@ -75,7 +75,20 @@ function mergeFindings(prevDoc, rawFindings, hash, model, range) {
     const id = findingId(f);
     const existing = byId.get(id);
     if (existing) {
-      existing.lastSeen = hash; // re-raised; keep whatever disposition it already has
+      existing.lastSeen = hash;
+      // RE-RAISED AFTER BEING MARKED FIXED -> back to open. The reviewer looking at
+      // the CURRENT tree and still seeing the defect is evidence the fix was
+      // incomplete or has regressed, and "fixed" would sail through the gate on the
+      // strength of a claim the reviewer just contradicted.
+      //
+      // Only `fixed` is reset. `dismissed` is preserved: a dismissal means the
+      // finding is not a real defect, so re-raising it says nothing new (the model is
+      // non-deterministic and will re-report false positives forever). Resetting
+      // dismissals would make a known-false finding block the gate on every roll.
+      if (existing.status === 'fixed') {
+        existing.status = 'open';
+        existing.reason = null;
+      }
       // Backfill a missing symbol so a finding first raised symbol-less (uncitable,
       // blocking) becomes citable once a later run supplies one. Never OVERWRITE an
       // existing symbol: identity is stable (findingId ignores symbol), so a changed
@@ -123,30 +136,9 @@ function writeFindings(diff, model, findings, range) {
   return doc;
 }
 
-// Key resolution: env var wins, else the gitignored .gemini-key file at repo root.
-function loadKey() {
-  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY.trim();
-  try {
-    const k = fs.readFileSync(path.join(__dirname, '..', '.gemini-key'), 'utf8').trim();
-    if (k) return k;
-  } catch { /* file absent -> no key */ }
-  return null;
-}
-
-// Free-tier availability is a moving target: a single hardcoded id failed three
-// distinct ways within one session: 429 quota (2.5-flash, 2.0-flash), 404 retired
-// ("no longer available to new users": 2.5-flash-lite, still listed by ListModels),
-// and 503 capacity ("high demand": 3.5-flash, flash-latest). So try a chain, newest
-// first, and use whichever answers. GEMINI_MODEL overrides the chain entirely.
-// Re-probe: GET /v1beta/models with x-goog-api-key, then POST a one-word prompt.
-const MODELS = process.env.GEMINI_MODEL
-  ? [process.env.GEMINI_MODEL]
-  : ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash'];
-const endpointFor = m => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
-
-// 429/404/503 = this model is unusable right now; fall through to the next one.
-// Anything else is a real error worth surfacing immediately.
-const TRY_NEXT = new Set([429, 404, 503]);
+// Key resolution, the model-fallback chain, and the REST call now live in
+// gemini-call.js so the architect shares ONE implementation of them.
+const { callGemini, loadKey, extractJson, MODELS } = require('./gemini-call.js');
 
 // The audit rubric Gemini reviews against. Ported from the A1-A7 anti-tech-debt
 // rules (CLAUDE.md) + basic correctness. This is the MECHANISM, not decoration -
@@ -252,13 +244,7 @@ function buildFileContext(files, read, maxFile = MAX_FILE_CHARS, maxTotal = MAX_
 }
 
 // Gemini may wrap JSON in ```json fences or add stray prose. Extract the array.
-function parseFindings(text) {
-  const fenced = text.replace(/```(?:json)?/gi, '').trim();
-  const start = fenced.indexOf('[');
-  const end = fenced.lastIndexOf(']');
-  if (start === -1 || end === -1 || end < start) throw new Error('no JSON array in response');
-  return JSON.parse(fenced.slice(start, end + 1));
-}
+const parseFindings = text => extractJson(text, 'array');
 
 // Returns the exit code. We do NOT call process.exit() after a fetch: on Windows
 // that races undici's still-closing keep-alive socket and trips a libuv assertion
@@ -289,11 +275,6 @@ async function main() {
   const prompt =
     `${RUBRIC}\n\n=== FULL TEXT OF TOUCHED FILES ===\n${ctx.text}\n\n=== DIFF (${range}) ===\n${diff}`;
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json' },
-  };
-
   // Report context honestly: a PARTIAL context means the reviewer is still partly
   // blind, and that must be visible rather than implied by silence.
   const ctxNote = `${ctx.included.length} file(s) in context` +
@@ -308,42 +289,12 @@ async function main() {
     return 0;
   }
 
-  const key = loadKey();
-  if (!key) {
-    console.error('[gemini-review] no key (set GEMINI_API_KEY or create .gemini-key): review DID NOT RUN (exit 2, not a clean pass).');
+  const call = await callGemini(prompt, { tag: 'gemini-review' });
+  if (!call.ok) {
+    console.error(`[gemini-review] ${call.why}: review DID NOT RUN (exit 2, not a clean pass).`);
     return 2;
   }
-
-  let data, usedModel;
-  for (const m of MODELS) {
-    try {
-      const res = await fetch(endpointFor(m), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify(body),
-      });
-      if (res.ok) { data = await res.json(); usedModel = m; break; }
-      if (TRY_NEXT.has(res.status)) {
-        console.error(`[gemini-review] ${m}: ${res.status} ${res.statusText}: trying next model.`);
-        continue;
-      }
-      console.error(`[gemini-review] ${m}: API ${res.status} ${res.statusText}: review DID NOT RUN (exit 2).`);
-      console.error((await res.text()).slice(0, 500));
-      return 2;
-    } catch (e) {
-      console.error(`[gemini-review] ${m}: network error: ${e.message}: trying next model.`);
-    }
-  }
-  if (!data) {
-    console.error(`[gemini-review] no model in [${MODELS.join(', ')}] was available: review DID NOT RUN (exit 2).`);
-    return 2;
-  }
-
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    console.error(`[gemini-review] ${usedModel}: empty/blocked response: review DID NOT RUN (exit 2).`);
-    return 2;
-  }
+  const { text, model: usedModel } = call;
 
   let findings;
   try {
@@ -374,9 +325,8 @@ async function main() {
     if (f.fix) console.log(`         fix: ${f.fix}`);
   }
   console.log(`\n  ${open.length} finding(s) OPEN in ${path.basename(FINDINGS_FILE)} (diff ${doc.diffHash}).`);
-  console.log('  Disposition each before committing:');
-  console.log('    node scripts/review-disposition.js <id> fixed');
-  console.log('    node scripts/review-disposition.js <id> dismissed "why it is not a real defect"');
+  console.log('  Get the ARCHITECT to rule on each before committing (you argue, it decides):');
+  console.log('    node scripts/review-disposition.js <id> "why you believe this is not a defect"');
   return strict ? 1 : 0;
 }
 

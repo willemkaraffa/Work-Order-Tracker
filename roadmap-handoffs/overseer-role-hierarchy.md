@@ -128,11 +128,23 @@ user sees the message TWICE ("double printing"). Three design turns tripped it.
 - The answer is written to the transcript by the harness as a USER-role
   `tool_result`, verbatim: `been answered: "<question>"="<answer>"`.
   - Verified: `grep` of the live transcript shows the exact string.
-- FORGE HOLE (found + closed): that same phrase also appears in Claude's own
-  ASSISTANT messages when it echoes the question. A naive grep is forgeable by
-  Claude. Verified: the phrase occurs in BOTH `role:user tool_result:true` AND
-  `role:assistant` entries. So the hook MUST match ONLY user-role tool_result
-  entries. Claude cannot author those -> forge-proof.
+- FORGE HOLE #1: that same phrase also appears in Claude's own ASSISTANT messages
+  when it echoes the question. A naive grep is forgeable by Claude.
+- **FORGE HOLE #2, and it FALSIFIES the fix above (probed 2026-07-20).** The
+  conclusion "match ONLY user-role tool_result entries -> forge-proof" is WRONG.
+  A **Bash tool_result is also a user-role tool_result**, and its stdout is
+  whatever Claude told the command to print. `echo 'been answered: "..."'` would
+  have granted Claude its own lift. Confirmed in a live transcript: three entries
+  carried the phrase, two from `AskUserQuestion` and one from `Bash`.
+- **Actual closure: read the grant STRUCTURALLY, from two harness-authored things.**
+  1. `entry.toolUseResult.answers` -- a `{question: answer}` map the harness writes.
+     A Bash result has `{stdout, stderr}`; it has no `answers` key at all.
+  2. The entry's `tool_result.tool_use_id` must resolve to a `tool_use` block whose
+     `name` is `AskUserQuestion`. A Bash result cannot carry an AskUserQuestion id.
+  Claude emits the tool_use; only the harness writes the result. Both tests are in
+  `test/hooks.test.js` (`FORGE --` cases), including the Bash path specifically.
+- Lesson that generalizes: "role is user" does NOT mean "the human authored it".
+  Every tool result is a user-role entry. Identify the TOOL, not the role.
 
 ### Spec
 
@@ -432,20 +444,57 @@ detects and proposes; the human keeps the approval button.
 
 ## Conflicts with current code (must reconcile when building the chain)
 
-- `review-disposition.js` today takes the verdict as a CLI argument, so whoever
-  runs it decides the outcome. Under the chain it must take no verdict at all and
-  write what the architect API returns. NOT a "who may run it" seam: that is
-  unimplementable (see Q3).
+- ~~`review-disposition.js` takes the verdict as a CLI argument.~~ RESOLVED
+  2026-07-20: it takes no verdict and forwards to `architect.js rule`.
 - The reviewer (`gemini-review.js`) writes findings the coder reads. Under the
-  chain, findings must surface to the architect first.
-- There is no architect script yet. It does not exist. Building it is the bulk of
-  the work and is NOT in this handoff's first-buildable scope.
-- `.plan.json` needs a `.gitignore` entry alongside `.review-findings.json`
-  (line 15) and `.gemini-key` (line 13). Without it, every plan write lands in the
-  diff, which trips the plan's OWN scope check against itself.
+  chain, findings must surface to the architect first. STILL OPEN: the architect
+  rules on findings now, but the reviewer still writes straight to the ledger that
+  the coder reads. Ordering, not authority, is what remains.
+- ~~There is no architect script yet.~~ RESOLVED 2026-07-20: `scripts/architect.js`.
+- ~~`.plan.json` needs a `.gitignore` entry.~~ RESOLVED 2026-07-20.
+- NEW: `architect.js` had to be added to the thrash guard's SANCTIONED set. One
+  ruling per finding means an N-finding review is N architect runs, which the
+  3-runs-per-window counter would have blocked. This is the SECOND time this guard
+  nearly strangled the review loop it exists to protect. Any new per-finding or
+  per-step tool must be sanctioned at birth.
 - The rule registry backing the adaptivity loop does not exist either. The 8
   `.claude/hookify.*.local.md` rules currently carry no measurement data, so
   steps 6-7 (MEASURE, RETIRE) have nothing to read.
+
+## What is PROVEN vs merely built (2026-07-20)
+
+The prior handoff's caveat applies to this one too: most of a design doc is
+untested until it meets reality. Recording which parts have.
+
+PROVEN by running it:
+- The Gemini live call works end to end THROUGH THE ARCHITECT. (The reviewer's own
+  live path was already proven earlier on branch `chore/gemini-reviewer`; what was
+  new here is the extracted `gemini-call.js` and the architect on top of it.)
+  The model-fallback chain fired FOR REAL:
+  `gemini-3.5-flash` returned 503 and `gemini-3.1-flash-lite` served the request.
+  The chain is not speculative defensive code; it was load-bearing on first use.
+- `architect.js plan` drafted a real, schema-valid plan with a feasibility verdict.
+- **The architect does not rubber-stamp.** Tested adversarially: a finding was
+  re-opened and given a deliberately self-serving argument asserting the
+  conclusion ("false positive, by design, dismiss this"). The architect ruled on
+  the CODE and its stated reason CONTRADICTED the argument's premise. It reached
+  the right answer while rejecting the reasoning offered to it. That is the
+  anti-sole-judge property actually behaving, not just being described.
+- 22 offline tests (`test/architect.test.js`), full gate green (16 suites).
+
+NOT proven:
+- Only ONE adversarial ruling was run. A single non-capitulation is evidence, not
+  a guarantee; the model is non-deterministic and a different roll may cave. Worth
+  re-probing periodically rather than assuming the property holds.
+- Vocabulary wobble observed: the architect returned `dismissed` where `fixed` was
+  the better fit (the defect was genuinely gone from the file). Outcome correct,
+  label imprecise. Harmless today because both clear the gate, but if anything ever
+  branches on `fixed` vs `dismissed`, sharpen the rubric first.
+- The verbose-permission gate has never been exercised by a human pressing the
+  real button. Its tests use synthesized transcripts.
+- Nothing enforces plan scope yet. `.plan.json` is written and validated, but no
+  PreToolUse or pre-commit hook reads it, so checks 1-3 do not bite. The plan is
+  currently a document, not a gate. Step 5 is where the chain first has teeth.
 
 ## Non-negotiables (inherited, do not regress)
 
@@ -478,9 +527,21 @@ detects and proposes; the human keeps the approval button.
 
 ## Build order
 
-1. Verbose-permission gate (self-contained, above). Ship first.
-2. Move disposition authority to the architect (needs the architect to exist).
-3. Architect script (Gemini): draft plan, feasibility, read-check, own findings.
+1. ~~Verbose-permission gate~~ **DONE 2026-07-20.** `lastUserGrant()` in
+   `length-check.js` + 8 tests in `test/hooks.test.js`. Shipped DIFFERENT from the
+   spec: the spec's forge-proofing was wrong (see FORGE HOLE #2). Not yet exercised
+   live -- no human has pressed the button through the real harness.
+2. ~~Move disposition authority to the architect.~~ **DONE 2026-07-20.**
+   `review-disposition.js` takes NO verdict now; it shells out to
+   `architect.js rule <id> ["argument"]` and writes what the API returns. The old
+   `<id> fixed|dismissed "reason"` calling convention is refused loudly (exit 2)
+   rather than silently forwarded, because muscle memory will keep producing it.
+   `review-gate.js` now credits dismissals to the architect, not to Claude.
+3. ~~Architect script (Gemini).~~ **DONE 2026-07-20.** `scripts/architect.js` with
+   two subcommands, `plan` and `rule`. The Gemini REST call + model-fallback chain
+   was EXTRACTED to `scripts/gemini-call.js` and is now shared with
+   `gemini-review.js` (rule B3: the 429/404/503 chain is hard-won, not boilerplate).
+   No read-check was built: Q2 rejected receipts as attestation-theater.
 4. Wire reviewer -> architect. Reject-up path to the human.
 5. Confirm the chain BITES: stage a plan violation, confirm it is caught and
    escalated, not silently absorbed.
