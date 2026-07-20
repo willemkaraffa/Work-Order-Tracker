@@ -446,10 +446,9 @@ detects and proposes; the human keeps the approval button.
 
 - ~~`review-disposition.js` takes the verdict as a CLI argument.~~ RESOLVED
   2026-07-20: it takes no verdict and forwards to `architect.js rule`.
-- The reviewer (`gemini-review.js`) writes findings the coder reads. Under the
-  chain, findings must surface to the architect first. STILL OPEN: the architect
-  rules on findings now, but the reviewer still writes straight to the ledger that
-  the coder reads. Ordering, not authority, is what remains.
+- ~~The reviewer writes findings the coder reads; they must surface to the
+  architect first.~~ RESOLVED 2026-07-20 by `architect.js triage` plus a gate that
+  refuses untriaged findings. See "Step 4 as built".
 - ~~There is no architect script yet.~~ RESOLVED 2026-07-20: `scripts/architect.js`.
 - ~~`.plan.json` needs a `.gitignore` entry.~~ RESOLVED 2026-07-20.
 - NEW: `architect.js` had to be added to the thrash guard's SANCTIONED set. One
@@ -460,6 +459,40 @@ detects and proposes; the human keeps the approval button.
 - The rule registry backing the adaptivity loop does not exist either. The 8
   `.claude/hookify.*.local.md` rules currently carry no measurement data, so
   steps 6-7 (MEASURE, RETIRE) have nothing to read.
+
+## Step 4 as built (2026-07-20): triage, and why it is not just re-ordering
+
+The doc said findings "must surface to the architect first" without saying what
+that buys. Built as pure ordering it would have been theater, since the coder read
+the same ledger either way. What makes it substantive:
+
+Before: every raw finding landed `open`, and the coder argued them one at a time.
+N architect calls, each anchored by the coder's framing of that finding.
+After: ONE call over all findings, made before the coder says anything. The
+architect's first read is not shaped by the reviewed party, and a reviewer with a
+known FP rate stops spending the coder's time.
+
+`stands` reuses the existing `open` status (rule 5) rather than inventing a fourth
+word for a state the gate already blocks on. The coder keeps its right of reply
+via `review-disposition.js`.
+
+**Hole closed in the process:** `escalated` is neither `open` nor `dismissed`, so
+`review-gate.evaluate()` would have fallen through every check and PASSED it. The
+one finding the architect flags for a human would have been the single thing the
+gate ignored. Checked first and explicitly now. The gate also refuses findings the
+architect has never seen, so the ordering is enforced rather than advised.
+
+**LIVE PROOF, including a failure worth keeping.** The gate refused two untriaged
+findings. Triage ruled 1 stands / 1 dismissed. The `stands` was WRONG: it
+re-raised a `urllib.request.quote` AttributeError claim that had already been
+disproven BY RUNNING IT on both target runtimes. The coder argued with that
+evidence and the architect reversed to dismissed.
+
+**So triage is a filter, not an oracle.** A cheaper model reasoning from general
+knowledge ("quote lives in urllib.parse") will contradict a measured fact
+(urllib.request re-exports it). The coder's right of reply is load-bearing, not
+decorative. Anyone tempted to remove it, or to let triage auto-close findings
+without a reply path, should read this first.
 
 ## Step 5 as built (2026-07-20), and where it deviates from this doc
 
@@ -579,7 +612,10 @@ NOT proven:
    was EXTRACTED to `scripts/gemini-call.js` and is now shared with
    `gemini-review.js` (rule B3: the 429/404/503 chain is hard-won, not boilerplate).
    No read-check was built: Q2 rejected receipts as attestation-theater.
-4. Wire reviewer -> architect. Reject-up path to the human.
+4. ~~Wire reviewer -> architect. Reject-up path to the human.~~ **DONE 2026-07-20.**
+   `architect.js triage`: ONE call over all raw findings, before the coder engages.
+   Marks each stands / dismissed / escalated. `escalated` blocks the commit and is
+   explicitly not the coder's to fix or dismiss. See "Step 4 as built" below.
 5. ~~Confirm the chain BITES.~~ **DONE 2026-07-20.** It bites, and the live test
    found a bug the unit tests missed. See "Step 5 as built" below.
 6. Adaptivity loop LAST, and only after the chain runs: rule registry (the
