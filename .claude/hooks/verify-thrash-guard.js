@@ -80,7 +80,9 @@ function main() {
       `Rule C2: two attempts on the same verification failed -> the APPROACH is wrong, not the code. ` +
       `Stop re-running it. Re-examine: is the harness wrong-fit (jsdom has no innerText, cannot open a ` +
       `bell-gated modal)? Is the risk even worth proving (a UI string needs a trace, not a live run)? ` +
-      `If you truly must run it again, rename/relocate the script or wait out the window.`
+      `Renaming or relocating the script to get a fresh count is TAMPERING with the gate, not a ` +
+      `judgment call. If you believe the block is wrong, say so to the user and stop; do not route ` +
+      `around it.`
     );
     process.exit(2); // exit 2 = PreToolUse BLOCK; stderr goes to Claude
   }
