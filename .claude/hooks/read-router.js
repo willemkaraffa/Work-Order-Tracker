@@ -1,4 +1,4 @@
-// PreToolUse guard on Read + Grep: send BULK reading to Gemini, keep targeted
+// PreToolUse guard on Read + Grep + Glob: send BULK reading to Gemini, keep targeted
 // reading on Claude.
 //
 // THE GAP THIS CLOSES. role-router.js moved review off the Claude subscription by
@@ -16,6 +16,14 @@
 //   Grep  -> blocked only when output_mode is "content" AND there is no head_limit
 //            AND nothing narrows the search (no glob, no path, no type). That is an
 //            unbounded sweep of the whole repo dumped into context.
+//   Glob  -> blocked only when NOTHING narrows the pattern: no path, no concrete
+//            file extension, no literal leading directory. `**/*` enumerates the
+//            repo; `src/**/*` and `**/*.{ts,tsx}` do not, and pass.
+//
+// WHY GLOB IS HERE AT ALL, since it returns paths and not content: the dump scales
+// with the MATCH COUNT, and `**/*` on this repo is thousands of lines of paths. The
+// original guard covered Read and Grep and left the third door open, which made the
+// cheapest way to fill context a tool nobody was watching.
 // Everything else passes untouched. A guard that fires on ordinary work gets
 // resented and routed around, and CLAUDE.md itself says to grep for a fact.
 //
@@ -40,12 +48,31 @@ function lineCount(p) {
   } catch { return 0; } // unreadable/absent -> not our problem, let Read report it
 }
 
+// Three independent ways a Glob is already narrow enough. ANY one is enough, on
+// purpose: this mirrors Grep's bounds above, where a single narrowing field clears
+// the block. Requiring two would fire on ordinary work, which is how a guard gets
+// routed around.
+//   1. an explicit search root
+//   2. a concrete extension, including a brace group (`**/*.{ts,tsx}`). `**/*.*` is
+//      NOT concrete: it means "anything with a dot", i.e. the whole repo again.
+//   3. a literal first segment, so the walk starts inside a real directory rather
+//      than at the root ('src/**/*' yes, '**/*' no).
+function globBounded(pattern, searchPath) {
+  if (searchPath) return true;
+  if (/\.(\{[^}]*\}|[A-Za-z0-9]+)$/.test(pattern)) return true;
+  // Split on BOTH separators: a Windows-shaped pattern ('src\**\*') would otherwise
+  // come back as one segment containing '*', and a narrow pattern would read as the
+  // repo-wide one.
+  const first = pattern.split(/[\\/]/)[0];
+  return Boolean(first) && !/[*?[\]{}]/.test(first);
+}
+
 function main() {
   let input;
   try { input = JSON.parse(fs.readFileSync(0, "utf8")); } catch { return; }
 
   const tool = input.tool_name || "";
-  if (tool !== "Read" && tool !== "Grep") return;
+  if (tool !== "Read" && tool !== "Grep" && tool !== "Glob") return;
   const ti = input.tool_input || {};
 
   // Rule G6 in the registry. Retired by evidence -> stand down.
@@ -72,6 +99,24 @@ function main() {
       `       Read with offset + limit, after grepping for the line number.\n` +
       `If you genuinely need the whole file verbatim, say so to the user and explain why.\n` +
       `Splitting it into consecutive limit-reads to swallow the file anyway is TAMPERING.`
+    );
+    process.exit(2);
+  }
+
+  if (tool === "Glob") {
+    const pat = String(ti.pattern || "");
+    if (globBounded(pat, ti.path)) return;
+
+    process.stderr.write(
+      `[read-router] BLOCKED: '${pat}' matches every file kind from the repo root.\n` +
+      `Glob returns paths, not content, but the dump still scales with the match count,\n` +
+      `and an unnarrowed pattern here is thousands of lines.\n` +
+      `Narrow it (any ONE of these clears this block):\n` +
+      `  path: "src"           search a subtree\n` +
+      `  **/*.js               name a concrete extension (a {js,jsx} group counts)\n` +
+      `  src/**/*              start the pattern with a real directory\n` +
+      `Or let Gemini read and answer instead:\n` +
+      `  node scripts/ask.js "your question" --glob "src/**/*.js"`
     );
     process.exit(2);
   }

@@ -39,6 +39,12 @@
         ]
       },
       {
+        "matcher": "Glob",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/read-router.js" }
+        ]
+      },
+      {
         "matcher": "Edit",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },

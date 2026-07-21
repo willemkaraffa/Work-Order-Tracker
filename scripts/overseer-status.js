@@ -100,7 +100,39 @@ function plan() {
   return out;
 }
 
-// --- 3. findings, and who actually judged them --------------------------------
+// --- 3. spend -----------------------------------------------------------------
+// This report described the INSTALLATION and never what it cost. "The gates are
+// wired" and "this plan has burned 9 full test-suite runs against a budget of 2" are
+// different questions, and only the first was ever answerable here.
+//
+// WHAT THIS NUMBER IS, exactly, so it is not oversold: heavy-verify RUNS that the
+// PostToolUse hook observed (full gate, build, test suite). It is not tokens, not
+// dollars, and not a bill. A run started outside a hooked tool is invisible to it, so
+// treat it as a FLOOR. It is still the only spend signal this repo actually records.
+function spend() {
+  let lib, doc;
+  try { lib = require('./plan.js'); doc = lib.readPlan(); } catch { return ['  (plan module unreadable)']; }
+
+  const runs = (readJson(lib.verifyTallyFile(doc)) || {}).runs || 0;
+  const scope = doc ? `plan ${doc.id}` : 'no plan on disk (ad-hoc bucket)';
+  const out = [`  heavy-verify runs observed: ${runs}   scope: ${scope}`];
+
+  if (doc && doc.verifyBudget) {
+    // Deliberately NOT the ok()/GAP vocabulary used above. GAP means a guard is not
+    // running, and it feeds the exit code; overspend is a fact about cost, not a
+    // disarmed gate. Sharing the word would have made the VERDICT line ("gates ARE
+    // enforcing") read as a contradiction of a GAP printed two sections earlier.
+    const over = runs > doc.verifyBudget;
+    out.push(`  ${over ? 'OVER' : 'WITHIN'} the plan budget of ${doc.verifyBudget}` +
+      (over ? ` by ${runs - doc.verifyBudget}. Verify proportional to risk.` : '.'));
+  } else {
+    out.push('  no plan budget to compare against; the nudge falls back to 2 per 15 min.');
+  }
+  out.push('  Counts RUNS the PostToolUse hook saw, not tokens. A floor, never a bill.');
+  return out;
+}
+
+// --- 4. findings, and who actually judged them --------------------------------
 function findings() {
   const doc = readJson(P('.review-findings.json'));
   if (!doc) return ['  no review on record for this tree.'];
@@ -135,7 +167,7 @@ function findings() {
   return out;
 }
 
-// --- 4. rule registry ---------------------------------------------------------
+// --- 5. rule registry ---------------------------------------------------------
 function rules() {
   let board;
   try { board = require('./rule-registry.js').scoreboard(); } catch { return ['  (registry module unreadable)']; }
@@ -170,6 +202,9 @@ function main() {
   console.log('\nPLAN');
   plan().forEach(l => console.log(l));
 
+  console.log('\nSPEND');
+  spend().forEach(l => console.log(l));
+
   console.log('\nFINDINGS');
   findings().forEach(l => console.log(l));
 
@@ -189,4 +224,4 @@ function main() {
 }
 
 if (require.main === module) process.exitCode = main();
-module.exports = { enforcement, plan, findings, rules };
+module.exports = { enforcement, plan, spend, findings, rules };

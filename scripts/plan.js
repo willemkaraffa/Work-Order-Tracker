@@ -16,6 +16,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const PLAN_FILE = path.join(REPO_ROOT, '.plan.json');
@@ -110,7 +111,27 @@ const WIDEN_LIMIT = 3;
 const widenCount = plan =>
   ((plan && plan.rulings) || []).filter(r => r.verdict === 'widen').length;
 
+// Where the plan-scoped heavy-verify tally lives.
+//
+// KEYED BY PLAN ID, NOT session_id. verifyBudget is documented as a TOTAL for the
+// plan, shared by every agent and every session (architect.js). The counter in
+// verify-budget-guard.js is keyed by session_id over a 15-minute sliding window: it
+// answers "is this session bursting right now", which is the right question for a
+// nudge and the wrong one for "how much has this plan cost". Neither counter can be
+// derived from the other, which is why both exist.
+//
+// IN tmpdir, NOT in .plan.json. A hook that wrote the tracked plan artifact on every
+// test run would dirty the tree mid-work and invalidate the review diff hash, so the
+// act of measuring would keep re-triggering the gates that measure.
+//
+// A missing plan gets its own bucket rather than being refused: ad-hoc work is the
+// normal mode here, and a spend readout that only works under an approved plan would
+// report nothing exactly when nobody is watching.
+const verifyTallyFile = plan =>
+  path.join(os.tmpdir(),
+    `wot-verifytally-${String((plan && plan.id) || 'noplan').replace(/[^\w.-]/g, '_')}.json`);
+
 module.exports = {
   readPlan, isActive, matchesScope, globToRe, unruledViolations, ruledVerdict,
-  widenCount, WIDEN_LIMIT, PLAN_FILE, ACTIVE,
+  widenCount, WIDEN_LIMIT, PLAN_FILE, ACTIVE, verifyTallyFile,
 };

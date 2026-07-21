@@ -30,6 +30,10 @@ Exit code is 0 when every enforcement point is active, 1 when there is a gap.
   look healthy. `GAP` means that protection is NOT running.
 - **PLAN** only constrains edits when status is `approved`. A missing plan or a
   `draft` is the normal ad-hoc mode, not a fault.
+- **SPEND** counts heavy-verify RUNS (full gate, build, test suite) that the
+  PostToolUse hook observed, tallied per PLAN rather than per session, and compares
+  them to the plan's `verifyBudget`. It is a floor, not a bill: it counts runs, not
+  tokens, and a run started outside a hooked tool is invisible to it.
 - **FINDINGS** shows the dismissal provenance split. `Claude self-judged`
   dismissals had no independent review; they are historical, from before the
   architect existed. `UNTRIAGED` or `ESCALATED` counts mean the commit is blocked.

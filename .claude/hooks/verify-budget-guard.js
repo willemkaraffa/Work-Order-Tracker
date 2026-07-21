@@ -54,6 +54,31 @@ function main() {
   hits.push(now);
   try { fs.writeFileSync(stateFile, JSON.stringify(hits)); } catch {}
 
+  // Second, INDEPENDENT tally: a monotonic count for the PLAN, which is what
+  // overseer-status reports. It is deliberately not the same number as `hits`. The
+  // bucket above is a 15-minute sliding window keyed by session, so it forgets, and
+  // it splits across sessions; verifyBudget is a total for the whole plan. Reporting
+  // spend off the session bucket would have shown a figure that shrinks while you
+  // watch it and resets whenever the session does.
+  //
+  // Never affects the nudge below: this hook must keep behaving identically whether
+  // or not a plan exists, and a reporting counter must not be able to block anything.
+  try {
+    const lib = require('../../scripts/plan.js');
+    const tallyFile = lib.verifyTallyFile(lib.readPlan());
+    let runs = 0;
+    try { runs = JSON.parse(fs.readFileSync(tallyFile, 'utf8')).runs || 0; } catch {}
+    if (!Number.isFinite(runs) || runs < 0) runs = 0; // a corrupt file must not poison the count
+    // Write-then-rename, not a bare write. A hook is killed whenever its tool call is
+    // interrupted, and a torn write here leaves unparseable JSON, which the reader
+    // above silently treats as runs=0: the plan's whole spend history would vanish
+    // and the report would say the budget was untouched. Rename is atomic on both
+    // NTFS and POSIX when source and target share a directory, which they do.
+    const tmp = `${tallyFile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ runs: runs + 1, last: now }));
+    fs.renameSync(tmp, tallyFile);
+  } catch { /* reporting only: never let it break the nudge */ }
+
   if (hits.length > BUDGET) {
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: {

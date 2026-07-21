@@ -140,10 +140,18 @@ function writeFindings(diff, model, findings, range) {
 // gemini-call.js so the architect shares ONE implementation of them.
 const { callGemini, loadKey, extractJson, MODELS } = require('./gemini-call.js');
 
-// The audit rubric Gemini reviews against. Ported from the A1-A7 anti-tech-debt
-// rules (CLAUDE.md) + basic correctness. This is the MECHANISM, not decoration -
+// The audit rubric Gemini reviews against. This is the MECHANISM, not decoration -
 // the reviewer's signal is only as good as these triggers.
-const RUBRIC = `You are an INDEPENDENT, ADVISORY code reviewer. You do NOT approve, reject,
+//
+// SPLIT ON PURPOSE. The frame owns the reviewer's STANCE (advisory, full-file
+// resolution, the JSON output contract): that is machinery, identical in every repo,
+// and a project that could edit it could break the parser or grant itself approval
+// authority. The project owns only the CHECKS, supplied via overseer.json ->
+// rubricFile. The A1-A7 list that used to sit inline here now lives in .claude/rubric.md
+// as this repo's answer, not as the frame's default.
+const { rubric: projectChecks } = require('./overseer-config.js');
+
+const rubricFor = checks => `You are an INDEPENDENT, ADVISORY code reviewer. You do NOT approve, reject,
 or run any gate. You FLAG. Review the unified diff below for defects.
 
 You are given the FULL CURRENT TEXT of every touched file, followed by the diff.
@@ -156,16 +164,7 @@ text first. If a file is marked TRUNCATED, say you cannot tell rather than
 guessing. Absence of evidence is not evidence of absence, and a confident wrong
 finding costs more than a missed one.
 
-Priority checks (React + JS):
-A1 mirror-state: useState(x)+useEffect(()=>setX(derived),[dep]): should be derived/memoized.
-A2 stale-init: useState(maybeNull) where init is null on first render; later recomputes are lost.
-A3 render-guard-vs-layoutEffect: conditional render hides an element a useLayoutEffect measures.
-A4 wrong-deps: effect must run post-mount but deps fire pre-mount.
-A5 inline-component: component defined inside another component's render body -> remount/identity loss.
-A6 unstable-listener: addEventListener handler is a fresh closure each render -> leaked listeners.
-A7 uncleaned-timer: setTimeout/setInterval in an effect with no clearTimeout/clearInterval cleanup.
-Also: correctness bugs (off-by-one, wrong operator, null deref, bad boundary), and porting
-mismatches (copied pattern whose precondition the new site does not preserve).
+${checks}
 
 Output ONLY a JSON array, no prose, no markdown fences. Each finding:
 {"file":"path","line":123,"symbol":"exact source substring","severity":"high|med|low","rule":"A3|correctness|...","problem":"one sentence","fix":"one sentence"}
@@ -272,8 +271,20 @@ async function main() {
     try { return fs.readFileSync(path.join(REPO_ROOT, f), 'utf8'); } catch { return null; }
   });
 
+  // No project checks means the reviewer has no triggers, and a reviewer with no
+  // triggers still returns [] and still looks like a clean pass. Exit 2 (DID NOT RUN),
+  // the same code a dead API key gets, because it is the same failure: no review
+  // happened and nothing may pretend one did.
+  const checks = projectChecks();
+  if (!checks) {
+    console.error('[gemini-review] no rubric: review DID NOT RUN (exit 2, not a clean pass).');
+    console.error(`[gemini-review] expected checks in ${require('./overseer-config.js').config().rubricFile}`);
+    console.error('[gemini-review] set "rubricFile" in overseer.json, or create that file.');
+    return 2;
+  }
+
   const prompt =
-    `${RUBRIC}\n\n=== FULL TEXT OF TOUCHED FILES ===\n${ctx.text}\n\n=== DIFF (${range}) ===\n${diff}`;
+    `${rubricFor(checks)}\n\n=== FULL TEXT OF TOUCHED FILES ===\n${ctx.text}\n\n=== DIFF (${range}) ===\n${diff}`;
 
   // Report context honestly: a PARTIAL context means the reviewer is still partly
   // blind, and that must be visible rather than implied by silence.

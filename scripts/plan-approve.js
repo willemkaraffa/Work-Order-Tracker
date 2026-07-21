@@ -26,6 +26,16 @@ const { readPlan, PLAN_FILE, isActive } = require('./plan.js');
 const APPROVE = 'Approve';
 const questionFor = id => `Approve plan ${id}?`;
 
+// Claude Code stores transcripts under ~/.claude/projects/<key>, where the key is the
+// project's absolute path with every non-alphanumeric character replaced by '-'
+// (C:\dev\Work-Order-Tracker -> C--dev-Work-Order-Tracker).
+//
+// DERIVED, NOT LITERAL. This used to be the string 'C--dev-Work-Order-Tracker' spelled
+// out, which meant the human-approval channel silently found no transcript in any other
+// checkout, and no-transcript is indistinguishable from no-approval: the plan gate would
+// refuse every plan forever, with a message blaming the human for not answering.
+const projectKey = root => root.replace(/[^A-Za-z0-9]/g, '-');
+
 // The transcript path is supplied by the harness to hooks, but a plain script has
 // to find it. Newest .jsonl in this project's transcript dir is the live session.
 // Overridable for tests.
@@ -33,7 +43,7 @@ function currentTranscript() {
   if (process.env.WOT_TRANSCRIPT) return process.env.WOT_TRANSCRIPT;
   const dir = path.join(
     process.env.USERPROFILE || process.env.HOME || '',
-    '.claude', 'projects', 'C--dev-Work-Order-Tracker');
+    '.claude', 'projects', projectKey(path.resolve(__dirname, '..')));
   try {
     const files = fs.readdirSync(dir)
       .filter(f => f.endsWith('.jsonl'))
@@ -96,4 +106,4 @@ function main() {
 
 if (require.main === module) process.exitCode = main();
 
-module.exports = { questionFor, APPROVE, currentTranscript };
+module.exports = { questionFor, APPROVE, currentTranscript, projectKey };

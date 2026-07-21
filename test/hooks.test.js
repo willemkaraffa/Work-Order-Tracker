@@ -318,9 +318,47 @@ t('grep: the default files_with_matches mode is never blocked', () => {
   assert.strictEqual(grepCall({ pattern: 'foo', output_mode: 'files_with_matches' }).status, 0);
 });
 
+const globCall = (tool_input, registry = EMPTY_REG) => {
+  const r = spawnSync(process.execPath, [READR], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Glob', tool_input }),
+    encoding: 'utf8', env: { ...process.env, WOT_RULE_REGISTRY: registry },
+  });
+  return { status: r.status, stderr: r.stderr || '' };
+};
+
+t('glob: a pattern with NO narrowing at all is blocked', () => {
+  // These enumerate the repo. Paths not content, but the dump scales with matches.
+  for (const pattern of ['**/*', '**', '*', '**/*.*']) {
+    const r = globCall({ pattern });
+    assert.strictEqual(r.status, 2, `'${pattern}' must be blocked`);
+    assert.match(r.stderr, /Narrow it/);
+  }
+});
+
+t('glob: any one narrowing clears it (path, extension, literal directory)', () => {
+  // Mirrors the Grep bounds: ONE is enough. Two would fire on ordinary work.
+  const ok = [
+    { pattern: '**/*', path: 'src' },
+    { pattern: '**/*.js' },
+    { pattern: '**/*.{ts,tsx}' },
+    { pattern: '*.js' },
+    { pattern: 'src/**/*' },
+    { pattern: 'src\\**\\*' }, // Windows separators still read as a real directory
+
+    { pattern: 'scripts/**/*.test.js' },
+  ];
+  for (const ti of ok) {
+    assert.strictEqual(globCall(ti).status, 0,
+      `${JSON.stringify(ti)} is already narrow and must pass`);
+  }
+});
+
 t('read-router: a RETIRED G6 stands down', () => {
   const retired = registryWith([{ id: 'G6', true_positive: 1, false_positive: 5 }]);
   assert.strictEqual(readCall({ file_path: bigFile() }, retired).status, 0);
+  // Glob rides the SAME rule, so retiring G6 must stand it down too. A branch that
+  // kept firing after its rule was retired would be unkillable by the registry.
+  assert.strictEqual(globCall({ pattern: '**/*' }, retired).status, 0);
 });
 
 t('read-router: malformed input fails OPEN', () => {
@@ -503,8 +541,23 @@ t('length: an answer to some OTHER question does not lift the budget', () => {
 // verify-budget-guard (PostToolUse nudge): past ~2 heavy-verify runs per window,
 // injects a VISIBLE additionalContext message. Never blocks (exit 0 always).
 // ============================================================================
-const verifyRun = (session, command) =>
-  run(BUDGET, { hook_event_name: 'PostToolUse', tool_name: 'Bash', session_id: session, tool_input: { command } });
+// EVERY budget-guard spawn gets a private tmpdir. The guard writes two files there,
+// and one of them is the plan tally that overseer-status shows a human as project
+// spend. Left on the machine's tmpdir, a single suite run added ~14 phantom
+// heavy-verify runs to that report: the tests were being counted as the work.
+// os.tmpdir() honours TEMP/TMP/TMPDIR, so redirecting the child is enough.
+const SESSION_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wot-budget-test-'));
+const budgetRun = (dir, session, command) => {
+  const r = spawnSync(process.execPath, [BUDGET], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse', tool_name: 'Bash', session_id: session, tool_input: { command },
+    }),
+    encoding: 'utf8',
+    env: { ...process.env, TEMP: dir, TMP: dir, TMPDIR: dir },
+  });
+  return { status: r.status, stdout: r.stdout || '' };
+};
+const verifyRun = (session, command) => budgetRun(SESSION_DIR, session, command);
 const nudged = (r) => r.stdout.includes('verify-budget');
 
 t('budget: never blocks (exit 0) even when nudging', () => {
@@ -545,6 +598,40 @@ t('budget: counts are per-session (one session does not nudge another)', () => {
   verifyRun(sid(), 'npm run verify'); // isolated
   const r = verifyRun(sid(), 'npm run verify');
   assert.strictEqual(nudged(r), false);
+});
+
+// The plan-scoped tally that overseer-status reports. Separate from the session
+// bucket above ON PURPOSE: that one is a 15-min sliding window per session, this one
+// is a monotonic total per plan. Asserted as a DELTA, never an absolute, because the
+// tally is shared with every other run on this machine.
+// A SECOND private dir, separate from SESSION_DIR. The budget tests above already
+// bumped the tally in theirs, so sharing one dir would make these start at a count
+// that shifts whenever a test is added above. Its own dir means absolute assertions.
+const planLib = require('../scripts/plan.js');
+const TALLY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wot-tally-test-'));
+const tallyRun = (session, command) => budgetRun(TALLY_DIR, session, command);
+const tallyRuns = () => {
+  const f = path.join(TALLY_DIR, path.basename(planLib.verifyTallyFile(planLib.readPlan())));
+  try { return JSON.parse(fs.readFileSync(f, 'utf8')).runs || 0; } catch { return 0; }
+};
+
+t('budget: a heavy-verify run increments the PLAN tally by exactly one', () => {
+  assert.strictEqual(tallyRuns(), 0, 'the isolated tally starts empty');
+  tallyRun(sid(), 'npm run verify');
+  assert.strictEqual(tallyRuns(), 1);
+});
+
+t('budget: the plan tally counts ACROSS sessions (the session bucket does not)', () => {
+  // This is the whole reason the second counter exists: verifyBudget is a total for
+  // the plan, shared by every session, so two fresh sessions must both land in it.
+  tallyRun(sid(), 'npm run verify');
+  tallyRun(sid(), 'npm run verify');
+  assert.strictEqual(tallyRuns(), 3, 'two more sessions, same bucket');
+});
+
+t('budget: a non-verify command does not touch the plan tally', () => {
+  tallyRun(sid(), 'git status');
+  assert.strictEqual(tallyRuns(), 3);
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall hook tests pass');

@@ -1,0 +1,4 @@
+{
+  "verifyCommand": "npm run verify",
+  "rubricFile": ".claude/rubric.md"
+}

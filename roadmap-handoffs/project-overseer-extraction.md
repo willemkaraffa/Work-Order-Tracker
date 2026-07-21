@@ -1,6 +1,37 @@
 # Project Overseer: extract from Work-Order-Tracker
 
-Status: NOT STARTED. Plan only. Written 2026-07-16.
+Status: SEAMS BUILT, MOVE NOT STARTED. Written 2026-07-16, revised 2026-07-21.
+
+## What changed on 2026-07-21
+
+The two config seams below are no longer TODO. They exist:
+
+- `overseer.json` at the repo root, loaded by `scripts/overseer-config.js`.
+  Keys: `verifyCommand` (read by `.githooks/pre-commit`) and `rubricFile`
+  (read by `gemini-review.js`). Defaults equal the old hardcoded values, so an
+  absent config leaves behaviour identical here.
+- A1-A7 moved out of `gemini-review.js` into `.claude/rubric.md`. The frame kept
+  the reviewer's STANCE and the JSON output contract; the project supplies only
+  the CHECKS. A project that could edit the contract could break the parser or
+  grant itself approval authority.
+- Missing or empty rubric exits 2 (DID NOT RUN), same code as a dead API key. A
+  reviewer with no triggers returns `[]` and reads as a clean pass.
+- `plan-approve.js` no longer hardcodes `C--dev-Work-Order-Tracker`. The
+  transcript dir is derived from the repo path. That literal made the human
+  approval channel dead in every other checkout, and no-transcript is
+  indistinguishable from no-approval: the plan gate would refuse every plan
+  forever while blaming the human for not answering.
+- Covered by `test/overseer-config.test.js` (7 tests, fixture-free).
+
+The open question at the bottom of this doc is answered: rubric is per-project,
+supplied as a file. Not per-language, not a menu of named rubrics.
+
+## The file list below is STALE and must be re-derived before the move
+
+It names 5 files. PO has since grown to roughly 20 scripts in `scripts/` plus 7
+hooks in `.claude/hooks/`, a rule registry with evidence scoring, plan/approval
+machinery, an architect, and `overseer-status`. Re-inventory from disk at move
+time; do not trust the list below as the scope.
 
 ## Goal
 
@@ -30,16 +61,21 @@ one-function seam.
 Stays in `claude-config`: `pretool-guards.js`, `posttool-guards.js`,
 `prompt-guards.js`. Path is fixed by the harness.
 
-## The real work: 2 config seams
+## The real work: 2 config seams. DONE 2026-07-21.
 
-This is NOT a file move. Two things are WO-specific and must become
-project-supplied, or the toolkit only ever works for this repo:
+1. **RUBRIC** in `gemini-review.js`. DONE: `overseer.json` -> `rubricFile`.
+2. **`.githooks/pre-commit`** verify command. DONE: `overseer.json` ->
+   `verifyCommand`.
 
-1. **RUBRIC** in `gemini-review.js` hardcodes A1-A7 (React rules from this
-   repo's CLAUDE.md). A Python project needs its own. Move to a rubric file the
-   project supplies; ship the A1-A7 one as an example, not a default.
-2. **`.githooks/pre-commit`** runs `npm run verify`. Project-specific command.
-   Make it config (e.g. `overseer.json` -> `{ "verifyCommand": "npm run verify" }`).
+Still WO-specific, and NOT config problems (they are whole components that
+should simply not travel):
+
+- `.claude/hooks/scraper-data-gate.js` (this app's scraper only).
+- Skills `verify-wo-tracker`, `scraper-debug`.
+- tmp filename prefixes `wot-*` in `plan.js`, `verify-thrash-guard.js`,
+  `scraper-data-gate.js`. Harmless until two checkouts share a tmpdir and a
+  plan id, then they collide silently.
+- `WOT_TRANSCRIPT` env var name in `plan-approve.js`.
 
 Already seamed, do not re-abstract: `search()` in research.js is the only
 provider-specific code (Tavily now, Gemini grounding when billing is on).
@@ -57,7 +93,8 @@ natively with zero deps.
 
 1. `claude-config` remote. DONE.
 2. Create `project-overseer` repo.
-3. Extract the 5 files, add the 2 seams, keep the tests green.
+3. Extract the files (RE-INVENTORY FIRST, see above). The 2 seams are already
+   built; keep the tests green.
 4. Point WO-Tracker at it.
 5. Confirm the gates still BITE: break the tree on purpose, confirm the commit is
    refused. A gate that no longer blocks after a refactor is worse than no gate.
@@ -77,8 +114,10 @@ natively with zero deps.
 - Guard every shell tool, not just Bash. See [[lesson_hook_coverage_hole]].
 - Guards FAIL OPEN. `node --check` after every hook edit.
 
-## Open question
+## Open question. ANSWERED 2026-07-21.
 
-Rubric per-project or per-language? A1-A7 is React. Probably: ship rubrics as
-named files, project picks one, custom rubrics supported. Decide with evidence,
-not preference.
+Rubric per-project or per-language? PER-PROJECT, as a plain file the project
+points at via `overseer.json` -> `rubricFile`. No menu of named rubrics: a menu
+is a guess about which languages matter, and a project that needs two rubrics
+can write one file. A1-A7 ships as `.claude/rubric.md`, this repo's answer, not
+the frame's default.
