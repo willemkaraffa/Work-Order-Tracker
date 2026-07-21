@@ -11,51 +11,51 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "PowerShell",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "Agent",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/role-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/role-router.js" }
         ]
       },
       {
         "matcher": "Read",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/read-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/read-router.js" }
         ]
       },
       {
         "matcher": "Grep",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/read-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/read-router.js" }
         ]
       },
       {
         "matcher": "Glob",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/read-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/read-router.js" }
         ]
       },
       {
         "matcher": "Edit",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
-          { "type": "command", "command": "node .claude/hooks/plan-scope-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
-          { "type": "command", "command": "node .claude/hooks/plan-scope-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       }
     ],
@@ -70,16 +70,16 @@
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
-          { "type": "command", "command": "node .claude/hooks/verify-budget-guard.js" },
-          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-budget-guard.js" },
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "PowerShell",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
-          { "type": "command", "command": "node .claude/hooks/verify-budget-guard.js" },
-          { "type": "command", "command": "node .claude/hooks/verify-thrash-guard.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-budget-guard.js" },
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       }
     ],
@@ -88,7 +88,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .claude/hooks/length-check.js"
+            "command": "node node_modules/project-overseer/hooks/length-check.js"
           }
         ]
       }

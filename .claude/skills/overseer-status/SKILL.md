@@ -9,7 +9,7 @@ version: 0.1.0
 Run the script and show the user its output. That is the whole job.
 
 ```
-node scripts/overseer-status.js
+node node_modules/project-overseer/scripts/overseer-status.js
 ```
 
 ## Do not paraphrase the output
