@@ -85,17 +85,42 @@ function main() {
   // Verbose lift: skips the LENGTH check only. The glyph rules never lift.
   const verbose = lastUserGrant(tp) === "ON";
 
+  // Two violation CLASSES, because their remedies cost the reader very different
+  // amounts. Rule G4 was flagged NEEDS REDESIGN for exactly this: right detection
+  // (precision 1.00 over 2 true positives), harmful remedy (collateral 1/2).
+  const tooLong = !verbose && prose.length > BUDGET;
+
   const problems = [];
-  if (!verbose && prose.length > BUDGET) problems.push(`${prose.length} chars of prose, over the ${BUDGET} budget`);
+  if (tooLong) problems.push(`${prose.length} chars of prose, over the ${BUDGET} budget`);
   if (EM_DASH.test(prose)) problems.push("contains an em-dash (banned)");
   if (EMOJI.test(prose)) problems.push("contains an emoji (banned)");
 
   if (problems.length) {
+    // A Stop hook cannot unsend the message that already streamed. So the remedy is
+    // whatever the reader sees NEXT, and demanding a full rewrite prints the whole
+    // reply twice. That is proportionate when the LENGTH is the defect: the message
+    // itself is what is wrong, so replacing it is the point.
+    //
+    // It is NOT proportionate for a glyph-only violation. There the reply is correct
+    // and one codepoint is wrong, so a full restatement duplicates ~2000 correct
+    // characters to fix one. Observed live 2026-07-21: an em-dash-only block cost a
+    // complete re-print of an in-budget reply. Same rule, same detection, remedy
+    // worse than the defect.
+    //
+    // So glyph-only gets a DELTA: acknowledge and move on, no restatement. The stop
+    // is still refused, so the rule still costs something, which is the whole reason
+    // this hook blocks instead of warning.
+    const remedy = tooLong
+      ? `Rewrite it now: caveman-terse, no em-dash, no emoji, prose under ${BUDGET} chars ` +
+        `(code blocks do not count).`
+      : `Do NOT restate your reply: it was within budget and the content stands. Emit ONE short ` +
+        `line naming the banned glyph and confirming it is dropped going forward. Repeating the ` +
+        `whole message to fix one character costs the reader more than the violation did.`;
+
     process.stdout.write(JSON.stringify({
       decision: "block",
       reason: `[style-gate] Your last reply violated a hard style rule: ${problems.join("; ")}. ` +
-        `Rewrite it now: caveman-terse, no em-dash, no emoji, prose under ${BUDGET} chars ` +
-        `(code blocks do not count). This is not advisory -- the stop was refused.`,
+        `${remedy} This is not advisory -- the stop was refused.`,
     }));
   }
 }

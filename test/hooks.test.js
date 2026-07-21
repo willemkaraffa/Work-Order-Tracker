@@ -441,6 +441,30 @@ t('length: an emoji blocks', () => {
   assert.ok(blocked(stop(`done ${EMOJI}`)));
 });
 
+// G4 was flagged NEEDS REDESIGN: detection right (precision 1.00), remedy harmful.
+// A Stop hook cannot unsend what already streamed, so the remedy is whatever the
+// reader sees NEXT. Demanding a full rewrite is proportionate when the LENGTH is the
+// defect and absurd when one codepoint is, which reprints a correct reply to fix a
+// character. Both cases were observed live 2026-07-21.
+t('length: a glyph-only violation demands a DELTA, not a restatement', () => {
+  const r = stop(`the reply was fine ${EM_DASH} except for this`);
+  assert.ok(blocked(r), 'still blocks: the rule keeps its teeth');
+  assert.match(r.stdout, /Do NOT restate/);
+  assert.doesNotMatch(r.stdout, /Rewrite it now/);
+});
+
+t('length: an over-budget reply still demands a full rewrite', () => {
+  const r = stop('x'.repeat(2300));
+  assert.match(r.stdout, /Rewrite it now/);
+  assert.doesNotMatch(r.stdout, /Do NOT restate/);
+});
+
+t('length: over-budget AND a glyph is a rewrite (length is the dominant defect)', () => {
+  const r = stop('x'.repeat(2300) + ` tail ${EM_DASH} end`);
+  assert.match(r.stdout, /Rewrite it now/);
+  assert.match(r.stdout, /em-dash/, 'the glyph is still named in the reason');
+});
+
 t('length: text inside a code fence is excluded from the budget', () => {
   const big = '```\n' + 'x'.repeat(3000) + '\n```\nshort tail';
   assert.strictEqual(blocked(stop(big)), false, 'fenced code must not count toward prose budget');
@@ -516,6 +540,15 @@ t('length: a re-grant after a revoke lifts again (last answer wins)', () => {
     [{ answer: 'Verbose ON' }, { answer: 'Stay caveman' }, { answer: 'Verbose ON' }],
     'x'.repeat(5000));
   assert.strictEqual(blocked(r), false);
+});
+
+t('length: under a lift, a long reply with a glyph is a DELTA, not a rewrite', () => {
+  // The lift removes the LENGTH defect, so the glyph is the only one left and the
+  // remedy must follow the surviving defect rather than the raw char count.
+  const r = stopWithGrants([{ answer: 'Verbose ON' }], 'x'.repeat(2300) + ` ${EM_DASH} tail`);
+  assert.ok(blocked(r), 'the glyph rule never lifts');
+  assert.match(r.stdout, /Do NOT restate/);
+  assert.doesNotMatch(r.stdout, /Rewrite it now/);
 });
 
 t('length: an em-dash blocks even under a verbose grant (glyph rule never lifts)', () => {
@@ -606,7 +639,12 @@ t('budget: counts are per-session (one session does not nudge another)', () => {
 // tally is shared with every other run on this machine.
 // A SECOND private dir, separate from SESSION_DIR. The budget tests above already
 // bumped the tally in theirs, so sharing one dir would make these start at a count
-// that shifts whenever a test is added above. Its own dir means absolute assertions.
+// that shifts whenever a test is added above.
+//
+// Each case still reads the tally BEFORE and AFTER and asserts the difference. The
+// private dir makes the starting count stable, it does not make it 0: these cases run
+// in sequence and each one leaves the tally where the next one finds it, so absolute
+// assertions silently encoded the order of the tests above them.
 const planLib = require('../scripts/plan.js');
 const TALLY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'wot-tally-test-'));
 const tallyRun = (session, command) => budgetRun(TALLY_DIR, session, command);
@@ -616,22 +654,24 @@ const tallyRuns = () => {
 };
 
 t('budget: a heavy-verify run increments the PLAN tally by exactly one', () => {
-  assert.strictEqual(tallyRuns(), 0, 'the isolated tally starts empty');
+  const before = tallyRuns();
   tallyRun(sid(), 'npm run verify');
-  assert.strictEqual(tallyRuns(), 1);
+  assert.strictEqual(tallyRuns() - before, 1);
 });
 
 t('budget: the plan tally counts ACROSS sessions (the session bucket does not)', () => {
   // This is the whole reason the second counter exists: verifyBudget is a total for
   // the plan, shared by every session, so two fresh sessions must both land in it.
+  const before = tallyRuns();
   tallyRun(sid(), 'npm run verify');
   tallyRun(sid(), 'npm run verify');
-  assert.strictEqual(tallyRuns(), 3, 'two more sessions, same bucket');
+  assert.strictEqual(tallyRuns() - before, 2, 'two fresh sessions, same bucket');
 });
 
 t('budget: a non-verify command does not touch the plan tally', () => {
+  const before = tallyRuns();
   tallyRun(sid(), 'git status');
-  assert.strictEqual(tallyRuns(), 3);
+  assert.strictEqual(tallyRuns() - before, 0);
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall hook tests pass');
