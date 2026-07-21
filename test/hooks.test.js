@@ -242,6 +242,93 @@ t('router: malformed input fails OPEN (never bricks the session)', () => {
 });
 
 // ============================================================================
+// read-router: bulk reading goes to Gemini, targeted reading stays on Claude.
+// The line is UNBOUNDED vs bounded, not big vs small, because a guard that fires
+// on ordinary work gets resented and routed around.
+// ============================================================================
+const READR = path.join(HOOKS, 'read-router.js');
+
+function bigFile(lines = 900) {
+  const p = path.join(os.tmpdir(), `wot-big-${process.pid}-${seq++}.js`);
+  fs.writeFileSync(p, 'x\n'.repeat(lines));
+  return p;
+}
+function smallFile() {
+  const p = path.join(os.tmpdir(), `wot-small-${process.pid}-${seq++}.js`);
+  fs.writeFileSync(p, 'x\n'.repeat(20));
+  return p;
+}
+const readCall = (tool_input, registry = EMPTY_REG) => {
+  const r = spawnSync(process.execPath, [READR], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input }),
+    encoding: 'utf8', env: { ...process.env, WOT_RULE_REGISTRY: registry },
+  });
+  return { status: r.status, stderr: r.stderr || '' };
+};
+const grepCall = (tool_input, registry = EMPTY_REG) => {
+  const r = spawnSync(process.execPath, [READR], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Grep', tool_input }),
+    encoding: 'utf8', env: { ...process.env, WOT_RULE_REGISTRY: registry },
+  });
+  return { status: r.status, stderr: r.stderr || '' };
+};
+
+t('read: an unbounded read of a BIG file is blocked and offered ask.js', () => {
+  const r = readCall({ file_path: bigFile() });
+  assert.strictEqual(r.status, 2);
+  assert.match(r.stderr, /ask\.js/);
+});
+
+t('read: a BOUNDED read of the same big file passes (the sanctioned way)', () => {
+  // This is the escape the block names, so it must actually work at any size.
+  assert.strictEqual(readCall({ file_path: bigFile(5000), offset: 100, limit: 40 }).status, 0);
+});
+
+t('read: a small file passes unbounded', () => {
+  assert.strictEqual(readCall({ file_path: smallFile() }).status, 0);
+});
+
+t('read: a missing file is not this hook problem', () => {
+  assert.strictEqual(readCall({ file_path: path.join(os.tmpdir(), 'nope-xyz.js') }).status, 0);
+});
+
+t('read: images and PDFs are exempt', () => {
+  const p = bigFile(900).replace(/\.js$/, '.png');
+  fs.writeFileSync(p, 'x\n'.repeat(900));
+  assert.strictEqual(readCall({ file_path: p }).status, 0);
+});
+
+t('grep: an unbounded CONTENT sweep is blocked', () => {
+  const r = grepCall({ pattern: 'foo', output_mode: 'content' });
+  assert.strictEqual(r.status, 2);
+  assert.match(r.stderr, /head_limit/);
+});
+
+t('grep: any one bound clears it (head_limit, glob, type, or path)', () => {
+  for (const bound of [{ head_limit: 50 }, { glob: '*.js' }, { type: 'js' }, { path: 'src' }]) {
+    assert.strictEqual(grepCall({ pattern: 'foo', output_mode: 'content', ...bound }).status, 0,
+      `${Object.keys(bound)[0]} must clear the block`);
+  }
+});
+
+t('grep: the default files_with_matches mode is never blocked', () => {
+  // CLAUDE.md says to grep for a fact. Locating files is the cheap path, not the
+  // expensive one, and blocking it would push work back toward reading whole files.
+  assert.strictEqual(grepCall({ pattern: 'foo' }).status, 0);
+  assert.strictEqual(grepCall({ pattern: 'foo', output_mode: 'files_with_matches' }).status, 0);
+});
+
+t('read-router: a RETIRED G6 stands down', () => {
+  const retired = registryWith([{ id: 'G6', true_positive: 1, false_positive: 5 }]);
+  assert.strictEqual(readCall({ file_path: bigFile() }, retired).status, 0);
+});
+
+t('read-router: malformed input fails OPEN', () => {
+  const r = spawnSync(process.execPath, [READR], { input: 'not json', encoding: 'utf8' });
+  assert.strictEqual(r.status, 0);
+});
+
+// ============================================================================
 // scraper-data-gate: BLOCKS editing extraction code until a real DOM dump has
 // been read this session. Fails open on anything unrelated.
 // ============================================================================

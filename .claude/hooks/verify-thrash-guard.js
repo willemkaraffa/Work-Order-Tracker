@@ -66,7 +66,7 @@ function main() {
     // Plan tools run once PER FILE or PER STEP, so a plan touching 3+ files would
     // otherwise trip this on its own governance calls.
     'plan-rule.js', 'plan-approve.js', 'plan-step.js', 'plan-check.js',
-    'rule-label.js',
+    'rule-label.js', 'ask.js',
   ]);
 
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.
