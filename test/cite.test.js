@@ -54,6 +54,48 @@ t('missing/unreadable file -> auto-dismissed (symbol cannot exist there)', () =>
   assert.match(doc.findings[0].reason, /missing\/unreadable/);
 });
 
+// --- a vanished symbol has TWO causes, and they are opposites ----------------
+// Never-triaged + gone = the reviewer made it up (false positive).
+// Architect ruled STANDS + gone = the coder fixed it (true positive). Collapsing
+// these recorded the reviewer as WRONG exactly when it had been right, and that
+// count feeds rule retirement, so a working rule could retire for working.
+
+t('stood then fixed -> closed as FIXED, not as a hallucination', () => {
+  const doc = { findings: [finding({ symbol: 'gone()', status: 'open', ruledBy: 'architect' })] };
+  const r = cite(doc, { read: reader({ 'a.js': 'const x = somethingElse()' }) });
+  assert.deepStrictEqual(r.fixed, ['f1']);
+  assert.deepStrictEqual(r.dismissed, []);
+  assert.strictEqual(doc.findings[0].status, 'fixed');
+  assert.match(doc.findings[0].reason, /FIXED, not because it was never there/);
+});
+
+t('stood then the whole file went away -> also FIXED (the code is gone either way)', () => {
+  const doc = { findings: [finding({ file: 'gone.js', symbol: 'x', status: 'open', ruledBy: 'architect' })] };
+  const r = cite(doc, { read: reader({}) });
+  assert.deepStrictEqual(r.fixed, ['f1']);
+  assert.strictEqual(doc.findings[0].status, 'fixed');
+});
+
+t('never triaged + gone -> still a dismissal, the old behaviour is intact', () => {
+  // ruledBy is written ONLY by architect.js, so its absence means nobody confirmed
+  // this finding. Absent symbol then really is a hallucinated location.
+  const doc = { findings: [finding({ symbol: 'gone()', status: 'open' })] };
+  const r = cite(doc, { read: reader({ 'a.js': 'const x = somethingElse()' }) });
+  assert.deepStrictEqual(r.dismissed, ['f1']);
+  assert.deepStrictEqual(r.fixed, []);
+  assert.strictEqual(doc.findings[0].status, 'dismissed');
+  assert.match(doc.findings[0].reason, /hallucinated location/);
+});
+
+t('a ruling by anyone other than the architect does NOT count as stood', () => {
+  // Only the architect can make a finding stand. A self-judged marker must not be
+  // able to launder a hallucination into a recorded true positive.
+  const doc = { findings: [finding({ symbol: 'gone()', status: 'open', ruledBy: 'claude' })] };
+  const r = cite(doc, { read: reader({ 'a.js': 'nope' }) });
+  assert.deepStrictEqual(r.dismissed, ['f1']);
+  assert.deepStrictEqual(r.fixed, []);
+});
+
 // --- found symbol: SERVE, do not judge --------------------------------------
 t('symbol found -> served verbatim, finding stays OPEN (cite does not resolve it)', () => {
   const doc = { findings: [finding({ symbol: 'urllib.request.quote' })] };

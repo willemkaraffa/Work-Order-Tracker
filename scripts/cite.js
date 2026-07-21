@@ -82,8 +82,24 @@ function renderSpan(text, offset, context, id, file) {
   return `[cite ${id} ${file}:${start}-${end}]  (line ${hit} marked '>'; span is a floor, widen with --context or Read)\n${body.join('\n')}`;
 }
 
-// Pure core: takes the doc + options, returns { doc, blocks, dismissed, missing }.
-// blocks = strings to print for the coder; dismissed/missing = ids acted on / left open.
+// A vanished symbol has TWO causes, and they are opposites.
+//
+// Either the reviewer cited bytes that never existed (hallucination, a false
+// positive), or the architect ruled the finding STANDS and the coder then removed
+// exactly those bytes (a fix, a true positive). Both look identical here: the symbol
+// is not in the file. cite.js used to call every one of them a hallucination, so a
+// reviewer was recorded as WRONG precisely when it had been right and its finding was
+// repaired. That miscount feeds rule-registry precision, and rules retire on
+// accumulated false positives, so a working rule could be retired for working.
+//
+// The discriminator is `ruledBy`, which architect.js is the only writer of and whose
+// absence that script already uses as its untriaged marker (isUntriaged). No new
+// field: a finding still `open` and stamped by the architect is one that STANDS,
+// because that is what TRIAGE_STATUS maps 'stands' onto.
+const stoodAndWasFixed = f => f.status === 'open' && f.ruledBy === 'architect';
+
+// Pure core: takes the doc + options, returns { doc, blocks, dismissed, fixed, missing }.
+// blocks = strings to print for the coder; dismissed/fixed/missing = ids acted on.
 // `read` injected for testability.
 function cite(doc, { ids = [], context = DEFAULT_CONTEXT, read = readFileFor } = {}) {
   const open = (doc.findings || []).filter(f => f.status === 'open');
@@ -93,7 +109,25 @@ function cite(doc, { ids = [], context = DEFAULT_CONTEXT, read = readFileFor } =
 
   const blocks = [];
   const dismissed = [];
+  const fixed = [];
   const missing = [];
+
+  // Closes a finding whose cited bytes are gone, as a FIX or as a hallucination
+  // depending on whether the architect had already ruled it stands. Both write a
+  // reason: review-gate prints it, and a human has to be able to check the call.
+  const closeVanished = (f, why) => {
+    if (stoodAndWasFixed(f)) {
+      f.status = 'fixed';
+      f.reason = `closed by cite.js: the architect ruled this STANDS, and ${why} The cited code is gone because it was FIXED, not because it was never there.`;
+      fixed.push(f.id);
+      blocks.push(`[FIXED ${f.id}]  ${f.reason}`);
+    } else {
+      f.status = 'dismissed';
+      f.reason = `auto-dismissed by cite.js: ${why} The finding cites code that does not exist (hallucinated location); a correct finding cites real bytes.`;
+      dismissed.push(f.id);
+      blocks.push(`[DISMISS ${f.id}]  ${f.reason}`);
+    }
+  };
 
   for (const f of want) {
     const symbol = String(f.symbol || '').trim();
@@ -104,18 +138,12 @@ function cite(doc, { ids = [], context = DEFAULT_CONTEXT, read = readFileFor } =
     }
     const text = read(f);
     if (text === null || text === undefined) {
-      f.status = 'dismissed';
-      f.reason = `auto-dismissed by cite.js: file '${f.file}' is missing/unreadable, so symbol '${symbol}' cannot exist there. Finding cites code that is not present.`;
-      dismissed.push(f.id);
-      blocks.push(`[DISMISS ${f.id}]  ${f.reason}`);
+      closeVanished(f, `file '${f.file}' is missing/unreadable, so symbol '${symbol}' cannot exist there.`);
       continue;
     }
     const hits = allIndexes(text, symbol);
     if (hits.length === 0) {
-      f.status = 'dismissed';
-      f.reason = `auto-dismissed by cite.js: symbol '${symbol}' not found verbatim in ${f.file} (0 matches). The finding cites code that does not exist (hallucinated location); a correct finding cites real bytes.`;
-      dismissed.push(f.id);
-      blocks.push(`[DISMISS ${f.id}]  ${f.reason}`);
+      closeVanished(f, `symbol '${symbol}' was not found verbatim in ${f.file} (0 matches).`);
       continue;
     }
     const shown = hits.slice(0, 3); // cap: a symbol matching many sites is too generic to be useful
@@ -125,7 +153,7 @@ function cite(doc, { ids = [], context = DEFAULT_CONTEXT, read = readFileFor } =
     blocks.push(`--- ${f.id} [${f.severity}/${f.rule}]${claimedLine}\n  problem: ${f.problem}\n  fix: ${f.fix}\n${spans.join('\n\n')}${extra}`);
   }
 
-  return { doc, blocks, dismissed, missing };
+  return { doc, blocks, dismissed, fixed, missing };
 }
 
 function parseArgs(argv) {
@@ -153,9 +181,9 @@ function main() {
     return 2;
   }
 
-  const { blocks, dismissed, missing } = cite(doc, { ids, context });
+  const { blocks, dismissed, fixed, missing } = cite(doc, { ids, context });
 
-  if (dismissed.length) {
+  if (dismissed.length || fixed.length) {
     fs.writeFileSync(FINDINGS_FILE, JSON.stringify(doc, null, 2));
   }
 
@@ -164,8 +192,9 @@ function main() {
     return 0;
   }
   console.log(blocks.join('\n\n'));
-  console.log(`\n[cite] ${blocks.length - dismissed.length - missing.length} served, ${dismissed.length} auto-dismissed (symbol absent), ${missing.length} skipped (no symbol).`);
+  console.log(`\n[cite] ${blocks.length - dismissed.length - fixed.length - missing.length} served, ${fixed.length} closed as FIXED (stood, then the code changed), ${dismissed.length} auto-dismissed (symbol absent, never stood), ${missing.length} skipped (no symbol).`);
   if (dismissed.length) console.log(`[cite] auto-dismissals written to the ledger with reasons: ${dismissed.join(', ')}`);
+  if (fixed.length) console.log(`[cite] closed as fixed: ${fixed.join(', ')}`);
   return 0;
 }
 
