@@ -71,12 +71,26 @@ function main() {
 
   // Ad-hoc script targets: node/python invoking a concrete .js/.mjs/.cjs/.py file.
   // Match the file token, take its basename so different cwd spellings collapse.
+  //
+  // SCOPED BY PROJECT. The basename alone is not a key: two checkouts both have a
+  // `test/overseer-config.test.js`, and one session that touches both (extracting
+  // this frame into its own repo, say) had them share a single budget, so the FIRST
+  // run against the second repo was blocked as if it were the third. Observed live
+  // 2026-07-21, and it is the same shape as the false positive already on G1's
+  // record: the guard counting something that was not an attempt.
+  //
+  // The scope is THIS hook's own repo, which is the right answer here precisely
+  // because the hook is installed inside the project it guards.
+  //
+  // Basenames still collapse WITHIN a project, which is the original point: `node
+  // ./x.js` and `node sub/x.js` are one script being retried.
+  const scope = path.join(__dirname, '..', '..').toLowerCase().replace(/[^\w]/g, '_');
   const targets = new Set();
   const re = /(?:^|\s)(?:node|python3?|py|deno|bun|ts-node|tsx)\s+(?:[^\s]*[\\/])?([\w.-]+\.(?:m?js|cjs|py|ts))\b/gi;
   let m;
   while ((m = re.exec(cmd))) {
     const base = m[1].toLowerCase();
-    if (!SANCTIONED.has(base)) targets.add(base); // sanctioned tools bypass the counter
+    if (!SANCTIONED.has(base)) targets.add(`${scope}:${base}`); // sanctioned tools bypass the counter
   }
   if (!targets.size) return; // not an ad-hoc script run
 
@@ -139,7 +153,7 @@ function main() {
 
   if (blockedTarget) {
     process.stderr.write(
-      `[verify-thrash-guard] BLOCKED: '${blockedTarget}' has already run ${LIMIT}x in 10 min. ` +
+      `[verify-thrash-guard] BLOCKED: '${blockedTarget.split(':').pop()}' has already run ${LIMIT}x in 10 min. ` +
       `Rule C2: two attempts on the same verification failed -> the APPROACH is wrong, not the code. ` +
       `Stop re-running it. Re-examine: is the harness wrong-fit (jsdom has no innerText, cannot open a ` +
       `bell-gated modal)? Is the risk even worth proving (a UI string needs a trace, not a live run)? ` +

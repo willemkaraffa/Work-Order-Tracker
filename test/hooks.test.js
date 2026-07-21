@@ -44,6 +44,31 @@ const sid = () => `test-${process.pid}-${Date.now()}-${seq++}`;
 const bash = (session, command) => run(THRASH, { tool_name: 'Bash', session_id: session, tool_input: { command } });
 const pwsh = (session, command) => run(THRASH, { tool_name: 'PowerShell', session_id: session, tool_input: { command } });
 
+// The counter key is now `<project>:<basename>`, so two checkouts that both have a
+// test/overseer-config.test.js no longer share one budget. Observed live 2026-07-21
+// while extracting the frame: the FIRST run against the second repo was blocked as
+// if it were the third.
+//
+// The cross-project case CANNOT be exercised here: this hook derives its scope from
+// its own __dirname, which is fixed for this checkout. It is covered in the extracted
+// package, where the scope comes from OVERSEER_ROOT. What is testable here is that
+// scoping did not break the behaviour it had to preserve.
+t('thrash: path spellings still collapse to ONE budget within this project', () => {
+  const s = sid();
+  bash(s, 'node ./probe.js');
+  bash(s, 'node scratch/probe.js');
+  assert.strictEqual(bash(s, 'node deep/nested/probe.js').status, 2, 'same script, 3rd attempt');
+});
+
+t('thrash: the block message names the SCRIPT, not the internal scope key', () => {
+  // The key gained a path prefix. A human must still see just the script.
+  const s = sid();
+  bash(s, 'node probe2.js'); bash(s, 'node probe2.js');
+  const r = bash(s, 'node probe2.js');
+  assert.match(r.stderr, /BLOCKED: 'probe2\.js'/);
+  assert.doesNotMatch(r.stderr, /BLOCKED: '[a-z]:/i, 'no drive-letter scope leaking into the message');
+});
+
 t('thrash: a non-shell tool is ignored', () => {
   const r = run(THRASH, { tool_name: 'Read', session_id: sid(), tool_input: { file_path: 'x' } });
   assert.strictEqual(r.status, 0);
