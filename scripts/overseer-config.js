@@ -28,6 +28,15 @@ const CONFIG_FILE = path.join(REPO_ROOT, 'overseer.json');
 const DEFAULTS = {
   verifyCommand: 'npm run verify',
   rubricFile: '.claude/rubric.md',
+  // Guards the PROJECT owns, as [{ file, label }]. The frame reports its own guards
+  // from its own list and must not know a given app has a scraper; this is where an
+  // app says "I also expect this hook to be live".
+  //
+  // It stays an EXPECTATION rather than being read back from settings.json, because
+  // the entire job of the status report is to catch a guard that is missing or
+  // unregistered. A list derived from what IS registered can never report anything
+  // absent: a deleted, unregistered hook would just quietly stop appearing.
+  guards: [],
 };
 
 // A malformed overseer.json falls back to defaults rather than throwing: this loader

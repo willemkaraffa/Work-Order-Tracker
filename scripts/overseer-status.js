@@ -52,13 +52,26 @@ function enforcement() {
       if (found) registered.add(found[1]);
     }
   }
+  // The FRAME's own guards. This list is deliberately hardcoded: it is the
+  // expectation the report checks reality against, and a guard that is both deleted
+  // and unregistered must still show as a GAP rather than silently disappearing.
   const guards = [
     ['verify-thrash-guard.js', 'G1', 'thrash guard'],
     ['verify-budget-guard.js', 'G2', 'verify budget nudge'],
     ['plan-scope-guard.js', 'G3', 'plan scope guard'],
     ['length-check.js', 'G4', 'style gate'],
-    ['scraper-data-gate.js', null, 'scraper data gate'],
   ];
+
+  // Guards the PROJECT declares in overseer.json. The frame must not know that this
+  // particular app has a scraper; `scraper-data-gate.js` used to be named right here,
+  // which meant every other repo would inherit a permanent GAP for a hook it has no
+  // reason to own. Malformed entries are skipped rather than throwing: a typo in a
+  // project's config must not take down the report that would have shown the typo.
+  try {
+    for (const g of require('./overseer-config.js').config().guards || []) {
+      if (g && g.file) guards.push([String(g.file), null, String(g.label || g.file)]);
+    }
+  } catch { /* frame guards still report */ }
   let registry = null;
   try { registry = require('./rule-registry.js'); } catch { /* reported below */ }
 

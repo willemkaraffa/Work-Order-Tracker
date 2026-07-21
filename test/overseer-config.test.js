@@ -92,6 +92,54 @@ t('gemini-review: no rubric means exit 2 (DID NOT RUN), never a clean 0', () => 
   }
 });
 
+// Project-declared guards. The frame used to name `scraper-data-gate.js` in its own
+// source, so every other repo would inherit a permanent GAP for a hook it has no
+// reason to own. The list stays an EXPECTATION: derived-from-settings.json would make
+// a deleted, unregistered guard silently vanish instead of reporting a gap.
+// `overrides`, NOT `cfg`: the module import above is already named cfg, and a
+// parameter of that name shadows it, so CONFIG_FILE silently reads as undefined.
+const withConfig = (overrides, fn) => {
+  const saved = fs.readFileSync(cfg.CONFIG_FILE, 'utf8');
+  try {
+    fs.writeFileSync(cfg.CONFIG_FILE, JSON.stringify(overrides));
+    for (const m of ['../scripts/overseer-config.js', '../scripts/overseer-status.js']) {
+      delete require.cache[require.resolve(m)];
+    }
+    return fn(require('../scripts/overseer-status.js'));
+  } finally {
+    fs.writeFileSync(cfg.CONFIG_FILE, saved);
+    for (const m of ['../scripts/overseer-config.js', '../scripts/overseer-status.js']) {
+      delete require.cache[require.resolve(m)];
+    }
+  }
+};
+
+t('status: a project-declared guard appears in the report', () => {
+  const r = withConfig({ guards: [{ file: 'scraper-data-gate.js', label: 'scraper data gate' }] },
+    s => s.enforcement());
+  assert.match(r.lines.join('\n'), /scraper data gate: present, registered/);
+});
+
+t('status: a project guard that is MISSING still reports a GAP', () => {
+  // The whole point of an expectation list. If this ever passes silently, the report
+  // has stopped being able to tell anyone that a guard stopped existing.
+  const r = withConfig({ guards: [{ file: 'no-such-guard.js', label: 'ghost guard' }] },
+    s => s.enforcement());
+  assert.match(r.lines.join('\n'), /ghost guard: MISSING/);
+  assert.ok(r.gaps > 0, 'a missing declared guard must count as a gap');
+});
+
+t('status: a malformed guard entry is skipped, not thrown', () => {
+  // A typo in a project's config must not take down the report that would show it.
+  const r = withConfig({ guards: [null, {}, { label: 'no file' }] }, s => s.enforcement());
+  assert.ok(Array.isArray(r.lines) && r.lines.length, 'report still renders');
+});
+
+t('status: with no project guards, only the frame guards are reported', () => {
+  const r = withConfig({}, s => s.enforcement());
+  assert.doesNotMatch(r.lines.join('\n'), /scraper/i, 'the frame must not know this app has a scraper');
+});
+
 t('transcript dir is DERIVED from the repo path, not hardcoded', () => {
   // The old literal 'C--dev-Work-Order-Tracker' made the human-approval channel
   // dead in every other checkout, and no-transcript is read as no-approval.

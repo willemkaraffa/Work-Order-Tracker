@@ -1,4 +1,7 @@
 {
   "verifyCommand": "npm run verify",
-  "rubricFile": ".claude/rubric.md"
+  "rubricFile": ".claude/rubric.md",
+  "guards": [
+    { "file": "scraper-data-gate.js", "label": "scraper data gate" }
+  ]
 }

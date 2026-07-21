@@ -26,12 +26,64 @@ The two config seams below are no longer TODO. They exist:
 The open question at the bottom of this doc is answered: rubric is per-project,
 supplied as a file. Not per-language, not a menu of named rubrics.
 
-## The file list below is STALE and must be re-derived before the move
+## INVENTORY, derived from disk 2026-07-21
 
-It names 5 files. PO has since grown to roughly 20 scripts in `scripts/` plus 7
-hooks in `.claude/hooks/`, a rule registry with evidence scoring, plan/approval
-machinery, an architect, and `overseer-status`. Re-inventory from disk at move
-time; do not trust the list below as the scope.
+Derived mechanically (every `require` of a sibling module, plus a grep for
+app-domain words), not from memory. The old 5-file list further down is
+superseded; it is kept only for the reasoning around it.
+
+**The headline: the frame is already almost free of the app.** Across 18 scripts
+and 7 hooks, exactly TWO files mention anything app-specific, and one of them is a
+single line. This is a file move, not an untangling.
+
+### scripts/ -> all 18 move
+
+`architect.js` `ask.js` `cite.js` `gemini-call.js` `gemini-review.js`
+`overseer-config.js` `overseer-status.js` `plan.js` `plan-approve.js`
+`plan-check.js` `plan-rule.js` `plan-step.js` `research.js`
+`review-disposition.js` `review-gate.js` `rule-label.js` `rule-registry.js`
+`user-grant.js`
+
+Dependency graph is a DAG with no cycles and no app imports. Leaves (`plan.js`,
+`rule-registry.js`, `user-grant.js`, `gemini-call.js`, `overseer-config.js`,
+`cite.js`, `plan-rule.js`, `research.js`, `review-disposition.js`) depend on
+nothing internal, so they can move first and independently.
+
+NOT frame, stay here: `audit-free-idents.mjs`, `prep-python.ps1` (app tooling).
+
+### .claude/hooks/ -> 6 of 7 move
+
+Move: `length-check.js` `plan-scope-guard.js` `read-router.js` `role-router.js`
+`verify-budget-guard.js` `verify-thrash-guard.js`.
+
+Stays: `scraper-data-gate.js`, which is about this app's scraper.
+
+Every moving hook reaches into `scripts/` via `../../scripts/<x>.js`. That
+relative path is the ONLY thing binding the two directories, and it breaks the
+moment the scripts live in a package. This is the real mechanical work of the
+move, and it is the thing most likely to fail silently: hooks fail OPEN, so a
+broken require does not error, it disarms the guard while `overseer-status`
+still reports it as registered.
+
+### test/ -> 8 files move
+
+`architect.test.js` `ask.test.js` `cite.test.js` `hooks.test.js`
+`overseer-config.test.js` `plan.test.js` `review-gate.test.js`
+`rule-registry.test.js`
+
+### The one coupling to sever
+
+`scripts/overseer-status.js:60` hard-codes a row for `scraper-data-gate.js` in its
+enforcement table. The frame should not know that hook exists. Make the table
+read from `.claude/settings.json` (which already lists every registered hook) or
+from `overseer.json`, so a project's own guards appear without the frame naming
+them.
+
+### Order this implies
+
+Leaves first, then dependents, then hooks, then the require rewrite. Prove the
+gates still BITE after the rewrite by breaking the tree on purpose (step 5
+below); a disarmed hook is invisible otherwise.
 
 ## Goal
 
