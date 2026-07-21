@@ -10,7 +10,7 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
-  clearsScheduleOnSet, orderNumberMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
+  clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
@@ -357,6 +357,9 @@ function toDisplayRow(o) {
     pm: String(o.pm || '').toUpperCase(),
     type: typeLetter(o.type),
     tech: o.tech || '',
+    // Carried for phoneMatches in the list-pane search predicate (not rendered).
+    phone: o.phone || '',
+    contacts: Array.isArray(o.contacts) ? o.contacts : [],
     ageDays,
     age: ageDays == null ? null : ageDays + 'd',
     ageLevel: ageLevelForDays(ageDays),
@@ -957,6 +960,7 @@ function QuickJump({ open, orders, onClose, onPick }) {
   const results = query ? (orders || []).filter(o => !o.deleted).filter(o => {
     const { addr, city } = splitAddress(o);
     return orderNumberMatches(o, query)
+      || phoneMatches(o, query)
       || (addr || '').toLowerCase().includes(query)
       || (city || '').toLowerCase().includes(query);
   }).slice(0, 8) : [];
@@ -976,7 +980,7 @@ function QuickJump({ open, orders, onClose, onPick }) {
             if (e.key === 'Escape') onClose();
             else if (e.key === 'Enter' && results[0]) onPick(results[0].id);
           }}
-          placeholder="Jump to work order — number, address, city"
+          placeholder="Jump to work order — number, address, city, phone"
           style={{
             width: '100%', boxSizing: 'border-box', padding: '14px 16px',
             border: 'none', borderBottom: '1px solid var(--border-1)',
@@ -2112,7 +2116,7 @@ function WorkOrdersHeader({ query, setQuery, view, onSelectView, isPresetView, i
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={isPresetView ? (isInboxView ? 'Search fixed in inbox' : 'Search fixed in preset') : 'Search WO, address, tech...'}
+            placeholder={isPresetView ? (isInboxView ? 'Search fixed in inbox' : 'Search fixed in preset') : 'Search WO, address, tech, phone...'}
             disabled={isPresetView}
             title={isPresetView ? 'Switch back to a base view to edit the search query.' : ''}
             style={{

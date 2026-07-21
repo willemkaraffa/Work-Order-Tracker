@@ -163,6 +163,85 @@ t('thrash: un-counting never underflows past an empty history', () => {
 });
 
 // ============================================================================
+// role-router: keeps reviewer/architect work OFF Claude subagents.
+//
+// The tool is `Agent` (verified against a real transcript), NOT `Task`. A guard
+// written against Task would match nothing and look perfectly healthy.
+// ============================================================================
+const ROUTER = path.join(HOOKS, 'role-router.js');
+
+// Isolate from the real rule registry so these never depend on live TP/FP counts.
+// A registry with no G5 leaves it ACTIVE (unknown rule -> active), which is stable.
+function registryWith(rules) {
+  const p = path.join(os.tmpdir(), `wot-router-reg-${process.pid}-${seq++}.json`);
+  fs.writeFileSync(p, JSON.stringify({ version: 1, rules }));
+  return p;
+}
+const EMPTY_REG = registryWith([]);
+
+const spawnAgent = (tool_input, registry = EMPTY_REG) => {
+  const r = spawnSync(process.execPath, [ROUTER], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input }),
+    encoding: 'utf8',
+    env: { ...process.env, WOT_RULE_REGISTRY: registry },
+  });
+  return { status: r.status, stderr: r.stderr || '' };
+};
+
+t('router: a reviewer subagent is BLOCKED and redirected to gemini-review', () => {
+  const r = spawnAgent({ subagent_type: 'reviewer', description: 'Review the fix', prompt: 'Review the uncommitted diff.' });
+  assert.strictEqual(r.status, 2);
+  assert.match(r.stderr, /BLOCKED/);
+  assert.match(r.stderr, /gemini-review\.js/, 'must name the tool that owns the work');
+});
+
+t('router: the cavecrew reviewer variant is caught too', () => {
+  assert.strictEqual(spawnAgent({ subagent_type: 'caveman:cavecrew-reviewer', prompt: 'x' }).status, 2);
+});
+
+t('router: a review-shaped prompt under a GENERIC type is still caught', () => {
+  // Type-only matching is trivially avoided by spawning general-purpose instead.
+  const r = spawnAgent({ subagent_type: 'general-purpose', description: 'look at my work', prompt: 'Please review this diff and report defects.' });
+  assert.strictEqual(r.status, 2);
+  assert.match(r.stderr, /request text/);
+});
+
+t('router: architect work is routed to architect.js', () => {
+  const r = spawnAgent({ subagent_type: 'general-purpose', prompt: 'Triage the findings and decide which stand.' });
+  assert.strictEqual(r.status, 2);
+  assert.match(r.stderr, /architect\.js/);
+});
+
+t('router: ordinary agent work passes untouched', () => {
+  // The router must not become a tax on every subagent; only role signals bind.
+  assert.strictEqual(spawnAgent({ subagent_type: 'Explore', prompt: 'Find where invoices are computed.' }).status, 0);
+  assert.strictEqual(spawnAgent({ subagent_type: 'general-purpose', prompt: 'Rename a helper across two files.' }).status, 0);
+});
+
+t('router: a non-Agent tool is ignored', () => {
+  const r = spawnSync(process.execPath, [ROUTER], {
+    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'review this diff' } }),
+    encoding: 'utf8', env: { ...process.env, WOT_RULE_REGISTRY: EMPTY_REG },
+  });
+  assert.strictEqual(r.status, 0);
+});
+
+t('router: a RETIRED G5 stands down, like any other rule', () => {
+  const retired = registryWith([{ id: 'G5', true_positive: 1, false_positive: 5 }]);
+  assert.strictEqual(spawnAgent({ subagent_type: 'reviewer', prompt: 'x' }, retired).status, 0);
+});
+
+t('router: an unreadable registry keeps routing (fails toward enforcing)', () => {
+  const missing = path.join(os.tmpdir(), 'no-such-registry-xyz.json');
+  assert.strictEqual(spawnAgent({ subagent_type: 'reviewer', prompt: 'x' }, missing).status, 2);
+});
+
+t('router: malformed input fails OPEN (never bricks the session)', () => {
+  const r = spawnSync(process.execPath, [ROUTER], { input: 'not json', encoding: 'utf8' });
+  assert.strictEqual(r.status, 0);
+});
+
+// ============================================================================
 // scraper-data-gate: BLOCKS editing extraction code until a real DOM dump has
 // been read this session. Fails open on anything unrelated.
 // ============================================================================

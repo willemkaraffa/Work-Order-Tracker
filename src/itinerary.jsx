@@ -4,7 +4,7 @@
 import React from 'react';
 import { statusColor } from './constants.js';
 import { formatPhone } from './utils.js';
-import { orderNumberMatches } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 import { Dot, PMChip, TypeIcon } from './primitives.jsx';
 import {
@@ -247,6 +247,7 @@ export function ItineraryModule({ activeOrders, techs, phases, statusColors, sta
       if (!q) return true;
       const { addr, city } = splitAddress(o);
       return orderNumberMatches(o, q)
+        || phoneMatches(o, q)
         || (addr || '').toLowerCase().includes(q)
         || (city || '').toLowerCase().includes(q);
     });
@@ -427,7 +428,7 @@ export function ItineraryModule({ activeOrders, techs, phases, statusColors, sta
                   ref={poolSearchRef}
                   value={poolQuery}
                   onChange={(e) => setPoolQuery(e.target.value)}
-                  placeholder="Search WO #, address, city..."
+                  placeholder="Search WO #, address, city, phone..."
                   style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
                     background: 'var(--bg-canvas)', color: 'var(--text-1)', fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' }}
                 />

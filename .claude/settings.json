@@ -21,6 +21,12 @@
         ]
       },
       {
+        "matcher": "Agent",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/role-router.js" }
+        ]
+      },
+      {
         "matcher": "Edit",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },

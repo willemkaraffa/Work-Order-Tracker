@@ -48,6 +48,28 @@ function evaluate(doc, currentHash) {
   if (!doc) {
     return { ok: false, reason: 'no review on record for this tree. Run: node scripts/gemini-review.js' };
   }
+  // PROVENANCE. The reviewer is external Gemini on purpose, and until now nothing
+  // checked that the findings actually came from it. A fresh session with no memory
+  // of the design reaches for the built-in Claude reviewer, burns subscription
+  // tokens, writes a ledger, and every gate stays green. That happened, at ~40k
+  // tokens, and it stayed invisible because "findings were dispositioned" was the
+  // only thing being enforced.
+  //
+  // gemini-review.js stamps the model that answered. A ledger with no stamp, or one
+  // naming a non-Gemini model, did not come from the sanctioned reviewer.
+  //
+  // This does NOT recover the tokens (they are spent before any commit), which is
+  // why role-router.js blocks the spawn up front. This is the backstop that stops
+  // the wrong review from also being ACCEPTED.
+  const model = String(doc.model || '');
+  if (!/^gemini[-.]/i.test(model)) {
+    return {
+      ok: false,
+      reason: `review provenance FAILED: the ledger names model '${model || '(none)'}', which is not the ` +
+        `external Gemini reviewer. Findings must come from: node scripts/gemini-review.js. ` +
+        `A review by Claude cannot satisfy this gate; independence is the point, not a formality.`,
+    };
+  }
   if (doc.diffHash !== currentHash) {
     return {
       ok: false,

@@ -782,6 +782,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     const inv = o.invoice;
     return (
       orderNumberMatches(o, q) ||
+      phoneMatches(o, q) ||
       String(o.address || '').toLowerCase().includes(q) ||
       String(o.city || '').toLowerCase().includes(q) ||
       String(o.pm || '').toLowerCase().includes(q) ||
@@ -855,7 +856,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
               ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search WO, invoice, address..."
+              placeholder="Search WO, invoice, address, phone..."
               style={{
                 flex: 1, border: 'none', outline: 'none',
                 background: 'transparent', color: 'var(--text-1)',

@@ -5,7 +5,7 @@
 import React from 'react';
 import { densityFor, statusColor } from './constants.js';
 import { usePMs, useStatusColors } from './contexts.js';
-import { orderNumberMatches, findOtherViewMatches } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches, findOtherViewMatches } from './orders-logic.js';
 import { Dot, PMChip, TypeIcon, FlagGlyph, ReorderBtns, swapAt } from './primitives.jsx';
 import {
   FilterDropdown, SortDropdown, BulkBar, WOContextMenu, sortRows, TT_VIEW_DATA,
@@ -115,6 +115,7 @@ export function ListPane({ selectedWO, onSelectWO, onHighlightWO, onVisibleRows,
           matchesFilters(r) &&
           (!q ||
             orderNumberMatches(r, q) ||
+            phoneMatches(r, q) ||
             (r.addr  || '').toLowerCase().includes(q) ||
             (r.city  || '').toLowerCase().includes(q) ||
             (r.tech  || '').toLowerCase().includes(q) ||

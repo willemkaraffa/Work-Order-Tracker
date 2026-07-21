@@ -117,6 +117,9 @@ t('isUntriaged: only OPEN findings the architect has not ruled on', () => {
 const doc = () => ({
   diffHash: 'abc123',
   range: 'HEAD',
+  // The gate checks PROVENANCE: findings must come from the external Gemini
+  // reviewer, so a realistic ledger carries the model that produced it.
+  model: 'gemini-3.5-flash',
   findings: [{
     id: 'f1', file: 'a.js', line: 1, symbol: 'sym', severity: 'high', rule: 'correctness',
     problem: 'p', fix: 'x', status: 'open', reason: null,

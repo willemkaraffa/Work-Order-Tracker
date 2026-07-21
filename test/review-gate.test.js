@@ -18,7 +18,10 @@ function t(name, fn) {
 }
 
 const HASH = 'abc123';
-const doc = (findings, hash = HASH) => ({ diffHash: hash, findings });
+// A realistic ledger carries the model that produced it. gemini-review.js always
+// stamps one, and the gate now refuses any ledger that is not from the external
+// Gemini reviewer, so a fixture without a model is not a valid ledger.
+const doc = (findings, hash = HASH, model = 'gemini-3.5-flash') => ({ diffHash: hash, model, findings });
 const finding = (over = {}) => ({
   id: 'f1', file: 'a.js', line: 1, symbol: 'sym', severity: 'high', rule: 'correctness',
   problem: 'p', fix: 'x', status: 'open', reason: null, ...over,
@@ -383,6 +386,38 @@ t('gate: a legacy dismissal with no ruledBy is NOT re-blocked as untriaged', () 
   // the new rule retroactively brick every old ledger.
   const v = evaluate(doc([finding({ status: 'dismissed', reason: 'judged before triage existed' })]), HASH);
   assert.strictEqual(v.ok, true);
+});
+
+// --- PROVENANCE: the findings must come from the external Gemini reviewer -------
+// Until this existed, a fresh session could spawn the Claude reviewer, burn ~40k
+// tokens, write a ledger, and pass every gate, because only "were findings
+// dispositioned" was ever enforced.
+
+t('provenance: a ledger with no model is REFUSED', () => {
+  const v = evaluate({ diffHash: HASH, findings: [] }, HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /provenance FAILED/);
+});
+
+t('provenance: a Claude-authored ledger is REFUSED even with zero open findings', () => {
+  // The dangerous shape: it looks perfectly clean.
+  const v = evaluate(doc([], HASH, 'claude-opus-4-8'), HASH);
+  assert.strictEqual(v.ok, false);
+  assert.match(v.reason, /not the external Gemini reviewer/);
+});
+
+t('provenance: every model in the real fallback chain is accepted', () => {
+  // A chain member being rejected would block commits whenever Gemini failed over,
+  // which is exactly when the reviewer is already under strain.
+  for (const m of require('../scripts/gemini-call.js').MODELS) {
+    const v = evaluate(doc([], HASH, m), HASH);
+    assert.strictEqual(v.ok, true, `${m} must satisfy the gate`);
+  }
+});
+
+t('provenance: is checked BEFORE staleness, so the deeper problem is reported', () => {
+  const v = evaluate(doc([], 'different-hash', 'claude-opus-4-8'), HASH);
+  assert.match(v.reason, /provenance FAILED/, 're-running the reviewer fixes both');
 });
 
 // --- what the human is shown at commit ----------------------------------------

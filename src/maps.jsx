@@ -10,7 +10,7 @@ import {
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
-import { orderNumberMatches } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
@@ -242,6 +242,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
         if (!q) return true;
         const { addr, city } = splitAddress(o);
         return orderNumberMatches(o, q)
+          || phoneMatches(o, q)
           || (addr || '').toLowerCase().includes(q)
           || (city || '').toLowerCase().includes(q);
       })
@@ -527,7 +528,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search WO #, address, city..."
+              placeholder="Search WO #, address, city, phone..."
               style={{
                 width: '100%', height: 30, padding: '0 10px',
                 border: '1px solid var(--border-2)', borderRadius: 6,

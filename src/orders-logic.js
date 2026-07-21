@@ -437,6 +437,26 @@ export function orderNumberMatches(row, q) {
       || String(woId).toLowerCase().includes(needle);
 }
 
+// Match a query against a WO's phone number(s): the primary `phone` plus every
+// `contacts[].phone`. Digits-only on BOTH sides so a typed '9195550148' finds a
+// stored '(919)-555-0148' (formatPhone punctuation would break a plain substring
+// match). A leading US '1' is dropped from BOTH sides so 11- and 10-digit forms
+// compare equal in either direction (stripping only the stored side left a pasted
+// '19195550148' longer than its own haystack, so it never matched). Queries with
+// fewer than 3 digits return false -- a bare
+// '1' would otherwise match nearly every WO. Accepts an order or a display row
+// (both carry `phone` + `contacts`).
+export function phoneMatches(row, q) {
+  const norm = (v) => {
+    const d = String(v || '').replace(/\D/g, '');
+    return d.length === 11 && d[0] === '1' ? d.slice(1) : d;
+  };
+  const needle = norm(q);
+  if (needle.length < 3 || !row) return false;
+  const nums = [row.phone].concat(Array.isArray(row.contacts) ? row.contacts.map(c => c && c.phone) : []);
+  return nums.some(p => norm(p).includes(needle));
+}
+
 /* ---------- cross-tab search (search-ux Part 4) ---------- */
 
 // A WO's "location" = the tab it lives in. Modules are views of tabs:
@@ -457,6 +477,7 @@ export function orderMatchesQuery(o, q) {
   const needle = String(q == null ? '' : q).trim().toLowerCase();
   if (!needle || !o) return false;
   if (orderNumberMatches(o, needle)) return true;
+  if (phoneMatches(o, needle)) return true;
   const has = (v) => String(v || '').toLowerCase().includes(needle);
   return has(o.address) || has(o.city) || has(o.pm) || has(o.tech);
 }
