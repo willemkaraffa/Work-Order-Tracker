@@ -138,6 +138,36 @@ t('thrash: a missing-module crash is not counted either', () => {
   assert.strictEqual(bash(s, 'node scratch/x.js').status, 0);
 });
 
+// The guard covers `python X.py` as much as `node X.js`, so the never-ran un-count
+// has to speak both runtimes. Output shapes probed 2026-07-21, not assumed: python
+// shares the word SyntaxError but says ModuleNotFoundError where node says
+// MODULE_NOT_FOUND, and IndentationError never carries the word SyntaxError at all.
+t('thrash: python load failures are not counted either', () => {
+  for (const stderr of [
+    "ModuleNotFoundError: No module named 'nosuchmod_xyz'",
+    'IndentationError: unexpected indent',
+    'TabError: inconsistent use of tabs and spaces in indentation',
+  ]) {
+    const s = sid();
+    bash(s, 'python scrape_amh.py');
+    postBash(s, 'python scrape_amh.py', { stderr });
+    bash(s, 'python scrape_amh.py');
+    postBash(s, 'python scrape_amh.py', { stderr });
+    assert.strictEqual(bash(s, 'python scrape_amh.py').status, 0,
+      `a load failure (${stderr.split(':')[0]}) must not burn the budget`);
+  }
+});
+
+t('thrash: a python RUNTIME error still counts (it really ran)', () => {
+  // The mirror of the node case: an exception raised mid-script is a real attempt.
+  const s = sid();
+  bash(s, 'python probe.py');
+  postBash(s, 'python probe.py', { stderr: 'ValueError: invalid literal for int()' });
+  bash(s, 'python probe.py');
+  postBash(s, 'python probe.py', { stderr: 'ValueError: invalid literal for int()' });
+  assert.strictEqual(bash(s, 'python probe.py').status, 2, '3rd real attempt must block');
+});
+
 t('thrash: a RUNTIME failure IS a real attempt and stays counted', () => {
   // The guard exists for this case: the script ran, the approach failed, twice.
   const s = sid();

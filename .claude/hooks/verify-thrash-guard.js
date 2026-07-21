@@ -96,9 +96,8 @@ function main() {
   // failed verification attempts, which is what rule C2 is actually about.
   //
   // KNOWN LIMITS, stated rather than discovered later:
-  //  - Detection is by node's crash signature in the output. The probed fact that
-  //    Bash tool_response carries NO exit code still holds, so content is all there
-  //    is. Python parse errors are NOT matched (different shape).
+  //  - Detection is by the crash signature in the output. The probed fact that Bash
+  //    tool_response carries NO exit code still holds, so content is all there is.
   //  - A script that legitimately prints these strings gets un-counted. That errs
   //    toward ALLOWING one more run, which is the safe direction for a guard: a
   //    wrongly-permitted run costs a few seconds, a wrongly-blocked one strands work.
@@ -108,8 +107,16 @@ function main() {
     const out = `${res.stderr || ''}\n${res.stdout || ''}`;
     // Parse/load failures only: the process died before running a single line.
     // A RUNTIME error (assertion, TypeError mid-test) IS a real attempt and stays counted.
+    //
+    // BOTH runtimes, because this guard covers `python X.py` as well as `node X.js`
+    // and half a fix is a fix that surprises someone later. Shapes probed 2026-07-21
+    // rather than assumed: `SyntaxError` is shared, but node says MODULE_NOT_FOUND /
+    // "Cannot find module" while python says ModuleNotFoundError, and python's
+    // IndentationError and TabError are parse-time failures that never carry the word
+    // SyntaxError in the printed line at all.
     const neverRan = /\bSyntaxError\b/.test(out) ||
-                     /Cannot find module|MODULE_NOT_FOUND/.test(out);
+                     /Cannot find module|MODULE_NOT_FOUND/.test(out) ||
+                     /\b(ModuleNotFoundError|IndentationError|TabError)\b/.test(out);
     if (neverRan) {
       for (const t of targets) {
         if (Array.isArray(state[t]) && state[t].length) state[t].pop();
