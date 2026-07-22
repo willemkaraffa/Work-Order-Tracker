@@ -85,6 +85,67 @@ yet established. Needs a fresh AMH dump of a bid WO to settle.
 Same rate on both stacks suggests it reflects reality (tech assigned later, in-app) rather
 than an extraction failure. Confirm against a portal page before treating it as a bug.
 
+### F4 CLOSED, by owner decision 2026-07-22.
+MSR has no portal-side bid items BY DESIGN. The service items quoted and billed are the
+contents of the "Other" cell of the bid sheet, and MSR item recording is deliberately
+100% offline. Not a gap, and the scraper should not grow one.
+
+Consequence to carry: a bid sheet ALREADY PARSED can change if MSR demands a revision.
+So a parse result is not final, and anything caching parsed items needs a re-parse path
+rather than a one-time import. Not yet audited.
+
+### F8. A remittance parser reports SUCCESS on a document it did not understand. HIGH.
+`parse_msr_remittance.py` on a real remittance PDF returns:
+
+    { "ok": true, "rows": [], "statementTotal": null }
+
+The file is genuine and carries real money: $320.00 across 4 POs. It is a Payout Report
+from **Superior Contracting & Maintenance**, a third payer whose format is neither MSR
+nor AMH (PO#-keyed, with QTY and Price columns).
+
+The parser was right to find no MSR structure. It was wrong to call that `ok`. Downstream,
+`remittances.jsx:53` branches only on `!res.ok`, so the app builds an EMPTY report with a
+null total and shows no warning. A user who loaded that file would see a remittance
+screen that looks like it worked and reconciles nothing.
+
+This is the same failure shape as the two capture bugs found today: the wrong answer and
+the right answer are indistinguishable. It matters more here because this path is money.
+
+Fix direction, not yet applied: parsers must distinguish "recognized this format, found
+zero rows" from "did not recognize this format", and the app must refuse the second.
+
+### F9. The money path has never been tested against a real document. HIGH.
+`test/reconcile-msr.test.js` and `test/reconcile-amh.test.js` are both fixture-free by
+design, asserting against row shapes hand-written to "mirror" the real remittance. They
+test that the matcher agrees with rows their own author invented. That is the exact
+pattern that produces a green suite over a real defect.
+
+The parsers themselves (`parse_msr_remittance.py`, `parse_amh_remittance.py`) have NO
+test at all in the suite.
+
+Verified by hand this session, against real files rather than mirrors:
+
+| file | rows | sum | stated total | agree |
+|---|---|---|---|---|
+| Vendor_ACH_Payment_Detail_-SSRS1 (1).pdf | 3 | 1235.00 | 1235.00 | yes |
+| ACHVendor_v0037747_0.pdf | 13 | 7661.21 | 7661.21 | yes |
+| ACHVendor_v0037747_0_1.pdf | 8 | 2910.61 | 2910.61 | yes |
+| ACHVendor_v0037747_0 (1).pdf | 6 | 2078.85 | 2078.85 | yes |
+| Gamble Plumbing - PO Remittance - 03.24.2025.pdf | 0 | - | null | see F8 |
+
+So AMH remittance parsing reconciles to the penny on three real statements, and MSR on
+one. That is genuine evidence, and it is evidence a human produced by hand today, not
+something the gate would catch tomorrow if it regressed.
+
+Wanted: fixture-backed tests over these real files, with the files kept OUT of the repo
+(they carry payment detail) and the test SKIPping when absent, exactly like
+`test/msr-extract.test.js` already does for the DOM dump.
+
+### F10. A third payer exists and nothing handles it. NEEDS A DECISION.
+Superior Contracting & Maintenance pays by a PO#-keyed Payout Report. Unknown whether
+this is current business or a 2025 one-off. If current, it needs its own parser; if not,
+F8's refusal is enough so the file cannot be mistaken for a parsed one.
+
 ## Checked and CLEAR, do not re-raise
 
 ### C1. bidAmount vs sum(bidItems) disagree on 136 orders. NOT A DEFECT.
@@ -109,6 +170,24 @@ matching is unaffected.
   compare against, so it is not an offline question.
 - Efficiency: no timing has been measured. "Do they do it efficiently" is currently
   unanswered, and nothing here should be read as answering it.
+
+## Requirements added by the owner 2026-07-22, not yet built
+
+### R1. Harden the scrapers against portal version changes.
+Version changes have broken capture more than once. Today's two defects were both of that
+family: a selector shape that changed (`Open <name> Preview` disappearing) and a page the
+scanner was never pointed at. The structural field query added in fcf23d6 is a step, since
+it keys on Salesforce API field names rather than on text layout, but nothing yet DETECTS
+a change. A scraper that reports blanks when the portal moves is the problem; one that
+says "the page shape changed" is not.
+
+### R2. Progress UX for scraping.
+The Maps geocoding progress bar is the reference. Capture, bulk capture, MSR scan and
+remittance parsing currently show nothing while they work. Port the mechanism from the
+geocoding bar rather than inventing a second progress system.
+
+This is also a correctness aid, not only cosmetics: two of today's failures were invisible
+partly because nothing showed what the process was doing or what it had touched.
 
 ## Standing caution
 
