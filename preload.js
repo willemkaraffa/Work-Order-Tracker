@@ -35,7 +35,7 @@ contextBridge.exposeInMainWorld('extensionBridge', {
   // arrive via onFoundWos. (MSR batch capture was dropped — Aura lazy-render made
   // off-screen scraping unreliable; the user adds new WOs via the on-page button.)
   requestFindNewMsr: () => ipcRenderer.invoke('queue-ext-command', 'findNewMsr'),
-  onFoundWos: (cb) => ipcRenderer.on('msr-found', (_e, items) => cb(items)),
+  onFoundWos: (cb) => ipcRenderer.on('msr-found', (_e, items, source) => cb(items, source)),
 });
 
 // Service-item library bridge — xlsx seed / import / export (persistence stays

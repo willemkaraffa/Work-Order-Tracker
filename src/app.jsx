@@ -4179,7 +4179,7 @@ function App() {
     if (window.extensionBridge && window.extensionBridge.onFoundWos) {
       // Extension scanned an MSR list page; diff its WO numbers against the
       // tracker and surface the ones not yet added.
-      window.extensionBridge.onFoundWos((items) => {
+      window.extensionBridge.onFoundWos((items, source) => {
         // Results arrived: clear the in-flight scan banner (mirror onImport).
         if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
         setCaptureStatus(null);
@@ -4207,7 +4207,13 @@ function App() {
         }
         // Notification instead of auto-popping the modal; click opens the list.
         pushNotif({ kind: 'capture', captureType: 'msr', title: fresh.length ? (fresh.length + ' new MSR WO' + (fresh.length === 1 ? '' : 's')) : 'MSR scan: no new WOs',
-          sub: fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'), payload: { items: fresh, scanned: arr.length } });
+          // Name the PAGE that was scanned. A scan of a stale work-order detail tab
+          // returns a handful of plausible WOs and used to read exactly like a clean
+          // scan of the list, so "no new WOs" could mean "looked in the wrong place".
+          sub: (fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'))
+            + (source && source.title ? ' · ' + String(source.title).slice(0, 60) : '')
+            + (source && source.tabCount > 1 ? ' (' + source.tabCount + ' MSR tabs open)' : ''),
+          payload: { items: fresh, scanned: arr.length, source: source || null } });
         toast(fresh.length ? (fresh.length + ' new MSR WO(s) found' + (trashedSkipped ? ', ' + trashedSkipped + ' cancelled skipped' : ''))
                            : (trashedSkipped ? trashedSkipped + ' cancelled skipped; no new MSR WOs' : 'No new MSR WOs on this list'));
       });

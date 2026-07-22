@@ -1,0 +1,306 @@
+'use strict';
+const BRIDGE_URL = 'http://127.0.0.1:27843';
+
+// ── Context menus ─────────────────────────────────────────────────────────────
+chrome.runtime.onInstalled.addListener(() => {
+  const fields = [
+    { id: 'wo_address', title: 'WO Capture → Set as Address' },
+    { id: 'wo_tech',    title: 'WO Capture → Set as Technician' },
+    { id: 'wo_pm',      title: 'WO Capture → Set as PM / Client' },
+    { id: 'wo_phone',   title: 'WO Capture → Set as Phone' },
+    { id: 'wo_notes',   title: 'WO Capture → Set as Notes' },
+    { id: 'wo_type',    title: 'WO Capture → Set as Type' },
+    { id: 'wo_status',  title: 'WO Capture → Set as Status' },
+  ];
+  fields.forEach(f => chrome.contextMenus.create({ id: f.id, title: f.title, contexts: ['selection'] }));
+});
+
+// ── Command polling (app-triggered capture) ───────────────────────────────────
+// The tracker app queues commands at GET /command (e.g. "Capture all MSR" button).
+// Poll on a chrome.alarm so the service worker wakes to check even after idle.
+chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
+chrome.runtime.onStartup.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'woCommandPoll') pollCommand(); });
+
+let commandRunning = false;
+async function pollCommand() {
+  if (commandRunning) return;
+  let cmd = null;
+  try {
+    const r = await fetch(BRIDGE_URL + '/command', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) cmd = (await r.json()).command;
+  } catch (_) { return; } // tracker not running
+  if (!cmd || !cmd.action) return;
+  if (cmd.action === 'findNewMsr') {
+    await backgroundFindNew();
+  }
+}
+
+// Scan the open MSR list tab for WO numbers and POST them to the tracker, which
+// diffs them and lists the ones not yet added. (Replaces the unreliable
+// off-screen batch capture.)
+const MSR_TAB_MATCH = '*://amherst.my.site.com/*';
+
+// WHICH Amherst tab to scan.
+//
+// This used to be `tabs[0]`: the first match in tab order, with no preference for
+// the one the user is actually looking at. With a single Amherst tab open that is
+// correct by accident. With several it silently scans an arbitrary one, and on
+// 2026-07-22 that meant scanning a stale WORK ORDER DETAIL tab instead of the
+// pending-bid list. A detail page carries 3 /workorder/ anchors of its own, so the
+// scan returned 3 plausible-looking WOs, the tracker diffed them, and the whole
+// thing reported success while never looking at the list the user had open.
+//
+// Preference order: the tab the user is on, then a lone match. Several matches and
+// none of them active is AMBIGUOUS, and ambiguity is reported rather than resolved
+// by guessing, because guessing is what produced a silent wrong answer.
+async function pickMsrTab() {
+  const active = await chrome.tabs.query({ url: MSR_TAB_MATCH, active: true, currentWindow: true });
+  if (active && active[0]) return { tab: active[0], matches: active };
+  const all = await chrome.tabs.query({ url: MSR_TAB_MATCH });
+  if (!all || !all.length) return { tab: null, matches: [] };
+  if (all.length === 1) return { tab: all[0], matches: all };
+  return { tab: null, matches: all };
+}
+
+async function backgroundFindNew() {
+  const { tab, matches } = await pickMsrTab();
+  if (!tab && !matches.length) {
+    notify('Find new MSR WOs', 'Open an MSR list page (amherst.my.site.com) first.');
+    return;
+  }
+  if (!tab) {
+    notify('Find new MSR WOs',
+      matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.');
+    return;
+  }
+  const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
+  const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+  // Report WHAT WAS SCANNED, always. The failure above was invisible precisely
+  // because the result never said which page produced it: 3 WOs off the wrong tab
+  // and 3 WOs off the right one are indistinguishable downstream.
+  const source = { url: tab.url || '', title: tab.title || '', tabCount: matches.length };
+  try {
+    await fetch(BRIDGE_URL + '/found-wos', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, source }), signal: AbortSignal.timeout(3000),
+    });
+  } catch (_) {}
+}
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  const fieldMap = {
+    wo_address: 'address', wo_tech: 'tech', wo_pm: 'pm',
+    wo_phone: 'phone', wo_notes: 'notes', wo_type: 'type', wo_status: 'status',
+  };
+  const field = fieldMap[info.menuItemId];
+  if (field && info.selectionText) {
+    chrome.storage.local.get(['wo_draft'], (res) => {
+      const draft = res.wo_draft || {};
+      draft[field] = info.selectionText.trim();
+      chrome.storage.local.set({ wo_draft: draft });
+      chrome.tabs.sendMessage(tab.id, { action: 'fieldCaptured', field, value: info.selectionText.trim() });
+    });
+  }
+});
+
+// ── HTTP bridge to tracker app ────────────────────────────────────────────────
+async function pingTracker() {
+  try {
+    const r = await fetch(BRIDGE_URL + '/ping', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) { const d = await r.json(); return { ok: true, status: d.status }; }
+    return { ok: false, error: 'Bad response' };
+  } catch(e) {
+    return { ok: false, error: 'Tracker app not running or not open' };
+  }
+}
+
+async function sendOrdersToTracker(orders) {
+  try {
+    const r = await fetch(BRIDGE_URL + '/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(orders),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (r.ok) {
+      const d = await r.json();
+      return { ok: true, count: d.count };
+    }
+    return { ok: false, error: 'Tracker returned error' };
+  } catch(e) {
+    return { ok: false, error: 'Tracker app not running. Open the tracker first.' };
+  }
+}
+
+// ── Headless bulk MSR capture (driven inside an open MSR tab) ──────────────────
+// MSR is locked to the authenticated Chrome profile and allows self-framing, so
+// the content script on an MSR tab does the actual capture via hidden iframes
+// (no window/tab churn — verified self-framing works). The background just finds
+// that tab, kicks it off, and imports the result the content script posts back.
+function sendTabMsg(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (r) => { resolve(chrome.runtime.lastError ? null : r); });
+  });
+}
+async function sendTabMsgRetry(tabId, message, tries = 5, gap = 1000) {
+  for (let i = 0; i < tries; i++) {
+    const r = await sendTabMsg(tabId, message);
+    if (r) return r;
+    await new Promise(s => setTimeout(s, gap));
+  }
+  return null;
+}
+
+let msrInFlight = false;
+let msrInFlightTimer = null;
+
+// Find an open MSR tab and tell its content script to start the headless
+// capture. `one` = { url, woId } captures just that WO; null = the full list.
+async function backgroundStartMsr(one) {
+  if (msrInFlight) return { ok: false, error: 'An MSR capture is already running.' };
+  const tabs = await chrome.tabs.query({ url: '*://amherst.my.site.com/*' });
+  const tab = tabs && tabs[0];
+  if (!tab) {
+    notify('MSR capture', 'Open an MSR tab (amherst.my.site.com) first, then try again.');
+    return { ok: false, error: 'No MSR tab open.' };
+  }
+  const r = await sendTabMsgRetry(tab.id, { action: 'startMsrCapture', one: one || null });
+  if (!r || !r.ok) {
+    notify('MSR capture', 'Could not start — make sure an MSR page is fully loaded.');
+    return { ok: false, error: (r && r.error) || 'content script not ready' };
+  }
+  msrInFlight = true;
+  // Safety: clear the guard if no result arrives (e.g. user navigated the tab).
+  if (msrInFlightTimer) clearTimeout(msrInFlightTimer);
+  msrInFlightTimer = setTimeout(() => { msrInFlight = false; }, 12 * 60 * 1000);
+  return { ok: true, started: true };
+}
+
+// ── Message handlers ──────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+
+  if (msg.action === 'getDraft') {
+    chrome.storage.local.get(['wo_draft'], (res) => sendResponse({ draft: res.wo_draft || {} }));
+    return true;
+  }
+
+  if (msg.action === 'setDraftField') {
+    chrome.storage.local.get(['wo_draft'], (res) => {
+      const draft = res.wo_draft || {};
+      draft[msg.field] = msg.value;
+      chrome.storage.local.set({ wo_draft: draft });
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg.action === 'clearDraft') {
+    chrome.storage.local.set({ wo_draft: {} });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'saveDraft') {
+    chrome.storage.local.set({ wo_draft: msg.draft });
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'saveToList') {
+    chrome.storage.local.get(['wo_saved_list'], (res) => {
+      const list = res.wo_saved_list || [];
+      const nums = list.map(o => parseInt((o.id||'WO-000').replace('WO-',''))||0);
+      const wo = Object.assign({ id: 'WO-' + String(Math.max(0,...nums)+1).padStart(3,'0'), _savedAt: new Date().toISOString() }, msg.data);
+      list.push(wo);
+      chrome.storage.local.set({ wo_saved_list: list }, () => sendResponse({ ok: true, id: wo.id }));
+    });
+    return true;
+  }
+
+  if (msg.action === 'sendToTracker') {
+    chrome.storage.local.get(['wo_saved_list'], async (res) => {
+      const list = res.wo_saved_list || [];
+      if (!list.length) { sendResponse({ ok: false, error: 'No saved work orders.' }); return; }
+      const result = await sendOrdersToTracker(list);
+      if (result.ok) chrome.storage.local.set({ wo_saved_list: [] });
+      sendResponse(result);
+    });
+    return true;
+  }
+
+  if (msg.action === 'getMappings') {
+    chrome.storage.local.get(['wo_mappings'], (res) => {
+      sendResponse({ mappings: res.wo_mappings || [] });
+    });
+    return true;
+  }
+
+  if (msg.action === 'getConfig') {
+    chrome.storage.local.get(['wo_tracker_config'], (res) => {
+      sendResponse({ config: res.wo_tracker_config || null });
+    });
+    return true;
+  }
+
+  if (msg.action === 'pingHost') {
+    pingTracker().then(sendResponse);
+    return true;
+  }
+
+  // Bulk import a given orders array straight to the tracker (used by the MSR
+  // list capture — does NOT touch the saved_list staging area).
+  if (msg.action === 'importOrders') {
+    (async () => {
+      if (!Array.isArray(msg.orders) || !msg.orders.length) {
+        sendResponse({ ok: false, error: 'No work orders to import.' });
+        return;
+      }
+      sendResponse(await sendOrdersToTracker(msg.orders));
+    })();
+    return true;
+  }
+
+  // Start headless MSR capture in an open MSR tab (from popup or app trigger).
+  if (msg.action === 'captureMsrAll') {
+    backgroundStartMsr().then(sendResponse);
+    return true;
+  }
+
+  // Result posted back by the content script after the iframe capture finishes.
+  if (msg.action === 'msrCaptureResult') {
+    msrInFlight = false;
+    if (msrInFlightTimer) { clearTimeout(msrInFlightTimer); msrInFlightTimer = null; }
+    (async () => {
+      const orders = Array.isArray(msg.orders) ? msg.orders : [];
+      if (!orders.length) {
+        notify('MSR capture', msg.error ? ('Failed: ' + msg.error) : 'No work orders captured.');
+        return;
+      }
+      const result = await sendOrdersToTracker(orders);
+      notify('MSR capture complete',
+        result.ok ? `${orders.length} work order(s) sent to the tracker.`
+                  : `Import failed: ${result.error || 'tracker not running'}.`);
+    })();
+    return false; // no response expected
+  }
+
+  // Per-WO progress from the content loop -> forward to the tracker for its banner.
+  if (msg.action === 'msrProgress') {
+    fetch(BRIDGE_URL + '/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ done: msg.done, total: msg.total }),
+      signal: AbortSignal.timeout(2000),
+    }).catch(() => {});
+    return false;
+  }
+});
+
+// Desktop notification (best-effort; ignored if permission/icon unavailable).
+function notify(title, message) {
+  try {
+    chrome.notifications.create('', {
+      type: 'basic', iconUrl: 'icons/icon48.png', title, message, priority: 1,
+    });
+  } catch (_) {}
+}

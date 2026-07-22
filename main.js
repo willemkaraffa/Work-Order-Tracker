@@ -130,7 +130,10 @@ function startBridgeServer(win) {
       req.on('end', () => {
         try {
           const d = JSON.parse(body);
-          if (win && !win.isDestroyed()) win.webContents.send('msr-found', Array.isArray(d.items) ? d.items : []);
+          // `source` = which tab the extension actually scanned. Forwarded so the
+          // renderer can SHOW it: a scan of the wrong Amherst tab used to be
+          // indistinguishable from a scan of the right one (2026-07-22).
+          if (win && !win.isDestroyed()) win.webContents.send('msr-found', Array.isArray(d.items) ? d.items : [], d.source || null);
         } catch (e) {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
