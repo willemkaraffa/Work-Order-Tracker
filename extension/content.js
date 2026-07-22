@@ -230,6 +230,41 @@
   }
 
   // ── MSR scraper (amherst.my.site.com) ────────────────────────────────────────
+  // MSR renders its work-order fields as Lightning record-layout items, one per
+  // field, each carrying its own label AND its Salesforce API name:
+  //
+  //   <records-record-layout-item field-label="Contact Phone"
+  //       data-target-selection-name="sfdc:RecordField.WorkOrder.Contact_Phone__c">
+  //     <span class="test-id__field-label">Contact Phone</span>
+  //     <span class="test-id__field-value ...">+18632897039</span>
+  //
+  // Verified against a real dump of WO 03984243 (2026-07-22): all 21 items resolve,
+  // including Contact Phone, Contact Mobile, Contact Email, Contact, Property,
+  // Priority and Status.
+  //
+  // WHY NOT THE innerText REGEX. Reading label/value pairs out of body innerText
+  // depends on the two sitting adjacent in the flattened text, which is a property of
+  // the LAYOUT, not of the data. The contact-name regex here required the literal
+  // "Open <name> Preview"; this page renders "<name>Preview" with no "Open", so it
+  // matched nothing and the contact silently came back blank. A field query does not
+  // care how the page is laid out.
+  //
+  // Lookup fields (Contact, Property, Work Type) append the hover-preview affordance
+  // to their text, hence the trailing "Preview" strip.
+  function msrField(doc, label) {
+    const el = doc.querySelector(
+      'records-record-layout-item[field-label="' + label + '"] .test-id__field-value');
+    if (!el) return '';
+    return String(el.textContent || '').replace(/Preview\s*$/, '').trim();
+  }
+
+  // True once the record-layout grid exists. Salesforce renders it progressively, so
+  // a capture fired before it lands reads a page that HAS no contact fields yet and
+  // reports success with them blank -- which is what WO 03984243 recorded.
+  function msrFieldsReady(doc) {
+    return !!(doc || document).querySelector('records-record-layout-item');
+  }
+
   function scrapeMSR(mappings, doc) {
     doc = doc || document;   // doc = a hidden iframe's document during bulk capture
     const data = { pm: 'MSR' };
@@ -246,29 +281,48 @@
     const ac = extractAddressCity(bodyText);
     data.address = ac.address;
     data.city = ac.city;
+    // The Property lookup carries the street on its own, independent of how the page
+    // text flattens. Preferred when the line-anchored parser finds nothing. City is
+    // left to the parser and the slug: the Property field does not carry one.
+    if (!data.address) data.address = msrField(doc, 'Property');
     if (!data.address) {
       const addrMatch = bodyText.match(/Property\s+([^\n]+(?:Ct|St|Ave|Rd|Dr|Ln|Blvd|Way|Pl|Cir|Loop)[^\n]*)/i);
       if (addrMatch) data.address = addrMatch[1].replace(/\s*(Open|Preview).*$/i,'').trim();
       if (!data.city) data.city = extractCityFromAddress(data.address || '');
     }
 
-    // Phone
-    const phoneMatch = bodyText.match(/Contact (?:Phone|Mobile)\s+(\+?[\d\s\-().]{10,})/i);
-    if (phoneMatch) data.phone = phoneMatch[1].trim().replace(/\s+/g,' ');
+    // Phone. Field query first (structural, layout-independent), innerText regex only
+    // as a fallback for documents that have no record-layout grid (the bulk-capture
+    // iframe path, and any future page shape).
+    data.phone = msrField(doc, 'Contact Phone') || msrField(doc, 'Contact Mobile') || '';
+    if (!data.phone) {
+      const phoneMatch = bodyText.match(/Contact (?:Phone|Mobile)\s+(\+?[\d\s\-().]{10,})/i);
+      if (phoneMatch) data.phone = phoneMatch[1].trim().replace(/\s+/g,' ');
+    }
+    const mobile = msrField(doc, 'Contact Mobile');
+    const email  = msrField(doc, 'Contact Email');
 
     // Contact name — Salesforce renders the contact as a lookup link; in
     // innerText it reads "Contact \n <Name> \n Open <Name> Preview". The backref
     // anchors on that repeated name; fallback = first non-noise "Open X Preview".
-    let contactName = '';
-    const cn = bodyText.match(/\bContact\s*\n\s*([^\n|]+?)\s*\n\s*Open\s+\1\s+Preview/);
-    if (cn) contactName = cn[1].trim();
-    else {
-      const all = [...bodyText.matchAll(/Open\s+([^\n|]+?)\s+Preview/g)].map(x => x[1].trim());
-      contactName = all.find(n => !/approved work|help|view all|preview/i.test(n)) || '';
+    // The "Open <name> Preview" shape this regex needs is NOT what WO 03984243
+    // rendered ("<name>Preview", no "Open"), so the field query leads and the regex
+    // is the fallback.
+    let contactName = msrField(doc, 'Contact');
+    if (!contactName) {
+      const cn = bodyText.match(/\bContact\s*\n\s*([^\n|]+?)\s*\n\s*Open\s+\1\s+Preview/);
+      if (cn) contactName = cn[1].trim();
+      else {
+        const all = [...bodyText.matchAll(/Open\s+([^\n|]+?)\s+Preview/g)].map(x => x[1].trim());
+        contactName = all.find(n => !/approved work|help|view all|preview/i.test(n)) || '';
+      }
     }
     if (contactName) {
       data.contactName = contactName;
-      data.contacts = [{ name: contactName, phone: data.phone || '' }];
+      // Mobile and email are carried as extra contact rows only when they add
+      // something: mobile is frequently the same number as the main phone.
+      data.contacts = [{ name: contactName, phone: data.phone || '', email: email || '' }];
+      if (mobile && mobile !== data.phone) data.contacts.push({ name: contactName + ' (mobile)', phone: mobile });
     }
 
     // Priority
@@ -577,6 +631,15 @@
       btn.disabled = true;
       // Fetch current mappings then scrape using appropriate portal scraper
       // Read mappings and saved list directly from storage — no service worker needed
+      // WAIT FOR THE FIELDS. Salesforce renders the record-layout grid after the rest
+      // of the page, so a capture fired early reads a document with no contact fields
+      // and saves them blank while reporting success. That is what WO 03984243
+      // recorded: phone, contact, city and propertyId all empty, while the same page
+      // dumped minutes later held every one of them.
+      //
+      // Bounded, and it never blocks the capture: on timeout it scrapes anyway (the
+      // regex fallbacks still apply) rather than refusing to capture at all.
+      whenMsrFieldsReady(() => {
       chrome.storage.local.get(['wo_mappings', 'wo_saved_list'], (res) => {
         const mappings = res.wo_mappings || [];
         const list     = res.wo_saved_list || [];
@@ -601,8 +664,28 @@
           ].filter(Boolean));
         });
       });
+      });
     };
     document.body.appendChild(btn);
+  }
+
+  // Calls `run` as soon as the MSR record-layout grid exists, or after the deadline
+  // regardless. MutationObserver rather than a poll loop: the grid can appear between
+  // polls and a capture that reads one tick too early is the bug being fixed.
+  // Non-MSR pages (AMH) run immediately; this gate is about MSR's render order only.
+  function whenMsrFieldsReady(run, timeoutMs) {
+    if (!isMSRPage() || msrFieldsReady(document)) { run(); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try { obs.disconnect(); } catch (_) {}
+      clearTimeout(timer);
+      run();
+    };
+    const obs = new MutationObserver(() => { if (msrFieldsReady(document)) finish(); });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+    const timer = setTimeout(finish, timeoutMs || 8000);
   }
 
   // ── DOM dump for scraper rework ──────────────────────────────────────────────
