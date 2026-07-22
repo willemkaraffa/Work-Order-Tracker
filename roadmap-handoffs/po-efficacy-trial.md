@@ -28,9 +28,26 @@ to measure an unproven instrument is how the thing being measured survives measu
 | 9496445 | invoice search lock: capture root-mounted state | 3 | 0 | 0 | 0 | 2 | verify green first try; no refusal |
 | 5df314e | invoice search lock: root cause, missing phoneMatches import | 0 | 0 | 0 | 0 | 1 | eslint no-undef, once enabled, catches it and blocks |
 
+| ce09442 | MSR scan read the wrong browser tab; extension vendored + linted | 1 | 1 | 1 | 0 | 3 | scraper-data-gate REFUSED a blind scraper edit, correctly |
+
 ## Running totals
 
-raised 3, stood 0, real 0, wrong 0. Reviewer precision so far: 0/3.
+raised 4, stood 1, real 1, wrong 0. Reviewer precision so far: 1/4.
+
+**Round 3 is the first evidence in PO's favour, and it is not the reviewer's.** The
+strongest result was a REFUSAL: `scraper-data-gate` blocked an edit to `scanMsrList`
+because no DOM dump of the failing page had been read that session. That edit was built
+on three guesses about a page never seen, and the gate cited the prior incident
+(WO 03907321, two blind edits, wrong both times). The correct diagnosis, a wrong-tab
+pick, was found afterwards and needed no DOM knowledge at all.
+
+The reviewer also produced its first true positive: `esc()` in the vendored extension
+escaped `&`, `<`, `>` but not quotes, while being interpolated into `value="..."`
+attributes. Verified against the source before it was accepted, then fixed.
+
+Note what that costs to weigh honestly: the finding was in code being vendored, not in
+code being written, and `no-undef` on the same file caught a defect in the same pass for
+roughly no marginal cost.
 
 **First real result, and it does not favour the reviewer.** The defect was a
 whole-app crash reachable by typing one character into the invoice search bar:
