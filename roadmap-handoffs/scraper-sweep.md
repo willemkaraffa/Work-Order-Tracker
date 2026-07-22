@@ -94,7 +94,7 @@ Consequence to carry: a bid sheet ALREADY PARSED can change if MSR demands a rev
 So a parse result is not final, and anything caching parsed items needs a re-parse path
 rather than a one-time import. Not yet audited.
 
-### F8. A remittance parser reports SUCCESS on a document it did not understand. HIGH.
+### F8. FIXED in 770b2b2. A remittance parser reports SUCCESS on a document it did not understand. HIGH.
 `parse_msr_remittance.py` on a real remittance PDF returns:
 
     { "ok": true, "rows": [], "statementTotal": null }
@@ -141,7 +141,14 @@ Wanted: fixture-backed tests over these real files, with the files kept OUT of t
 (they carry payment detail) and the test SKIPping when absent, exactly like
 `test/msr-extract.test.js` already does for the DOM dump.
 
-### F11. A remittance PDF can hold MORE THAN ONE payment; only the first is reported. HIGH.
+### F11. FIXED in 770b2b2, with F9 closed alongside it. A remittance PDF can hold MORE THAN ONE payment; only the first is reported. HIGH.
+
+Fix: every `Total:` header is summed, every `EFT No:` is carried, and a `statements`
+list plus `statementCount` expose per-payment detail. F9 (no fixture-backed test on the
+money path) is closed by `test/remittance-parsers.test.js`, which runs the shipped
+parsers over the real statements and asserts both reconciliation and refusal. All 37
+statements now reconcile, up from 34.
+
 Full-corpus run: 37 real statements, 310 rows, both shipped parsers.
 
 - MSR: 6 of 6 reconcile exactly.

@@ -32,9 +32,28 @@ to measure an unproven instrument is how the thing being measured survives measu
 
 | fcf23d6 | MSR capture read fields from flattened innerText; now structural | 0 | 0 | 0 | 0 | 1 | scraper-data-gate refused a blind edit, then PASSED once a real dump was read; verify-thrash-guard blocked a 3rd run of a harness I had not scoped |
 
+| 770b2b2 | remittance: multi-statement totals + refuse unrecognized files | 3 | 1 | 0 | 1 | 5 | review-gate REFUSED a stale review after a post-review edit, correctly |
+
 ## Running totals
 
-raised 4, stood 1, real 1, wrong 0. Reviewer precision so far: 1/4.
+raised 7, stood 2, real 1, wrong 1. Reviewer precision so far: 2/7, and one of the two
+that stood was WRONG about live data.
+
+**Round 5 is the first wrong refusal, and it is recorded as such.** The reviewer claimed
+the MSR address regex could not match a 4-digit year. Measured before touching anything:
+32 of 32 rows across all 6 real statements produce an address with the old pattern, so
+the finding was false for every document that exists. It was fixed anyway, because the
+described failure is a silently blank address rather than an error and layout hardening
+is a standing requirement, but it is counted in the `wrong` column. Counting it as a
+catch would be exactly the self-flattery this file exists to prevent.
+
+Reviewer also raised a finding claiming `parse_text` returned 3 values where the code
+returns 5. It returns 5, on the line it cited. The architect dismissed it as reading an
+outdated version. That is the fifth misread-not-misjudged finding of the trial.
+
+The gate that mattered again was deterministic: `review-gate` refused the commit because
+the tree had moved after the review, which is precisely the case where a stale approval
+would have covered unreviewed code.
 
 **Round 4 is the clearest result yet, and again it is a gate, not the reviewer.** The
 reviewer raised nothing on a diff that rewrote the MSR extraction mechanism. Two gates
