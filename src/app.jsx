@@ -4206,6 +4206,18 @@ function App() {
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
       });
     }
+    if (window.extensionBridge && window.extensionBridge.onCaptureFailed) {
+      // Extension-initiated AMH capture failed. The on-page button already returned,
+      // so this is the only surface the user can learn from.
+      window.extensionBridge.onCaptureFailed((info) => {
+        setCaptureStatus(null);
+        pushNotif({ kind: 'capture', captureType: 'import',
+          title: 'AMH capture failed · WO ' + (info.woId || '?'),
+          sub: String(info.error || 'unknown error').slice(0, 160),
+          payload: { batch: [], ts: Date.now() } });
+        toast('AMH capture failed: ' + String(info.error || 'unknown error').slice(0, 120), 'err');
+      });
+    }
     if (window.extensionBridge && window.extensionBridge.onFoundWos) {
       // Extension scanned an MSR list page; diff its WO numbers against the
       // tracker and surface the ones not yet added.
@@ -5653,9 +5665,20 @@ function App() {
       const batch = [...newBatch, ...updatedBatch];
       // Notification instead of an auto-popping modal so the scrape doesn't
       // interrupt; click the item to open the review modal.
-      if (batch.length) pushNotif({ kind: 'capture', captureType: 'import',
-        title: 'AMH capture · ' + added + ' new, ' + updated + ' updated',
-        sub: 'Click to review' + (warned ? (' · ' + warned + ' warnings') : ''),
+      // ALWAYS notify, including the nothing-changed run. This used to fire only when
+      // `batch` was non-empty, so a capture that found no new work and changed nothing
+      // ended in total silence: the banner vanished and the bell stayed empty, which
+      // reads exactly like a capture that failed. A long operation that finishes must
+      // say so, even when the answer is "no change".
+      pushNotif({ kind: 'capture', captureType: 'import',
+        title: batch.length
+          ? ('AMH capture · ' + added + ' new, ' + updated + ' updated')
+          : 'AMH capture · no changes',
+        sub: batch.length
+          ? ('Click to review' + (warned ? (' · ' + warned + ' warnings') : ''))
+          : ('Portal checked, nothing new'
+             + (trashedSkipped ? (' · ' + trashedSkipped + ' cancelled skipped') : '')
+             + (fail ? (' · ' + fail + ' failed') : '')),
         payload: { batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated } });
       toast('Captured ' + updated + ' updated, ' + added + ' new'
         + (warned ? (', ' + warned + ' with warnings') : '')

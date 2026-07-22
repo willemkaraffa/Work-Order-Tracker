@@ -167,13 +167,37 @@ function startBridgeServer(win) {
         try { woNum = String((JSON.parse(body) || {}).woId || '').trim(); }
         catch (e) { return send(400, { ok: false, error: 'bad JSON: ' + e.message }); }
         if (!woNum) return send(400, { ok: false, error: 'no woId supplied' });
+
+        // ACK IMMEDIATELY, CAPTURE AFTERWARDS.
+        //
+        // This used to hold the HTTP response open for the whole capture, which spawns
+        // Edge and signs in and takes tens of seconds. The caller is an MV3 service
+        // worker, and Chrome terminates those while idle: it was killed mid-fetch, the
+        // response was dropped, and the on-page button sat on "Tracker capturing..."
+        // forever with no error path. Observed live on the first real test.
+        //
+        // The round trip was pointless anyway. The app is the thing that captures, so
+        // the app keeps the result: it goes into the SAME 'extension-import' channel a
+        // normal extension import uses, which merges it, dedups it and raises the usual
+        // notification. The extension does not need the record back.
+        send(200, { ok: true, started: true, woId: woNum });
+
         try {
           const results = await runAmhCapture([woNum], amhCredential());
           const one = results[woNum];
-          if (!one) return send(200, { ok: false, error: `WO ${woNum} not returned by the AMH scraper.` });
-          return send(200, one);
+          if (one && one.ok && one.wo) {
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('extension-import', [one.wo]);
+              win.show();
+            }
+          } else if (win && !win.isDestroyed()) {
+            // A failure must reach the user too. Silence after a long job reads as
+            // success, and that is the exact failure mode this whole sweep keeps finding.
+            win.webContents.send('capture-failed',
+              { woId: woNum, error: (one && one.error) || 'AMH scraper returned nothing for this WO.' });
+          }
         } catch (e) {
-          return send(200, { ok: false, error: e.message });
+          if (win && !win.isDestroyed()) win.webContents.send('capture-failed', { woId: woNum, error: e.message });
         }
       });
       return;

@@ -701,17 +701,24 @@
       showToast('Could not read the WO number', '#ef4444', ['Open the work order page, then capture']);
       return;
     }
-    btn.innerHTML = '⏳ Tracker capturing…';
+    btn.innerHTML = '⏳ Handing to Tracker…';
     chrome.runtime.sendMessage({ action: 'captureAmhViaApp', woId }, (r) => {
-      if (!r || !r.ok || !r.wo) {
-        resetBtn(btn);
+      resetBtn(btn);
+      if (!r || !r.ok) {
         showToast('Capture failed', '#ef4444', [
           (r && r.error) ? String(r.error).slice(0, 120) : 'no response from Work Order Tracker',
           'AMH capture runs in the app so it matches bulk capture.',
         ]);
         return;
       }
-      cb(r.wo);
+      // The APP captures and KEEPS the record; it does not come back here. So the
+      // extension's saved list is deliberately not touched for AMH, and `cb` is never
+      // called. Storing a copy here would put the same work order in two places and
+      // re-create the two-sources problem this change removed.
+      showToast('Capture started in Tracker', '#10b981', [
+        'WO ' + woId,
+        'Watch the tracker window: it reports the result there.',
+      ]);
     });
   }
 
