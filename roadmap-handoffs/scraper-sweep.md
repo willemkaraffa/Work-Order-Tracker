@@ -208,6 +208,50 @@ matching is unaffected.
 - Efficiency: no timing has been measured. "Do they do it efficiently" is currently
   unanswered, and nothing here should be read as answering it.
 
+## Capture inspection, offline pass
+
+### F12. AMH has TWO extractors for the same portal, and they capture different fields. HIGH.
+Bulk capture goes through `scrape_amh.py` (token + REST API). The on-page Capture button
+goes through `scrapeAMH()` in the extension (DOM). Same work order, two code paths, two
+answers:
+
+| | extension button | python bulk |
+|---|---|---|
+| in both | address, city, phone, status, type, notes, propertyId, portalLink, bidItems, woId | same |
+| ONLY extension | dateCreated, priority | - |
+| ONLY python | - | contactName, contacts, bidAmount, state, zip, subStatus |
+
+So an AMH work order captured with the button arrives with no contact, no contacts list
+and NO BID AMOUNT, while the same order captured in bulk arrives complete. Nothing warns
+that the two differ, and both report success.
+
+This also explains part of F6 (51 AMH orders with a bidAmount but no bidItems) only in
+reverse, and it means "the AMH scraper works" is not a single claim: it is two claims,
+and only one of them has been exercised recently.
+
+Not proposing a merge blind. The right question is whether the button path should exist
+at all now that the API path is the primary, or whether it should call the same code.
+
+### F13. The AMH DOM extractor cannot be tested. MEDIUM, blocks everything above.
+`scrapeMSR(mappings, doc)` takes a document, and `content.js` exports it, which is what
+made `test/msr-extract.test.js` possible and what caught the contact regression.
+
+`scrapeAMH(mappings)` takes no document (it reads the global `document`) and is not in
+the export list. So no harness can drive it against a captured dump. The MSR half of the
+extension is testable and the AMH half is not, for no reason other than signature and
+exports.
+
+Cheap fix, deliberately not applied yet: give it the same `doc` parameter and export it,
+then point a fixture test at a real AMH dump. That is two lines plus a test.
+
+### F14. No usable AMH fixture exists. BLOCKER for F12/F13.
+The 4 AMH dumps on disk are all from 2026-05-22 and are all LIST or BID pages
+(`vendor-user-orders`, `bids`), not a work-order detail page. The AMH stack was
+overhauled 2026-06-22, after every one of them.
+
+So there is currently nothing to test the AMH detail extraction against. Needed: a dump
+of a single AMH work-order detail page, and one of a bid page, taken now.
+
 ## Requirements added by the owner 2026-07-22, not yet built
 
 ### R1. Harden the scrapers against portal version changes.
