@@ -30,9 +30,27 @@ to measure an unproven instrument is how the thing being measured survives measu
 
 | ce09442 | MSR scan read the wrong browser tab; extension vendored + linted | 1 | 1 | 1 | 0 | 3 | scraper-data-gate REFUSED a blind scraper edit, correctly |
 
+| fcf23d6 | MSR capture read fields from flattened innerText; now structural | 0 | 0 | 0 | 0 | 1 | scraper-data-gate refused a blind edit, then PASSED once a real dump was read; verify-thrash-guard blocked a 3rd run of a harness I had not scoped |
+
 ## Running totals
 
 raised 4, stood 1, real 1, wrong 0. Reviewer precision so far: 1/4.
+
+**Round 4 is the clearest result yet, and again it is a gate, not the reviewer.** The
+reviewer raised nothing on a diff that rewrote the MSR extraction mechanism. Two gates
+did the work:
+
+- `scraper-data-gate` REFUSED an edit to the scraper because no DOM dump had been read
+  that session. The edit it blocked contained three guesses about a page never seen. It
+  then passed the moment a real dump was in hand, and the dump immediately disproved the
+  leading theory (lazy-render) and revealed the real one (label/value read out of
+  flattened innerText).
+- `verify-thrash-guard` blocked a third run of a test harness whose limits had not been
+  scoped before writing it. That was a correct read of the pattern, and the block was
+  accepted rather than routed around; the assertion was verified by the commit gate.
+
+Neither is an LLM. Both are deterministic, both cost nothing per run, and both changed
+the outcome. That is now three rounds of the same shape.
 
 **Round 3 is the first evidence in PO's favour, and it is not the reviewer's.** The
 strongest result was a REFUSAL: `scraper-data-gate` blocked an edit to `scanMsrList`
