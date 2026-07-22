@@ -27,7 +27,10 @@ export default [
         setTimeout: "readonly", clearTimeout: "readonly",
         setInterval: "readonly", clearInterval: "readonly",
         fetch: "readonly", localStorage: "readonly", navigator: "readonly",
-        requestAnimationFrame: "readonly", alert: "readonly",
+        requestAnimationFrame: "readonly", cancelAnimationFrame: "readonly",
+        alert: "readonly", sessionStorage: "readonly", location: "readonly",
+        URL: "readonly", URLSearchParams: "readonly", Blob: "readonly",
+        Image: "readonly", CSS: "readonly", getComputedStyle: "readonly",
         React: "readonly", module: "writable", require: "readonly",
       },
     },
@@ -39,6 +42,18 @@ export default [
       //   rules-of-hooks: 0 after renaming a mis-named non-hook (useSuspect) -> hard error.
       "react/no-unstable-nested-components": "error",
       "react-hooks/rules-of-hooks": "error",
+      // no-undef (src): OFF until 2026-07-22, which is how `phoneMatches` shipped used
+      // but never imported in invoices.jsx. In a bundled renderer that is not a warning,
+      // it is a whole-app kill: the first call throws, React unmounts the tree, and every
+      // input on screen disappears. It read as "the search bar freezes typing" and was
+      // chased as a focus bug more than once, because a dead tree and a stuck focus look
+      // identical from the outside.
+      //
+      // Same precedent as the two rules above: severity set from what the code already
+      // passes. src/ had 24 violations, 23 of them browser globals this config simply
+      // never declared (now declared above) and exactly 1 real defect. So this goes
+      // straight to error with no legacy debt to pay down.
+      "no-undef": "error",
       // exhaustive-deps (A1/A4/A6): 73 legacy violations. Cannot block without fixing all
       // 73. Kept as a VISIBLE warning -- honestly a nag, not a gate, until the debt is
       // paid down. The verify gate fails only on errors, so this does not block today.

@@ -1,6 +1,6 @@
 {
   "name": "work-order-tracker",
-  "version": "4.5.0",
+  "version": "4.5.1",
   "description": "Work Order Tracker – Gamble Plumbing Heating and Air",
   "main": "main.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "watch:renderer": "npm run build:renderer -- --watch",
     "test": "node test/run.js",
     "test:logic": "node test/run.js --logic",
-    "lint": "eslint \"src/**/*.{js,jsx}\" \"scripts/**/*.js\" \"test/**/*.js\"",
+    "lint": "eslint \"src/**/*.{js,jsx}\" \"test/**/*.js\"",
     "verify": "npm run lint && npm run build:renderer && node test/run.js",
     "start": "npm run build:renderer && electron .",
     "build-win": "npm run build:renderer && electron-builder --win --x64",
@@ -82,6 +82,7 @@
     "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "project-overseer": "github:willemkaraffa/Project-Overseer"
   }
 }

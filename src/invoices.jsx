@@ -7,7 +7,7 @@ import { ActionBtn } from './primitives.jsx';
 import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog,
 } from './app.jsx';
-import { bidItemsToInvoiceLines, orderNumberMatches, findOtherViewMatches,
+import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 

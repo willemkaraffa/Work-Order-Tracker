@@ -30,21 +30,52 @@
 # does not create false confidence.
 
 set -e
-echo "[pre-commit] deterministic gate: npm run verify"
-npm run verify
+
+# Zeroth gate: nothing lands directly on main. Runs FIRST because it costs one git
+# call and the gates below cost a full test run; a refused commit should not pay for
+# verify it will never use.
+#
+# NO OVERRIDE KNOB, same doctrine as review-gate.js: an env var or flag Claude may
+# set is not a gate. The escape is a human action that shows up in the branch graph:
+#   git switch -c <branch>
+# A detached HEAD (rebase, bisect) yields an empty branch name and is allowed; those
+# commits are not landing on main either.
+#
+# MERGING INTO main STILL WORKS, verified rather than assumed: git does not run
+# pre-commit for `git merge`, so the normal branch-then-merge flow is untouched. What
+# this refuses is only a NEW commit authored directly on main (including --amend).
+branch=$(git symbolic-ref --short -q HEAD || true)
+if [ "$branch" = "main" ]; then
+  echo "[pre-commit] COMMIT REFUSED: direct commit to 'main'." >&2
+  echo "  Move this work to a branch, then commit there:" >&2
+  echo "    git switch -c <branch-name>" >&2
+  exit 1
+fi
+echo "[pre-commit] branch gate: on '${branch:-detached HEAD}', not main."
+
+# The verify command is the project's answer, not the frame's: `npm run verify` is
+# meaningless in a Python or Go checkout, and a gate that fails because the command
+# does not exist teaches people to pass --no-verify. Read it from overseer.json.
+#
+# NOT AN OFF SWITCH. An empty or missing value falls back to `npm run verify` rather
+# than skipping; there is deliberately no value that means "run nothing".
+VERIFY_CMD=$(node -e "process.stdout.write(require('./node_modules/project-overseer/scripts/overseer-config.js').config().verifyCommand || '')" 2>/dev/null)
+[ -n "$VERIFY_CMD" ] || VERIFY_CMD="npm run verify"
+echo "[pre-commit] deterministic gate: $VERIFY_CMD"
+sh -c "$VERIFY_CMD"
 
 # Second gate: every reviewer finding must be fixed, or dismissed with a written
 # reason. Blocks the silent drop. It does not judge whether a reason is GOOD (that
 # needs judgment); it guarantees the reason exists, is attributable, and gets
 # printed here for a human to overrule.
 echo "[pre-commit] review gate: findings must be dispositioned"
-node scripts/review-gate.js
+node node_modules/project-overseer/scripts/review-gate.js
 
 # Third gate: if a plan is APPROVED and therefore being enforced, the commit must
 # stay inside its scope and its done-steps must cite evidence that really exists.
 # No approved plan means this is a no-op, by the human's decision on 2026-07-20:
 # blocking all work whenever no plan exists would be an outage, not a gate.
 echo "[pre-commit] plan gate: scope + step evidence"
-node scripts/plan-check.js
+node node_modules/project-overseer/scripts/plan-check.js
 
 echo "[pre-commit] gate passed."
