@@ -2676,6 +2676,36 @@ function UpdateBanner({ state, onInstall }) {
 // When total is known (MSR per-WO loop) it shows a "done / total" counter + a
 // determinate bar; otherwise an indeterminate animated bar (AMH is one atomic
 // API call with no per-WO step).
+// A capture button that shows it was pressed.
+//
+// CaptureBanner already reports what a capture is doing, and it always did, but it
+// renders at the TOP of the window while the button lives in a toolbar elsewhere on
+// screen. Press it and look at it, and nothing happens: the app HAS reacted, just not
+// where the user is looking. AMH capture spawns a browser and signs in, so that dead
+// interval is many seconds long.
+//
+// Driven by the EXISTING `captureStatus`, which every capture path already sets. No new
+// state: a second in-progress flag could disagree with the banner, and two sources of
+// truth for one fact is how a spinner ends up stuck on forever.
+//
+// Hoisted rather than defined inside the render that uses it (rule A5): an inline
+// component is a new function identity every render, which remounts the button and
+// drops focus and hover.
+function CaptureButton({ busy, onClick, title, children }) {
+  return (
+    <button onClick={onClick} disabled={busy} title={title} style={{
+      height: 26, padding: '0 12px', borderRadius: 999,
+      border: '1px solid var(--border-1)', background: 'transparent',
+      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
+      fontWeight: 600, cursor: busy ? 'progress' : 'pointer', lineHeight: 1,
+      opacity: busy ? 0.65 : 1,
+    }}>
+      {busy && <span className="wo-spinner" />}
+      {children}
+    </button>
+  );
+}
+
 function CaptureBanner({ status }) {
   if (!status) return null;
   const { label, done, total } = status;
@@ -6226,20 +6256,16 @@ function App() {
               headerRight={(
                 <div style={{ display: 'flex', gap: 6 }}>
                   {(window.scraper && window.scraper.captureAllAMH) && (
-                    <button onClick={captureAllAMH} title="Capture all active AMH work orders from the portal" style={{
-                      height: 26, padding: '0 12px', borderRadius: 999,
-                      border: '1px solid var(--border-1)', background: 'transparent',
-                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
-                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
-                    }}>Capture all AMH</button>
+                    <CaptureButton busy={!!captureStatus} onClick={captureAllAMH}
+                      title="Capture all active AMH work orders from the portal">
+                      Capture all AMH
+                    </CaptureButton>
                   )}
                   {(window.extensionBridge && window.extensionBridge.requestFindNewMsr) && (
-                    <button onClick={findNewMsr} title="Scan the open MSR list page for work orders not yet in the tracker (Chrome + extension must be open)" style={{
-                      height: 26, padding: '0 12px', borderRadius: 999,
-                      border: '1px solid var(--border-1)', background: 'transparent',
-                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
-                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
-                    }}>Find new MSR WOs</button>
+                    <CaptureButton busy={!!captureStatus} onClick={findNewMsr}
+                      title="Scan the open MSR list page for work orders not yet in the tracker (Chrome + extension must be open)">
+                      Find new MSR WOs
+                    </CaptureButton>
                   )}
                 </div>
               )}

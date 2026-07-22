@@ -32,6 +32,16 @@
   .addr-link:hover { text-decoration: underline; text-underline-offset: 3px; }
   @keyframes wo-capture-slide { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
   .wo-capture-bar { animation: wo-capture-slide 1.1s ease-in-out infinite; }
+  /* Button-level busy signal. CaptureBanner already reports capture progress, but it
+     sits at the top of the window while the button the user just pressed is elsewhere,
+     so a press could look like nothing happened. */
+  @keyframes wo-spin { to { transform: rotate(360deg); } }
+  .wo-spinner {
+    display: inline-block; width: 10px; height: 10px; margin-right: 6px;
+    vertical-align: -1px; border-radius: 50%;
+    border: 2px solid currentColor; border-top-color: transparent;
+    animation: wo-spin 0.7s linear infinite;
+  }
 </style>
 </head>
 <body>
