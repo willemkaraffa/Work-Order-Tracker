@@ -26,10 +26,21 @@ to measure an unproven instrument is how the thing being measured survives measu
 | commit | what | raised | stood | real | wrong | calls | gate |
 |---|---|---|---|---|---|---|---|
 | 9496445 | invoice search lock: capture root-mounted state | 3 | 0 | 0 | 0 | 2 | verify green first try; no refusal |
+| 5df314e | invoice search lock: root cause, missing phoneMatches import | 0 | 0 | 0 | 0 | 1 | eslint no-undef, once enabled, catches it and blocks |
 
 ## Running totals
 
 raised 3, stood 0, real 0, wrong 0. Reviewer precision so far: 0/3.
+
+**First real result, and it does not favour the reviewer.** The defect was a
+whole-app crash reachable by typing one character into the invoice search bar:
+`phoneMatches` used and never imported, so render threw and React unmounted the tree.
+The reviewer looked at that exact file twice this session and raised 0 findings on it.
+`eslint --rule no-undef` finds it in under a second, points at the line, and blocks the
+commit. That rule was off for `src/` and is now on.
+
+This is the comparison HANDOFF item 1 asks for: reviewer versus a linter plus the
+deterministic gates. One data point, and the linter won it outright.
 
 For context, not part of this trial: the frame's own repo ran ~44 findings with 2
 standing before this trial opened, and 4 more with 0 standing on 2026-07-22. Those were
