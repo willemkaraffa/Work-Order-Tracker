@@ -141,6 +141,36 @@ Wanted: fixture-backed tests over these real files, with the files kept OUT of t
 (they carry payment detail) and the test SKIPping when absent, exactly like
 `test/msr-extract.test.js` already does for the DOM dump.
 
+### F11. A remittance PDF can hold MORE THAN ONE payment; only the first is reported. HIGH.
+Full-corpus run: 37 real statements, 310 rows, both shipped parsers.
+
+- MSR: 6 of 6 reconcile exactly.
+- AMH: 28 of 31 reconcile exactly.
+- 3 AMH files disagree, and all 3 are the same thing: TWO remittances concatenated into
+  one PDF, each with its own `Total:` and `EFT No:` header.
+
+| file | headers | EFTs | header sum | parser row sum |
+|---|---|---|---|---|
+| ACHVendor_v0037747_0_2.pdf | 75.00 + 2,657.97 | 723357, 723603 | 2732.97 | 2732.97 |
+| ACHVendor_v0037747_0_5 (1).pdf | 268.13 + 4,198.39 | 7125, 719187 | 4466.52 | 4466.52 |
+| ACHVendor_v0037747_0_6 (1).pdf | 175.88 + 4,872.35 | 7786, 726778 | 5048.23 | 5048.23 |
+
+Controls with a single header parse exactly, so the split is fully explained.
+
+**The rows are right.** Every line item in all 37 statements parsed correctly; this is not
+lost money. What is wrong is the whole-file cross-check and the EFT attribution:
+`parse_amh_remittance.py` takes the FIRST `Total:` and the FIRST `EFT No:` it sees, so a
+$2,732.97 payment is reported as $75.00, and rows belonging to two different EFT payments
+are labelled with one EFT number.
+
+Consequences: the built-in reconcile check (rows vs stated total) fires a false alarm on
+these files, and any per-EFT reporting is wrong for them. A user reading the total sees a
+number off by a factor of 36.
+
+Fix direction, not applied: parse per-statement blocks rather than per-file. Return a
+statement list, or at minimum sum every header and carry all EFT numbers. Note this makes
+the current `paymentTotal`/`eftNo` shape insufficient, so the app side changes too.
+
 ### F10. A third payer exists and nothing handles it. NEEDS A DECISION.
 Superior Contracting & Maintenance pays by a PO#-keyed Payout Report. Unknown whether
 this is current business or a 2025 one-off. If current, it needs its own parser; if not,
