@@ -73,6 +73,8 @@ if (typeof window !== 'undefined' && !window.__lockDebug) {
     const info = {
       tag: el && el.tagName, id: (el && el.id) || null, cls: (el && el.className) || null,
       isTyping: isTypingTarget(el), modalOpen: window.__modalOpen || 0,
+      rootChildren: (() => { const r = document.getElementById('root'); return r ? r.children.length : -1; })(),
+      inputs: document.querySelectorAll('input, textarea').length,
     };
     // eslint-disable-next-line no-console
     console.log('[lockDebug]', info);
@@ -82,10 +84,29 @@ if (typeof window !== 'undefined' && !window.__lockDebug) {
   // Passive watchdog + rescue for the text lock-out (bug_note_card_input_lock). Runs once.
   // The rescue hotkey (Ctrl+Alt+U, registered in main) both UNSTICKS focus and captures
   // state; the watchdog auto-captures when the renderer is alive but focus is stuck.
+  // Last uncaught error, kept for the snapshot. A render throw unmounts the React tree,
+  // which takes the search input (and every other focusable node) with it: keys then go
+  // nowhere and focus sits on BODY, which is indistinguishable from a "focus lock" in the
+  // old snapshot. Recording the error plus the root's child count separates those two.
+  let lastErr = null;
+  window.addEventListener('error', (e) => {
+    lastErr = { msg: String((e && e.message) || e), at: Date.now() };
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    lastErr = { msg: 'unhandledrejection: ' + String((e && e.reason && e.reason.message) || (e && e.reason) || e), at: Date.now() };
+  });
+
   const snap = (when, extra) => {
     const el = document.activeElement;
+    const root = document.getElementById('root');
     return { when, tag: el && el.tagName, id: (el && el.id) || null,
-      isTyping: isTypingTarget(el), modalOpen: window.__modalOpen || 0, ...(extra || {}) };
+      isTyping: isTypingTarget(el), modalOpen: window.__modalOpen || 0,
+      // 0 = the tree is GONE (render threw). >0 = the tree is alive and this really is
+      // a focus problem. The single fact the old capture could not supply.
+      rootChildren: root ? root.children.length : -1,
+      inputs: document.querySelectorAll('input, textarea').length,
+      lastErr,
+      ...(extra || {}) };
   };
   // Main -> renderer rescue: reset any leaked modal ref-count, blur the stuck node, and
   // log what was focused at the moment of the lock. webContents.focus() was already
