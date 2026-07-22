@@ -178,7 +178,30 @@ async function backgroundStartMsr(one) {
 }
 
 // ── Message handlers ──────────────────────────────────────────────────────────
+// Ask the APP to capture an AMH work order with its own scraper, so the extension
+// never runs a second, divergent AMH extractor (see main.js /capture-amh).
+//
+// Long timeout on purpose: the app spawns Edge and signs in. A short timeout here
+// would abort a capture that is actually working and report a failure the app cannot
+// see, which is the class of silent wrongness this change exists to remove.
+async function captureAmhViaApp(woId) {
+  try {
+    const r = await fetch(BRIDGE_URL + '/capture-amh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ woId }), signal: AbortSignal.timeout(180000),
+    });
+    if (!r.ok) return { ok: false, error: 'tracker returned HTTP ' + r.status };
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: 'Work Order Tracker is not reachable. Open the app, then capture again. (' + e.message + ')' };
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'captureAmhViaApp') {
+    captureAmhViaApp(msg.woId).then(sendResponse);
+    return true;   // async response
+  }
 
   if (msg.action === 'getDraft') {
     chrome.storage.local.get(['wo_draft'], (res) => sendResponse({ draft: res.wo_draft || {} }));

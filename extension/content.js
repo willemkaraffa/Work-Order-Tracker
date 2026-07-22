@@ -440,6 +440,16 @@
   }
 
   // ── AMH scraper ────────────────────────────────────────────────────────────
+  // DEAD AS OF 2026-07-22, and kept only until the replacement is proven on a live
+  // portal. AMH capture now goes through the app (see withCapturedData), so this
+  // second AMH extractor has no caller. It produced a narrower record than
+  // scrape_amh.py -- no contactName, no contacts, no bidAmount -- and the divergence
+  // was invisible because both paths reported success.
+  //
+  // DO NOT wire this back in as a fallback. A fallback that silently returns a poorer
+  // record is the failure this removed. Delete this function once the app path has
+  // captured a real AMH work order end to end.
+  // eslint-disable-next-line no-unused-vars
   function scrapeAMH(mappings) {
     const data = { pm: 'AMH' };
 
@@ -643,7 +653,7 @@
       chrome.storage.local.get(['wo_mappings', 'wo_saved_list'], (res) => {
         const mappings = res.wo_mappings || [];
         const list     = res.wo_saved_list || [];
-        const data     = isMSRPage() ? scrapeMSR(mappings) : scrapeAMH(mappings);
+        withCapturedData(mappings, btn, (data) => {
         // Assign an ID
         const nums = list.map(o => parseInt((o.id||'WO-000').replace('WO-',''))||0);
         data.id = 'WO-' + String(Math.max(0,...nums)+1).padStart(3,'0');
@@ -663,10 +673,52 @@
             'Click "Send All to Tracker" in the extension'
           ].filter(Boolean));
         });
+        });
       });
       });
     };
     document.body.appendChild(btn);
+  }
+
+  // Produce the record for the Capture button.
+  //
+  // MSR is scraped here, because MSR capture has always been the extension's job.
+  // AMH is NOT: it is handed to the app, which runs the same scrape_amh.py the in-app
+  // capture buttons use. Before this, the button ran its own AMH DOM scraper and
+  // returned a record with no contactName, no contacts and no bidAmount, while bulk
+  // capture of the same work order returned all three. Two extractors, one portal,
+  // silently different answers.
+  //
+  // NO FALLBACK TO THE OLD SCRAPER, deliberately. If the app is not running this
+  // REFUSES and says so. Falling back would restore the exact drift being removed, and
+  // would do it invisibly, which is worse than not capturing.
+  function withCapturedData(mappings, btn, cb) {
+    if (isMSRPage()) { cb(scrapeMSR(mappings)); return; }
+
+    const woId = extractWONumber();
+    if (!woId) {
+      resetBtn(btn);
+      showToast('Could not read the WO number', '#ef4444', ['Open the work order page, then capture']);
+      return;
+    }
+    btn.innerHTML = '⏳ Tracker capturing…';
+    chrome.runtime.sendMessage({ action: 'captureAmhViaApp', woId }, (r) => {
+      if (!r || !r.ok || !r.wo) {
+        resetBtn(btn);
+        showToast('Capture failed', '#ef4444', [
+          (r && r.error) ? String(r.error).slice(0, 120) : 'no response from Work Order Tracker',
+          'AMH capture runs in the app so it matches bulk capture.',
+        ]);
+        return;
+      }
+      cb(r.wo);
+    });
+  }
+
+  function resetBtn(btn) {
+    btn.innerHTML = '📋 Capture WO';
+    btn.style.background = '#10b981';
+    btn.disabled = false;
   }
 
   // Calls `run` as soon as the MSR record-layout grid exists, or after the deadline

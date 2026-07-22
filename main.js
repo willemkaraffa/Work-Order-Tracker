@@ -141,6 +141,44 @@ function startBridgeServer(win) {
       return;
     }
 
+    // ONE AMH EXTRACTOR, NOT TWO.
+    //
+    // The extension's on-page Capture button used to run its own DOM scraper for AMH
+    // (`scrapeAMH` in content.js) while bulk capture ran `scrape_amh.py` against the
+    // portal API. Same work order, two code paths, different answers: the button path
+    // returned no contactName, no contacts and NO BID AMOUNT, and nothing said so.
+    // Both reported success, which is how it went unnoticed.
+    //
+    // So the button now asks the APP to capture, and the app runs the same
+    // runAmhCapture the in-app buttons use. There is now one AMH extractor. Adding a
+    // field to it reaches every caller, which is the property that was missing.
+    //
+    // Slow on purpose: this spawns Edge and logs in. The extension side must allow for
+    // that; it is still faster than a wrong record.
+    if (req.method === 'POST' && req.url === '/capture-amh') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', async () => {
+        const send = (code, obj) => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(obj));
+        };
+        let woNum = '';
+        try { woNum = String((JSON.parse(body) || {}).woId || '').trim(); }
+        catch (e) { return send(400, { ok: false, error: 'bad JSON: ' + e.message }); }
+        if (!woNum) return send(400, { ok: false, error: 'no woId supplied' });
+        try {
+          const results = await runAmhCapture([woNum], amhCredential());
+          const one = results[woNum];
+          if (!one) return send(200, { ok: false, error: `WO ${woNum} not returned by the AMH scraper.` });
+          return send(200, one);
+        } catch (e) {
+          return send(200, { ok: false, error: e.message });
+        }
+      });
+      return;
+    }
+
     // /config — returns current lists so extension can sync
     if (req.method === 'GET' && req.url === '/config') {
       try {
