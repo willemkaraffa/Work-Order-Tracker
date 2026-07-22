@@ -21,6 +21,20 @@ import re
 import json
 
 
+# RECOGNIZE THE FORMAT BEFORE PARSING IT. See parse_amh_remittance.py for the incident:
+# a real $320.00 Payout Report from a third payer returned ok:true with zero rows, and
+# the app rendered an empty remittance screen with no warning because it branches only
+# on !ok. Structural markers only, so a genuinely empty MSR statement still parses.
+MSR_MARKERS = ('Total For', 'Invoice Notes', 'Statement Total', 'Vendor ACH Payment Detail')
+UNRECOGNIZED = ('unrecognized remittance format: no MSR markers found (expected one of: '
+                + '; '.join(MSR_MARKERS) + '). This file was NOT parsed. If it is a real '
+                'remittance, it is from a different payer or MSR changed the layout.')
+
+
+def looks_like_msr(text):
+    return any(mark in text for mark in MSR_MARKERS)
+
+
 def parse_text(text):
     # `Total For <propCode> <amount>` terminates each WO block unambiguously. Slice
     # the text at those boundaries so every field is extracted from its OWN block
@@ -54,7 +68,11 @@ def _address_in_block(block):
     # date tail up to "Invoice Notes", strip the injected noise, and collapse. This
     # is ADVISORY only -- the app matches by WO id and prefers the folder's address;
     # an address-only match is flagged "verify". '' when the shape is not found.
-    m = re.search(r'-\s*\d{2}/\d{2}/\d{2}\b(.*?)Invoice Notes', block, re.S)
+    # Year is \d{2,4}: every real statement to date uses a 2-digit tail (32/32 rows
+    # parse an address), but \d{2}\b cannot match a 4-digit year at all, and the failure
+    # would be a silently blank address rather than an error. Cheap insurance against a
+    # layout change, which is how this scraper has broken before.
+    m = re.search(r'-\s*\d{2}/\d{2}/\d{2,4}\b(.*?)Invoice Notes', block, re.S)
     if not m:
         return ''
     seg = m.group(1)
@@ -91,6 +109,10 @@ def main():
         text = '\n'.join(text_parts)
     except Exception as e:  # noqa: BLE001 - report any read failure to the caller
         print(json.dumps({'ok': False, 'error': 'PDF read failed: ' + str(e)}))
+        return 1
+
+    if not looks_like_msr(text):
+        print(json.dumps({'ok': False, 'error': UNRECOGNIZED}))
         return 1
 
     rows, statement_total = parse_text(text)
