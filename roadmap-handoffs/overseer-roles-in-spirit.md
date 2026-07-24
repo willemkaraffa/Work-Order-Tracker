@@ -199,7 +199,7 @@ Status column added 2026-07-24.
 
 | # | Item | Why it belongs | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Commit-authority gate: coder may not run `git commit` / `git push` / type the trailer | The human's ruling in section 0 is currently unenforced | Bash `agent_id` probe | BUILT `bb95245`, **NOT ARMED** |
+| 1 | Commit-authority gate: coder may not run `git commit` / `git push` / type the trailer | The human's ruling in section 0 is currently unenforced | Bash `agent_id` probe | DONE, armed `1c44d41` |
 | 2 | Scoped grants: lock re-checks a recorded path list | Grant is unscoped today | none | NOT BUILT |
 | 3 | Spawn limiter: 1 free, 2nd needs human grant, 3rd blocked as declared failure | Enforces the budget | none | NOT BUILT |
 | 4 | Minimal coder agent definitions (`editor`, `builder`) | ~half of coder spend is unused schema | none | DONE, live |
@@ -304,18 +304,23 @@ Shipped as `bb95245`: `.claude/hooks/commit-authority-gate.js` plus 28 tests in
 from typing the `Role-Definition-Approved:` trailer in a command, an `Edit`
 `new_string` or a `Write` `content`. No `agent_id` passes unconditionally.
 
-**IT IS NOT ARMED, and that is the open follow-up.** The human answered the role-lock
-prompt with "Keep locked", so the gate is registered nowhere and invokes on nothing.
-Arming it is three edits to two locked files:
+**ARMED in `1c44d41`, and PROVEN LIVE.** It first shipped inert: the human answered the
+role-lock prompt "Keep locked", so the gate was registered nowhere. They then unlocked
+it, and it now runs first in the `Bash`, `PowerShell`, `Edit` and `Write` `PreToolUse`
+chains, with the file in `overseer.json` `guards` and `roles.locked` like its three
+siblings.
 
-- `.claude/settings.json`: add the hook to the `Bash`, `PowerShell`, `Edit` and `Write`
-  `PreToolUse` matchers.
-- `overseer.json`: add it to `guards` so `role-lock-check.js` counts it, and to
-  `roles.locked` so it cannot be edited by the party it constrains, matching the three
-  sibling gates.
+The proof is not the test suite. A read-only probe subagent ran two commands:
+`git status --short` returned the working tree, and `git tag --list` was REFUSED with
+exit 2 and the `[commit-authority]` message. The overseer's own shell calls in the same
+session were unaffected. Two things that were assumptions are now measured: the
+`agent_id` discriminator works end to end through the real harness, and **hook edits to
+`.claude/settings.json` take effect MID-SESSION**, with no restart.
 
-Until then its green test suite proves the logic, not that anything is being blocked.
-The hook says so in its own header for exactly this reason.
+**Accepted over-block:** `git tag --list` is read-only but matches the `git tag` verb, so
+a subagent cannot list tags. Narrowing the verb to its mutating forms would mean a second
+parser for no benefit at this size. Recorded so the next reader knows it is a decision,
+not an oversight.
 
 **The verb list is a constant, not pure config, and that was forced.** `coder-role-gate.js`
 reads its scope wholly from `overseer.json` and fails OPEN (empty list) on a missing key.
@@ -329,10 +334,13 @@ exist and faking it against a fixture `cwd` would test the fixture, not the real
 refused, and the plan was re-drafted by the architect on the smaller file set BEFORE
 dispatch rather than after, so the refusal cost a Gemini call and no coder spend.
 
-**The reviewer scored 0 for 1. Third consecutive session at zero.** One finding, that
-concatenating `new_string` and `content` could split the trailer across the boundary;
-the architect dismissed it, correctly, because the two are joined with `\n`. The
-structural-guessing claim now has three sessions of evidence behind it.
+**The reviewer scored 0 for 2. Third consecutive session at zero.** First finding: that
+concatenating `new_string` and `content` could split the trailer across the boundary,
+dismissed because the two are joined with `\n`. Second, on the arming commit: that
+registering the gate on `Bash` creates a circular dependency, dismissed because the hook
+is a child process reading stdin that issues no tool calls and so cannot re-enter itself.
+Both were answerable from the code in front of it. The structural-guessing claim now has
+three sessions of evidence behind it.
 
 **The coder found three holes the brief did not anticipate**, all recorded in the hook:
 `git commit-tree` and other hyphen-extended plumbing needed `(?![\w-])` rather than `\b`;
