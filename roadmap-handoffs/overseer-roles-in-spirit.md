@@ -322,6 +322,46 @@ a subagent cannot list tags. Narrowing the verb to its mutating forms would mean
 parser for no benefit at this size. Recorded so the next reader knows it is a decision,
 not an oversight.
 
+**A BYPASS SURVIVED ARMING, fixed in `aec8f2d`.** The verb matcher required the head word
+and the verb to be ADJACENT, so any standard global flag between them walked through:
+
+```
+allowed   git -C . commit -m x
+allowed   git --no-pager commit -m x
+allowed   npm --prefix . publish
+blocked   git commit
+```
+
+The gate was armed, live-proven, and wrong, all at once. `git -C <path> commit` is not an
+exotic evasion; it is what a subagent working out of a subdirectory types.
+
+The fix is the mechanism: between the head token and the verb tail, allow a run of FLAG
+tokens and their values, and nothing else. Flag and value tokens exclude `;`, `&` and `|`,
+so a run cannot straddle a command separator. Multi-word verbs match head-then-tail, so
+`gh --repo o/n pr create` blocks as well. The looser rule of matching head and verb
+anywhere in one command segment was REJECTED and the reason is in the code comment: it
+regresses `git stash push` and `git log --grep commit`, both correct today.
+
+Verified by a 14-case shell probe piping payloads into the real hook: 5 blocked as
+required, 9 allowed as required. Two accepted over-blocks remain, both needing a flag
+value literally named after the verb (`git -C commit status`, and the non-real
+`git --grep commit`). Both fail toward the gate.
+
+**THE METHOD LESSON MATTERS MORE THAN THE REGEX.** The reviewer ran on the very commits
+carrying this bypass and never went near it. A fourteen-line shell loop found it in one
+call. A gate is a thing that either fires or does not; PROBE IT WITH REAL PAYLOADS, do
+not review it by reading. Every claim in this document that rests on reading rather than
+running should be treated as unproven until someone runs it.
+
+**Spawn 2 was used this session**, patch-level, on the human's explicit instruction after
+the bypass was reported. Section 4 permits that once the human is alerted. Verify budget
+2 of 2, green on the first attempt.
+
+**Still open from the same review:** the `blockedVerbs` config-override branch reading
+`roles.commitAuthority.mayNotRun` has NEVER executed. The key was deliberately not added
+when `overseer.json` was armed, so the branch is dead code with no test. Either exercise
+it against a fixture `cwd` or delete it and leave `DEFAULT_BLOCKED` as the only list.
+
 **The verb list is a constant, not pure config, and that was forced.** `coder-role-gate.js`
 reads its scope wholly from `overseer.json` and fails OPEN (empty list) on a missing key.
 Copying that here would have produced a gate that enforced NOTHING while looking
@@ -339,8 +379,14 @@ concatenating `new_string` and `content` could split the trailer across the boun
 dismissed because the two are joined with `\n`. Second, on the arming commit: that
 registering the gate on `Bash` creates a circular dependency, dismissed because the hook
 is a child process reading stdin that issues no tool calls and so cannot re-enter itself.
-Both were answerable from the code in front of it. The structural-guessing claim now has
-three sessions of evidence behind it.
+Both were answerable from the code in front of it. A third run, on the bypass fix, raised
+nothing at all.
+
+Worse than zero: those first two runs read the exact file carrying the flag-between-words
+bypass and did not see it, then dismissed themselves into silence on it. The score is not
+just "no value added", it is "false comfort supplied at the moment a real defect was on
+screen". The structural-guessing claim now has three sessions of evidence and one
+concrete miss behind it.
 
 **The coder found three holes the brief did not anticipate**, all recorded in the hook:
 `git commit-tree` and other hyphen-extended plumbing needed `(?![\w-])` rather than `\b`;
