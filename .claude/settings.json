@@ -47,14 +47,20 @@
       {
         "matcher": "Edit",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/role-lock.js" },
+          { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/user-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/role-lock.js" },
+          { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/user-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       }

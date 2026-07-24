@@ -2,6 +2,17 @@
   "verifyCommand": "npm run verify",
   "rubricFile": ".claude/rubric.md",
   "guards": [
-    { "file": "scraper-data-gate.js", "label": "scraper data gate" }
-  ]
+    { "file": "scraper-data-gate.js", "label": "scraper data gate" },
+    { "file": "user-authority-gate.js", "label": "user authority gate" },
+    { "file": "coder-role-gate.js", "label": "coder role gate" },
+    { "file": "role-lock.js", "label": "role lock" },
+    { "file": "role-lock-check.js", "label": "role lock commit check" }
+  ],
+  "roles": {
+    "overseer": {
+      "may": ["dispatch subagents", "ask the human", "run architect/reviewer/verify", "read", "write docs and plans"],
+      "mayNotWrite": ["src/**", "extension/**", "main.js", "preload.js", "**/*.py", "scripts/**", "test/**", ".claude/hooks/**"]
+    },
+    "locked": [".claude/settings.json", "overseer.json", ".githooks/**", ".claude/hooks/coder-role-gate.js", ".claude/hooks/role-lock.js", ".claude/hooks/role-lock-check.js"]
+  }
 }

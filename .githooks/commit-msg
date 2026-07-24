@@ -1,0 +1,9 @@
+#!/bin/sh
+# commit-msg: the role-definition gate lives here, not in pre-commit.
+#
+# git does not write the pending commit message to .git/COMMIT_EDITMSG until AFTER
+# pre-commit runs, so a check reading that file from pre-commit was reading the
+# PREVIOUS commit's message -- refusing every real approval and risking a stale
+# trailer false-passing later work. commit-msg is handed the pending message's file
+# path as $1, which is the only point in the flow that can actually read it.
+node .claude/hooks/role-lock-check.js "$1"

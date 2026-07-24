@@ -78,4 +78,10 @@ node node_modules/project-overseer/scripts/review-gate.js
 echo "[pre-commit] plan gate: scope + step evidence"
 node node_modules/project-overseer/scripts/plan-check.js
 
+# Fourth gate: the coder may not decide who owns a field, and may not touch capture
+# code on its own authority. Deterministic, no LLM involved. Added 2026-07-22 after a
+# capture change silently overwrote a user-set WO status with the portal's raw value.
+echo "[pre-commit] user-authority gate: field ownership + scraper plan"
+node .claude/hooks/user-authority-check.js
+
 echo "[pre-commit] gate passed."
