@@ -11,12 +11,14 @@
       {
         "matcher": "Bash",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "PowerShell",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
@@ -47,6 +49,7 @@
       {
         "matcher": "Edit",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node .claude/hooks/role-lock.js" },
           { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
@@ -57,6 +60,7 @@
       {
         "matcher": "Write",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node .claude/hooks/role-lock.js" },
           { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
