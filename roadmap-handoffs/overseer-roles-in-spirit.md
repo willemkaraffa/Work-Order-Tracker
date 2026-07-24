@@ -357,10 +357,32 @@ running should be treated as unproven until someone runs it.
 the bypass was reported. Section 4 permits that once the human is alerted. Verify budget
 2 of 2, green on the first attempt.
 
-**Still open from the same review:** the `blockedVerbs` config-override branch reading
-`roles.commitAuthority.mayNotRun` has NEVER executed. The key was deliberately not added
-when `overseer.json` was armed, so the branch is dead code with no test. Either exercise
-it against a fixture `cwd` or delete it and leave `DEFAULT_BLOCKED` as the only list.
+**Still open, in the order they should be taken:**
+
+1. **Reorder the model chain.** Put `gemini-flash-latest` ahead of `gemini-3.1-flash-lite`
+   in `MODELS` and drop the 404 entry `gemini-2.5-flash`. This is the highest-value item
+   on the list: it is a one-line change that upgrades every reviewer and architect call
+   the project makes. It lives UPSTREAM in `C:\dev\Project-Overseer`, so it carries the
+   push-and-install loop.
+2. **Delete the dead `blockedVerbs` config-override branch.** It reads
+   `roles.commitAuthority.mayNotRun`, a key deliberately never added when `overseer.json`
+   was armed, so it has never executed and has no test. Drop `blockedVerbs()`, use
+   `DEFAULT_BLOCKED` directly, drop the now-unused `path` require. KEEP the
+   `words.length < 2` guard in `verbMatcher`: it stops a future one-word verb from
+   silently building a broken regex. Ruled by the human 2026-07-24 to defer rather than
+   take a third coder spawn.
+3. **Two bypass candidates, still walking through the fixed matcher**, both surfaced by
+   the `gemini-flash-latest` eval above:
+
+```
+rc=0  git-commit -m x     dashed plumbing form
+rc=0  git ci -m x         alias form
+```
+
+   Low severity TODAY, and the reason is measured, not assumed: modern git removed dashed
+   forms from `PATH`, and `git config --get-regexp '^alias\.'` returns nothing on this
+   machine. Either change makes them live. A fix would need the alias set read at gate
+   time, which is a real design question, not a regex tweak.
 
 **The verb list is a constant, not pure config, and that was forced.** `coder-role-gate.js`
 reads its scope wholly from `overseer.json` and fails OPEN (empty list) on a missing key.
@@ -382,11 +404,53 @@ is a child process reading stdin that issues no tool calls and so cannot re-ente
 Both were answerable from the code in front of it. A third run, on the bypass fix, raised
 nothing at all.
 
-Worse than zero: those first two runs read the exact file carrying the flag-between-words
-bypass and did not see it, then dismissed themselves into silence on it. The score is not
-just "no value added", it is "false comfort supplied at the moment a real defect was on
-screen". The structural-guessing claim now has three sessions of evidence and one
-concrete miss behind it.
+### RETRACTED: the reviewer was never the problem. The MODEL was.
+
+An earlier draft of this section called the reviewer structurally guessing and cited a
+0-for-N record across three sessions. **That verdict is withdrawn.** It rests on a
+confound nobody checked until it was tested:
+
+```
+MODELS = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-2.5-flash']
+```
+
+Every reviewer and architect call this session logged `gemini-3.5-flash: 503` or
+`429: trying next model`. All of them ran on `gemini-3.1-flash-lite`, the lite fallback.
+**The intended model never answered once.** A score against a model that never ran is not
+evidence about the role.
+
+**The eval that settled it, with ground truth known in advance.** The PRE-fix hook from
+`bb95245` was handed to `gemini-flash-latest` with a plain correctness question. In ONE
+call it named:
+
+```
+git -C . commit -m "msg"          the exact bypass the lite model missed twice
+git --no-pager commit -m "msg"    same
+git -c user.name="Dev" commit     same
+git-commit -m "msg"               NEW, nobody had found it
+git ci -m "msg"                   NEW, alias form
+```
+
+**Model chain, probed id by id rather than assumed:**
+
+```
+gemini-3.5-flash       429 on the free tier with billing off   primary, never answers
+gemini-3.1-flash-lite  answers everything, weak                serves every call today
+gemini-flash-latest    works, clearly stronger                 sits third, never reached
+gemini-2.5-flash       404, the model does not exist           dead entry
+```
+
+**The rubric is NOT at fault, checked rather than assumed.** A suspicion that
+`gemini-review.js` was eating safety refusals is withdrawn: its rubric is a plain
+code-review prompt with no adversarial framing. The one refusal observed came from the
+overseer's own eval prompt, which asked for "bypasses for a security gate" and was
+refused outright; rewording it as a correctness question got the full answer above. That
+is a lesson about how to ask, not a defect in the reviewer.
+
+**Generalisable, and it cost a wrong verdict in a permanent document to learn:** a role's
+quality verdict is INVALID unless the model that actually served the calls is known. The
+fallback chain is silent by design and the served model is printed only in a log line
+nobody was reading. Log the served model with every scored run.
 
 **The coder found three holes the brief did not anticipate**, all recorded in the hook:
 `git commit-tree` and other hyphen-extended plumbing needed `(?![\w-])` rather than `\b`;
