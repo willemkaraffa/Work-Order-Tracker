@@ -89,14 +89,27 @@ function blockedVerbs(root) {
   return DEFAULT_BLOCKED;
 }
 
-// "git commit" -> /\bgit\s+commit(?![\w-])/i
+// "git commit" -> /\bgit(?:\s+-{1,2}[\w-]+(?:=[^\s;&|]+)?(?:\s+(?!-)[^\s;&|]+)?)*\s+commit(?![\w-])/i
 //   - not anchored, so a verb after ";", "&&" or a pipe is caught
 //   - \s+ between words, so "git   commit" is caught
 //   - leading \b, so "mygit commit" is not this verb
 //   - trailing (?![\w-]), so "git commits" and "git pushing" are not this verb
+//   - FLAG RUN between the head word and the tail. Requiring the head and the verb to be
+//     ADJACENT was a measured bypass: "git -C . commit", "git --no-pager commit",
+//     "git -c user.name=x commit" and "npm --prefix . publish" all walked straight
+//     through, and they are ordinary typing, not evasion. Only flag tokens (-x, --xyz,
+//     --xyz=value) and ONE non-flag value token after a flag may sit in the gap, and
+//     nothing may cross a ";", "&&" or a pipe. Multi-word verbs keep working because the
+//     gap is head-to-tail only: "gh --repo owner/name pr create" is blocked.
+// REJECTED, and do not "simplify" it back: matching head and verb anywhere in the same
+// segment ("\bgit\b[^;&|]*?\bcommit") is looser and REGRESSES two commands that behave
+// correctly today -- it would newly block "git stash push" and "git log --grep commit".
+// The flag-run rule leaves both allowed.
 function verbMatcher(verb) {
   const words = String(verb).trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  return new RegExp('\\b' + words.join('\\s+') + '(?![\\w-])', 'i');
+  if (words.length < 2) return new RegExp('\\b' + words[0] + '(?![\\w-])', 'i');
+  const flagRun = '(?:\\s+-{1,2}[\\w-]+(?:=[^\\s;&|]+)?(?:\\s+(?!-)[^\\s;&|]+)?)*';
+  return new RegExp('\\b' + words[0] + flagRun + '\\s+' + words.slice(1).join('\\s+') + '(?![\\w-])', 'i');
 }
 
 function main() {

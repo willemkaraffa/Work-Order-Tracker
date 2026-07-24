@@ -72,6 +72,30 @@ t('a verb after a semicolon blocks', () => {
   assert.strictEqual(coder({ command: 'npm run verify ; git commit -m "x"' }).status, 2);
 });
 
+// --- REGRESSION: a global flag between the head word and the verb used to walk through.
+// The matcher required the two words to be ADJACENT, so any standard flag defeated the
+// gate. Measured, not guessed: all four of these returned rc=0 while "git commit" got 2.
+
+t('REGRESSION (flag-between-words bypass): git -C . commit blocks', () => {
+  assert.strictEqual(coder({ command: 'git -C . commit -m x' }).status, 2);
+});
+
+t('REGRESSION (flag-between-words bypass): git --no-pager commit blocks', () => {
+  assert.strictEqual(coder({ command: 'git --no-pager commit -m x' }).status, 2);
+});
+
+t('REGRESSION (flag-between-words bypass): git -c user.name=x commit blocks', () => {
+  assert.strictEqual(coder({ command: 'git -c user.name=x commit' }).status, 2);
+});
+
+t('REGRESSION (flag-between-words bypass): npm --prefix . publish blocks', () => {
+  assert.strictEqual(coder({ command: 'npm --prefix . publish' }).status, 2);
+});
+
+t('a multi-word verb behind a flag blocks (head/tail, not adjacency)', () => {
+  assert.strictEqual(coder({ command: 'gh --repo owner/name pr create --fill' }).status, 2);
+});
+
 // --- the approval trailer ---
 
 t('trailer in a Bash command blocks', () => {
@@ -107,6 +131,13 @@ t('subagent ALLOWED: near-misses on the verb list (word boundary)', () => {
   assert.strictEqual(coder({ command: 'git checkout pushing-branch-name' }).status, 0);
   assert.strictEqual(coder({ command: 'git commits' }).status, 0);
   assert.strictEqual(coder({ command: 'git pushing' }).status, 0);
+});
+
+// The flag-run rule allows ONLY flags (and one value each) in the gap. These two are the
+// commands a looser "head ... verb anywhere in the segment" rule would wrongly block.
+t('subagent ALLOWED: a non-flag word in the gap is not a flag run', () => {
+  assert.strictEqual(coder({ command: 'git stash push' }).status, 0);
+  assert.strictEqual(coder({ command: 'git log --grep commit' }).status, 0);
 });
 
 // DOCUMENTED HOLE, asserted so it is visible rather than assumed shut. A PreToolUse hook
