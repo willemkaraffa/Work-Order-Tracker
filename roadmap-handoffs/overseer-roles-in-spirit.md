@@ -199,7 +199,7 @@ Status column added 2026-07-24.
 
 | # | Item | Why it belongs | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Commit-authority gate: coder may not run `git commit` / `git push` / type the trailer | The human's ruling in section 0 is currently unenforced | Bash `agent_id` probe | NOT BUILT, next |
+| 1 | Commit-authority gate: coder may not run `git commit` / `git push` / type the trailer | The human's ruling in section 0 is currently unenforced | Bash `agent_id` probe | BUILT `bb95245`, **NOT ARMED** |
 | 2 | Scoped grants: lock re-checks a recorded path list | Grant is unscoped today | none | NOT BUILT |
 | 3 | Spawn limiter: 1 free, 2nd needs human grant, 3rd blocked as declared failure | Enforces the budget | none | NOT BUILT |
 | 4 | Minimal coder agent definitions (`editor`, `builder`) | ~half of coder spend is unused schema | none | DONE, live |
@@ -292,4 +292,72 @@ architect, both misreads of code that was in front of it (a `path.basename` call
 lines up, in the second case). Consistent with the upstream handoff's claim that the
 reviewer is structurally guessing. It cost two Gemini calls per commit to learn nothing.
 
-**Next session: item 1** (commit-authority gate), then 2, then 3. One item.
+**Next session: item 2** (scoped grants), then 3.
+
+---
+
+## 7. Session log, 2026-07-24: item 1, the commit-authority gate
+
+Shipped as `bb95245`: `.claude/hooks/commit-authority-gate.js` plus 28 tests in
+`test/commit-authority-gate.test.js`. Blocks a subagent (`agent_id` present) from
+`git commit`, `git push`, `git tag`, `gh pr create`, `gh release`, `npm publish`, and
+from typing the `Role-Definition-Approved:` trailer in a command, an `Edit`
+`new_string` or a `Write` `content`. No `agent_id` passes unconditionally.
+
+**IT IS NOT ARMED, and that is the open follow-up.** The human answered the role-lock
+prompt with "Keep locked", so the gate is registered nowhere and invokes on nothing.
+Arming it is three edits to two locked files:
+
+- `.claude/settings.json`: add the hook to the `Bash`, `PowerShell`, `Edit` and `Write`
+  `PreToolUse` matchers.
+- `overseer.json`: add it to `guards` so `role-lock-check.js` counts it, and to
+  `roles.locked` so it cannot be edited by the party it constrains, matching the three
+  sibling gates.
+
+Until then its green test suite proves the logic, not that anything is being blocked.
+The hook says so in its own header for exactly this reason.
+
+**The verb list is a constant, not pure config, and that was forced.** `coder-role-gate.js`
+reads its scope wholly from `overseer.json` and fails OPEN (empty list) on a missing key.
+Copying that here would have produced a gate that enforced NOTHING while looking
+installed, because `overseer.json` was locked and the key could not be created. So
+`DEFAULT_BLOCKED` is the floor and `roles.commitAuthority.mayNotRun` overrides it only
+when present and non-empty. The override branch is therefore UNTESTED: the key does not
+exist and faking it against a fixture `cwd` would test the fixture, not the real config.
+
+**Spawn budget: 1 of 1.** One `builder`. The scope shrank mid-session when the unlock was
+refused, and the plan was re-drafted by the architect on the smaller file set BEFORE
+dispatch rather than after, so the refusal cost a Gemini call and no coder spend.
+
+**The reviewer scored 0 for 1. Third consecutive session at zero.** One finding, that
+concatenating `new_string` and `content` could split the trailer across the boundary;
+the architect dismissed it, correctly, because the two are joined with `\n`. The
+structural-guessing claim now has three sessions of evidence behind it.
+
+**The coder found three holes the brief did not anticipate**, all recorded in the hook:
+`git commit-tree` and other hyphen-extended plumbing needed `(?![\w-])` rather than `\b`;
+quoted or variable-indirect commands (`git "commit"`, `$v="git push"; iex $v`) walk
+through any string matcher; and `agent_type` is unused, so an architect ever run as a
+subagent would be blocked despite holding the authority.
+
+### New defects, belonging in section 2
+
+6. **The approval channel key-matches the question text EXACTLY.** `user-grant.js` does
+   a `hasOwnProperty` lookup on the question string, so `plan-approve.js` sees nothing
+   if the `AskUserQuestion` carried any extra body text alongside the required
+   sentence. It cost a wasted human round-trip this session: the human pressed
+   "Approve" and the script reported "no human approval on record", which is
+   indistinguishable from a refusal. A `startsWith` or normalised match would fix it.
+
+7. **`verify-budget-guard.js` keys on command TEXT, not on gate runs.** Citing the
+   literal string `npm run verify` as `plan-step.js` evidence counted as a gate run.
+   It fired "you have run the FULL GATE 4 times" in a session that ran it twice, once
+   by the coder and once by `pre-commit`. A warning that cries wolf is training to
+   ignore it, which is the same failure mode as an advisory gate.
+
+8. **A COMPLETED plan cannot be closed.** `.plan.json` stays `status: approved` with
+   every step done, and `ACTIVE` in `plan.js` has no terminal state, so a finished plan
+   keeps enforcing its scope over all unrelated work indefinitely. The only exit is to
+   overwrite it with the next plan, which is what this session did to update this very
+   document. There is no sanctioned "done" write path; `plan-step.js` reaches only
+   `done` and `evidence`.
