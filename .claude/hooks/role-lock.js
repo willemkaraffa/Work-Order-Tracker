@@ -28,7 +28,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const QUESTION = 'Unlock the role definition for editing?';
+// SCOPED grant. The question names the exact repo-relative file, so the human's
+// answer unlocks THAT path only, not every locked path for the session. The lock
+// rebuilds this same string from the file it is checking and reads the human's
+// answer to it; a grant for overseer.json does not unlock role-lock.js. To unlock
+// several files, ask several of these in one AskUserQuestion call (its questions
+// array), one per path.
+const question = (rel) => 'Unlock the role definition for editing "' + rel + '"?';
 
 // Locked paths live in overseer.json so the human can inspect them.
 // Any config problem returns [] -> nothing is locked -> fail OPEN.
@@ -98,9 +104,11 @@ function main() {
   } catch { return; }
 
   // A missing transcript_path is NOT an error: it just means no grant is
-  // provable, so the file stays locked.
+  // provable, so the file stays locked. The grant is keyed on THIS file's
+  // question, so a grant for a different locked path will not match here.
+  const q = question(rel);
   let ans = null;
-  try { ans = lastUserGrant(input.transcript_path, QUESTION); } catch { ans = null; }
+  try { ans = lastUserGrant(input.transcript_path, q); } catch { ans = null; }
   if (typeof ans === 'string' && /^unlock/i.test(ans.trim())) return;
 
   process.stderr.write(
@@ -116,7 +124,7 @@ function main() {
     'The only way through is to ask the human, with the AskUserQuestion tool,\n' +
     'using this exact question text:\n' +
     '\n' +
-    '  ' + QUESTION + '\n' +
+    '  ' + q + '\n' +
     '\n' +
     'Rewording the question, or answering it yourself in any way -- echoing the\n' +
     'answer, writing it into a file, narrating that the user agreed -- is\n' +

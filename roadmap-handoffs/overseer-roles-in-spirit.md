@@ -200,7 +200,7 @@ Status column added 2026-07-24.
 | # | Item | Why it belongs | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Commit-authority gate: coder may not run `git commit` / `git push` / type the trailer | The human's ruling in section 0 is currently unenforced | Bash `agent_id` probe | DONE, armed `1c44d41` |
-| 2 | Scoped grants: lock re-checks a recorded path list | Grant is unscoped today | none | NOT BUILT |
+| 2 | Scoped grants: lock re-checks a recorded path list | Grant is unscoped today | none | DONE (uncommitted) |
 | 3 | Spawn limiter: 1 free, 2nd needs human grant, 3rd blocked as declared failure | Enforces the budget | none | NOT BUILT |
 | 4 | Minimal coder agent definitions (`editor`, `builder`) | ~half of coder spend is unused schema | none | DONE, live |
 | 5 | Dispatch token replacing `agent_id` | Restores model agnosticism | design ruling | DEFERRED by ruling |
@@ -479,3 +479,122 @@ subagent would be blocked despite holding the authority.
    overwrite it with the next plan, which is what this session did to update this very
    document. There is no sanctioned "done" write path; `plan-step.js` reaches only
    `done` and `evidence`.
+
+---
+
+## 8. Session log, 2026-07-27: item 2, scoped grants
+
+**DONE, uncommitted.** Defect 1 (section 2) is closed: the unlock grant is no longer
+session-wide across every locked path.
+
+**Mechanism, ruled by the human: bake the path into the question.** `role-lock.js` no
+longer holds a fixed `QUESTION` constant. It builds
+`Unlock the role definition for editing "<rel>"?` from the exact repo-relative file it
+is checking, and reads the human's answer to THAT string. A grant for `overseer.json`
+does not match the question for `.claude/settings.json`, so it does not unlock it.
+`lastUserGrant` is reused UNCHANGED; no new state file, no new `overseer.json` key. Several
+files in one shot go through `AskUserQuestion`'s questions array, one question per path.
+
+The alternative (item 2's title, "record a path list the lock re-checks") was put to the
+human and REJECTED in favour of the above: same scoping guarantee, less machinery, and it
+touches nothing but `role-lock.js`.
+
+**Does NOT worsen defect 6.** The exact-match in `user-grant.js` is a hazard for questions
+carrying extra body text, but `role-lock` reconstructs the question deterministically from
+`rel` with no extra text, so match is exact by construction on both ends.
+
+**Verified: `npm run verify` green, 21 pass / 0 fail.** The load-bearing test is new:
+`a grant for one locked path does not unlock another` proves the scope bites (grant for
+`overseer.json` -> status 0; same transcript, `.claude/settings.json` -> status 2). Build
+produced `bundle/app.js`; lint 98 warnings / 0 errors (pre-existing).
+
+**Spawn budget: 1 of 1.** One `builder`. The edit target `.claude/hooks/role-lock.js` is
+BOTH locked and overseer-`mayNotWrite`, so it needed a subagent (for `coder-role-gate`)
+AND a human unlock (for `role-lock` itself). Both cleared: `role-lock` read the grant off
+the PARENT transcript on the subagent's PreToolUse, confirming again that the human's
+answer in the main session is visible to a dispatched coder. The design fork and the
+unlock were settled in ONE `AskUserQuestion` before dispatch, so the spawn ran on a
+settled spec.
+
+**Reviewer: NOT run.** The Gemini reviewer scored 0-for-N until the model reorder in
+`7495de1`, and this change is small with its scope proven by the new test. Deferred to the
+human's call rather than spent by default.
+
+**Next session: item 3** (spawn limiter). Design SETTLED below 2026-07-27, spawn-free,
+dispatch it as spawn 1 of that session.
+
+---
+
+## 9. Item 3 spawn limiter: SETTLED design (2026-07-27, not yet built)
+
+**Rule enforced:** 1 coder spawn free, 2nd needs a human grant, 3rd+ hard-blocks as a
+declared major system failure (doc section 5). Read-only spawns are unlimited.
+
+**Two forks ruled by the human 2026-07-27:**
+- **Count scope: CODER spawns only.** Read-only investigators / `Explore` / `Plan` run
+  free and do not count. The budget is about the "one coder spawn" discipline, and a
+  13.6k investigator before a builder is normal, not abuse.
+- **2nd-spawn grant channel: the structural `AskUserQuestion` read**, same forge-proof
+  mechanism as `role-lock` (`lastUserGrant`), NOT a new channel.
+
+**New hook `.claude/hooks/spawn-limiter.js`, PreToolUse on `Agent`.** Registered in
+`settings.json` Agent chain AFTER `role-router.js`, so reviewer/architect spawns (which
+role-router blocks first) never reach it and never count. Fails OPEN on any error.
+
+**Counting, derived from `transcript_path` alone (no `projectKey` needed, and this is what
+makes it testable):** the transcript lives at `.../projects/<key>/<sessionId>.jsonl` and
+subagent metas at `.../projects/<key>/<sessionId>/subagents/agent-*.meta.json`. So
+`dir = path.dirname(transcript_path)`, `sessionId = path.basename(transcript_path,'.jsonl')`,
+subagents dir = `path.join(dir, sessionId, 'subagents')`. Count `*.meta.json` whose
+`agentType` (the field is confirmed present: `{"agentType":"builder",...}`) is in
+`CODER_TYPES`, lowercased. The meta is written at spawn START, and the CURRENT spawn's
+PreToolUse fires BEFORE its meta exists, so the count is exactly the number of PRIOR coder
+spawns. Confirmed on a live session: one item-2 `builder` meta present, its jsonl still
+being written.
+
+Do NOT reuse `cost-ledger.spawnCount` (it cannot filter by type) nor `agentsFor` (it runs
+a full-jsonl `tally` per agent purely to count, needless IO on a per-spawn hook). A ~6-line
+inline meta-reader is the right size; it reads the same files, so it is not a parallel
+system.
+
+**`CODER_TYPES`** (write-capable, lowercased): `builder`, `editor`,
+`caveman:cavecrew-builder`, `general-purpose`, `claude`. Accepted imprecision: type is a
+proxy for capability. `general-purpose`/`claude` are catch-alls that CAN write, so they
+count (conservative); a write task mislabeled `Explore` would slip, a read task labeled
+`general-purpose` over-counts. Good enough, documented.
+
+**Logic.** `n = priorCoders + 1`.
+- `n === 1` -> allow.
+- `n === 2` -> `ans = lastUserGrant(transcript_path, 'Grant a second coder spawn this session?')`;
+  allow iff `/^grant/i` on `ans.trim()`, else BLOCK (exit 2). Message: this is spawn 2;
+  per section 5 it needs the roles revised and roughly patch-level scope, and the human's
+  grant via `AskUserQuestion` with that EXACT question; forging the answer is tampering.
+- `n >= 3` -> BLOCK (exit 2), NO grant path. Message: spawn 3 is a declared major system
+  failure (section 5). Stop, report it, re-examine the approach (rule C2). A grant cannot
+  open this; a persisted `Grant` from spawn 2 does not carry over.
+
+**Non-Agent tool, read-only type, or missing `transcript_path` -> return (allow).** No
+provable count means no block, consistent with the fail-open posture of the other gates.
+
+**Tests `test/spawn-limiter.test.js`** (node + spawnSync, fixture a temp
+`<sessionId>/subagents/` with N coder metas, point `transcript_path` at a sibling temp
+`.jsonl`):
+- coder type, 0 prior coder metas -> 0.
+- read-only type (`Explore`), 2 prior coder metas -> 0 (not counted, not limited).
+- coder type, 1 prior coder meta, no grant -> 2.
+- same, with a real `AskUserQuestion` `Grant` in the transcript -> 0.
+- forged `Grant` in Bash stdout -> 2 (load-bearing, like role-lock's forge test).
+- coder type, 2 prior coder metas, WITH a valid grant present -> 2 (spawn 3 ignores grant).
+- non-coder metas present do not push a coder spawn over its limit (a `cavecrew-investigator`
+  meta among the priors is not counted).
+- non-Agent tool -> 0; garbage stdin -> 0 (fail open).
+
+**Registration (all locked, so next session needs the role-lock unlock grant + a coder
+subagent + a `Role-Definition-Approved:` trailer on commit):** add `spawn-limiter.js` to
+the `settings.json` Agent matcher after `role-router.js`; add
+`{ "file": "spawn-limiter.js", "label": "spawn limiter" }` to `overseer.json` `guards`; add
+`.claude/hooks/spawn-limiter.js` to `overseer.json` `roles.locked` so the gate cannot later
+edit itself, like its siblings.
+
+**Dispatch note:** item 7 (architect/overseer rules on the coder PROMPT before dispatch)
+applies. Vet this spec as a coder prompt before spawn 1 next session.
