@@ -520,12 +520,25 @@ settled spec.
 `7495de1`, and this change is small with its scope proven by the new test. Deferred to the
 human's call rather than spent by default.
 
-**Next session: item 3** (spawn limiter). Design SETTLED below 2026-07-27, spawn-free,
-dispatch it as spawn 1 of that session.
+**Item 3** (spawn limiter): BUILT + ARMED + LIVE-PROVEN 2026-07-27 (`bcec985`), see
+section 9. Authority items 1-3 all shipped.
 
 ---
 
-## 9. Item 3 spawn limiter: SETTLED design (2026-07-27, not yet built)
+## 9. Item 3 spawn limiter: BUILT + ARMED + LIVE-PROVEN (2026-07-27, `bcec985`)
+
+**Shipped exactly as the design below.** Built by ONE `builder` spawn (the two new files
+`.claude/hooks/spawn-limiter.js` + `test/spawn-limiter.test.js`, 9 cases green). The two
+LOCKED registration files (`settings.json` Agent chain after role-router.js; `overseer.json`
+guards + roles.locked) were edited by the MAIN thread, not the builder: the builder toolset
+has no `AskUserQuestion`, so it cannot obtain the path-scoped unlock grants; the overseer got
+them and did those edits (overseer may write those once role-lock is satisfied). Live-proven
+against this session's real transcript: 1 prior builder meta -> a simulated coder `Agent`
+call counted n=2 and BLOCKED without a grant; an `Explore` payload ran free. Probe gotcha:
+pass a Windows-native transcript_path; an MSYS `/c/...` path makes Node's readdirSync fail ->
+count 0 -> false allow. Fresh Gemini review clean.
+
+The settled spec, as built:
 
 **Rule enforced:** 1 coder spawn free, 2nd needs a human grant, 3rd+ hard-blocks as a
 declared major system failure (doc section 5). Read-only spawns are unlimited.
@@ -596,5 +609,7 @@ the `settings.json` Agent matcher after `role-router.js`; add
 `.claude/hooks/spawn-limiter.js` to `overseer.json` `roles.locked` so the gate cannot later
 edit itself, like its siblings.
 
-**Dispatch note:** item 7 (architect/overseer rules on the coder PROMPT before dispatch)
-applies. Vet this spec as a coder prompt before spawn 1 next session.
+**Dispatch note (DONE):** item 7 applied. Vetting the spec as a coder prompt before spawn 1
+caught the split the dispatch brief missed: the builder toolset has no `AskUserQuestion`, so
+the two LOCKED-file registrations could not go to the subagent and were done by the main
+thread instead. Everything else built as written.
