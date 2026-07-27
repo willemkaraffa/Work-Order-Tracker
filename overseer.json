@@ -7,13 +7,14 @@
     { "file": "coder-role-gate.js", "label": "coder role gate" },
     { "file": "role-lock.js", "label": "role lock" },
     { "file": "role-lock-check.js", "label": "role lock commit check" },
-    { "file": "commit-authority-gate.js", "label": "commit authority gate" }
+    { "file": "commit-authority-gate.js", "label": "commit authority gate" },
+    { "file": "spawn-limiter.js", "label": "spawn limiter" }
   ],
   "roles": {
     "overseer": {
       "may": ["dispatch subagents", "ask the human", "run architect/reviewer/verify", "read", "write docs and plans"],
       "mayNotWrite": ["src/**", "extension/**", "main.js", "preload.js", "**/*.py", "scripts/**", "test/**", ".claude/hooks/**"]
     },
-    "locked": [".claude/settings.json", "overseer.json", ".githooks/**", ".claude/hooks/coder-role-gate.js", ".claude/hooks/role-lock.js", ".claude/hooks/role-lock-check.js", ".claude/hooks/commit-authority-gate.js"]
+    "locked": [".claude/settings.json", "overseer.json", ".githooks/**", ".claude/hooks/coder-role-gate.js", ".claude/hooks/role-lock.js", ".claude/hooks/role-lock-check.js", ".claude/hooks/commit-authority-gate.js", ".claude/hooks/spawn-limiter.js"]
   }
 }

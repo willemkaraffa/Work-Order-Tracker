@@ -25,7 +25,8 @@
       {
         "matcher": "Agent",
         "hooks": [
-          { "type": "command", "command": "node node_modules/project-overseer/hooks/role-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/role-router.js" },
+          { "type": "command", "command": "node .claude/hooks/spawn-limiter.js" }
         ]
       },
       {
