@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice, normWoNum, matchMsrRow,
+  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -2973,7 +2973,25 @@ export function useServiceLibraryStore() {
       try {
         const r = window.storage && await window.storage.get('service_library');
         const v = r && r.value;
-        if (live) setLib(v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary());
+        let base = v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary();
+        // S1a: one-time library-model migration (version-guarded via a SIBLING key,
+        // idempotent). Snapshots to service_library_backup_<ISO> first (mirrors the
+        // wo_data_pre_migration_backup pattern), then migrates + bumps the version.
+        try {
+          if (window.storage && window.storage.set) {
+            const vr = await window.storage.get('service_library_model_version');
+            const ver = (vr && vr.value) || 0;
+            if (ver < LIB_MODEL_VERSION) {
+              await window.storage.set('service_library_backup_' + new Date().toISOString(), base);
+              const { lib: migrated, flipped } = migrateLibraryModel(base);
+              base = migrated;
+              await window.storage.set('service_library', base);
+              await window.storage.set('service_library_model_version', LIB_MODEL_VERSION);
+              console.info('[lib-migrate] flipped', flipped, 'rows');
+            }
+          }
+        } catch { /* migration best-effort; base still renders */ }
+        if (live) setLib(base);
       } catch { if (live) setLib(emptyLibrary()); }
     })();
     return () => { live = false; };
@@ -3097,6 +3115,27 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
   const { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  // S1a safety net: restore the most recent pre-migration snapshot (ISO-suffixed keys
+  // sort chronologically). Resets the model-version to current so the restored library
+  // is NOT immediately re-migrated.
+  const restoreSnapshot = async () => {
+    if (!window.storage || !window.storage.list || !window.storage.get) { toast('Storage unavailable', 'err'); return; }
+    let keys = [];
+    try { const r = await window.storage.list('service_library_backup_'); keys = (r && r.keys) || []; }
+    catch { toast('Could not list snapshots', 'err'); return; }
+    if (!keys.length) { toast('No snapshot found', 'err'); return; }
+    keys.sort();
+    const latest = keys[keys.length - 1];
+    const when = latest.replace('service_library_backup_', '');
+    if (!(await confirmDialog('Restore the most recent Service Library snapshot (' + when + ')? This REPLACES the current library and cannot be undone.', { danger: true, confirmLabel: 'Restore' }))) return;
+    try {
+      const r = await window.storage.get(latest);
+      if (!r || !r.value) { toast('Snapshot empty', 'err'); return; }
+      persist(r.value);
+      if (window.storage.set) await window.storage.set('service_library_model_version', LIB_MODEL_VERSION);
+      toast('Snapshot restored');
+    } catch { toast('Restore failed', 'err'); }
+  };
   const counts = LIBRARY_TABS.map(t => t + ': ' + (((lib && lib[t]) || []).length)).join(' · ');
   const tool = (label, onClick, primary) => (
     <button onClick={onClick} disabled={busy || lib === null} style={{
@@ -3125,6 +3164,9 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
       </SettingRow>
       <SettingRow label="Sub-categories" hint="Internal grouping for service items. Never exported to CSV/xlsx.">
         {tool('Manage (' + (subCats || []).length + ')...', () => setSubCatsOpen(true))}
+      </SettingRow>
+      <SettingRow label="Restore" hint="Roll back to the most recent auto-snapshot taken before a library migration.">
+        {tool('Restore last snapshot', restoreSnapshot)}
       </SettingRow>
       {subCatsOpen && (
         <SimpleListEditor

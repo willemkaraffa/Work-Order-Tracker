@@ -478,6 +478,9 @@ ipcMain.handle('storage-set', (_e, key, value) => {
 ipcMain.handle('storage-delete', (_e, key) => {
   try { const s = readStore(); delete s[key]; writeStore(s); return { key, deleted: true }; } catch { return null; }
 });
+ipcMain.handle('storage-list', (_e, prefix) => {
+  try { const s = readStore(); const p = prefix || ''; return { keys: Object.keys(s).filter(k => k.startsWith(p)) }; } catch { return { keys: [] }; }
+});
 ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(false, true); });
 ipcMain.handle('log-lock-event', (_e, data) => { appendLockLog({ src: 'renderer', ...(data && typeof data === 'object' ? data : { data }) }); return true; });
 ipcMain.handle('set-global-hotkey', (_e, combo) => registerGlobalHotkey(combo));
@@ -1070,7 +1073,7 @@ ipcMain.handle('export-remittance-xlsx', async (_e, report) => {
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.
-const AMH_DEFAULT = path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'MSR Excel', 'AMH Premier Pricing All scopes.xlsx');
+const AMH_DEFAULT = path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'PM Bids Excel', 'New Structure-20260318- Carolina - Raleigh (1).xlsx');
 
 ipcMain.handle('library-choose-file', async () => {
   const r = await dialog.showOpenDialog({
