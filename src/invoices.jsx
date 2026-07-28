@@ -154,12 +154,13 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
   // configured or any item carries one; rows group under header rows
   // (uncategorized first, then settings order, then unknown alphabetical).
   const showSubCol = (subCats && subCats.length > 0) || items.some(it => it && it.subCategory);
+  const showDescCol = items.some(it => it && it.desc && String(it.desc).trim() !== '');
   const subOptions = React.useMemo(() => {
     const set = new Set(subCats || []);
     for (const it of items) if (it && it.subCategory) set.add(it.subCategory);
     return [...(subCats || []), ...[...set].filter(s => !(subCats || []).includes(s)).sort()];
   }, [subCats, items]);
-  const colCount = 3 + 2 /* Material + Labor */ + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
+  const colCount = 2 /* Name + Price */ + (showDescCol ? 1 : 0) + 2 /* Material + Labor */ + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
   const grouped = React.useMemo(() => {
     if (!filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
     const order = [''].concat(subCats || []);
@@ -312,7 +313,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
           }}>+ New category</button>
         </aside>
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 18px 18px' }}>
         {lib === null ? (
           <div style={{ padding: 24, color: 'var(--text-3)' }}>Loading...</div>
         ) : filtered.length === 0 ? (
@@ -326,9 +327,9 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
           // to ~3 chars so 4-digit prices (e.g. 4608.32) render as "460".
           <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
-              <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-canvas)', zIndex: 1 }}>
-                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '32%' }}>Item Name</th>
-                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '16%' }}>Description</th>
+              <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-canvas)', zIndex: 2 }}>
+                <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: showDescCol ? '32%' : '48%' }}>Item Name</th>
+                {showDescCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '16%' }}>Description</th>}
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 96 }}>Price</th>
                 {/* AMH material/labor are internal COST (do NOT sum to price); MSR/General are a sell-side split. */}
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Material (cost)' : 'Material'}</th>
@@ -349,7 +350,9 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
                   {g.rows.map(({ it, i }) => (
                 <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.name, (v) => updateItem(i, { name: v }))}</td>
+                  {showDescCol && (
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.desc, (v) => updateItem(i, { desc: v }))}</td>
+                  )}
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.price, (v) => updateItem(i, { price: v === '' ? 0 : parseFloat(v) || 0 }), { type: 'number', step: '0.01' })}</td>
                   <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.material)}</td>
                   <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.labor)}</td>
