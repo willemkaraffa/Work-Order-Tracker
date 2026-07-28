@@ -99,6 +99,42 @@ async function mountCase(label, seed) {
   };
   await mountCase('seeded WO + S1a library', seedWithLib);
 
+  // Case 4: mount ServiceLibrary standalone (App does not show it by default) and
+  // assert the S1b nav + breakdown columns render. Seed the DEFAULT tab (General)
+  // with L2 pages + a numeric split + an 'Included' sentinel + a page-less row, plus
+  // a custom L1 category, so every new code path (pages.map, breakCell, data-driven
+  // allTabs) paints on first render without synthetic clicks.
+  {
+    const dom = freshDom({
+      ...seed,
+      __library: {
+        General: [
+          { name: 'HVAC Tune-Up', desc: '', price: 250, taxable: true, page: 'HVAC', subCategory: 'CLEANING', material: 150, labor: 100 },
+          { name: 'Unclog Drain', desc: '', price: 300, taxable: false, page: 'Plumbing', subCategory: 'Sewer', material: 'Included', labor: 300 },
+          { name: 'Flat Rate', desc: '', price: 75, taxable: true },
+        ],
+        AMH: [{ name: 'Service Call', desc: '', price: 75, taxable: true }], // page-less
+        MSR: [],
+        Warranty: [{ name: 'Custom', desc: '', price: 50, taxable: true }],  // custom L1
+      },
+    });
+    let threw = null;
+    let el = null;
+    try {
+      const { mountServiceLibrary } = loadEsm('test/_svclib-mount.jsx');
+      el = dom.window.document.createElement('div');
+      dom.window.document.body.appendChild(el);
+      mountServiceLibrary(el);
+      await flush();
+    } catch (e) { threw = e; }
+    ok('ServiceLibrary mounts without throwing', !threw, threw && (threw.message + '\n' + String(threw.stack).split('\n').slice(1, 4).join('\n')));
+    const txt = el ? el.textContent : '';
+    ok('ServiceLibrary renders children', !!el && el.children.length > 0);
+    ok('L2 page sub-entry renders (HVAC)', txt.includes('HVAC'));
+    ok('Included sentinel renders verbatim', txt.includes('Included'));
+    ok('custom L1 category renders (Warranty)', txt.includes('Warranty'));
+  }
+
   console.log('');
   console.log(fails ? (fails + ' FAILURES') : 'ALL PASS');
   process.exit(fails ? 1 : 0);

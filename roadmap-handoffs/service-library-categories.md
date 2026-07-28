@@ -254,6 +254,47 @@ MSR = fully burdened, tax included; `CATALOG_TAX.MSR.taxableInclusive` divides
 out (grand = face). No service-call/diagnostic items in the plumbing list -> every
 plumbing item `taxable:false`. Consistent with existing MSR HVAC.
 
+## Live-test findings (2026-07-28, after S1a+S1b shipped)
+
+User live-tested. 6 issues. None are S1b regressions (all pre-existing flatness /
+not-yet-built scope / UI polish). Triaged, fix specs to vet before coding:
+
+1. **Sticky table header scrolls with the list + overlaps rows** (CSS). thead is
+   `position:sticky;top:0` but background/z-index lets rows show through mid-
+   scroll. Fix: opaque header bg + z-index above body; verify in scroll
+   container. Small. (invoices.jsx table ~:327)
+2. **Multi-size families are line items, not section headers** (STRUCTURAL; the
+   core flatness goal #3, only partly solved). AMH `X:` headers (Condenser:/FAU:/
+   Furnace:) DO recover. But inside e.g. a "Maintenance:" section, families like
+   "Condenser (A/C Straight Cool)" / "Evaporator Coil" are PRICED rows followed
+   by `1.5-5 Ton` size rows with NO `:` sub-header -> stay flat. Same for Water
+   Heaters. NEEDS DESIGN: heuristic to detect a family (a row followed by
+   size-variant rows, e.g. `/\d+(\.\d+)?\s*Ton/` or `\d+ Gallon`) and promote it
+   to the section (subCategory), sizes become its items. DECIDED (user 2026-07-28):
+   FAMILY = SECTION. The family row becomes the subCategory; its size variants are
+   the items under it. No 4th level. Family's own priced row: drop it (or keep as
+   a base item -- confirm at build). Parser-recovery extension (S1a territory) ->
+   needs a re-seed to take effect.
+3. **Description column is dead weight when empty** -> drop it, give Item Name the
+   space. Fix: hide the Description column when no visible item has a non-empty
+   desc (mirror the existing `showSubCol` pattern); General still uses desc so do
+   not delete the field. Small. (invoices.jsx :327-)
+4. **Sub-categories unchangeable / cannot merge** items into one subcat. Per-row
+   subCategory `<select>` exists (:271) but user wants to MERGE many items into
+   one section. DECIDED (user 2026-07-28): RENAME-IN-MANAGE REASSIGNS. Renaming a
+   section in Manage sub-categories rewrites `subCategory` on every item carrying
+   the old name; merge = rename two sections to the same name. No multi-select UI.
+5. **Cannot seed MSR plumbing** (Settings seed buttons Seed General/AMH/MSR are
+   static). Plumbing load = S2, not built. 53 rows (with material/labour) already
+   in this doc's table.
+6. **Seed should choose a target category/sub** to seed into; PM catalogs stay
+   hardcoded but MSR Plumbing sub was never hardcoded. = S2 seed-UI + a plumbing
+   seed path. Fold into S2.
+
+Sequence proposal: S1b-fix (#1+#3, small UI) -> design #2 + #4 -> S2 (#5+#6, +
+plumbing load w/ material/labor). Spawn budget: 2 coders already spent this
+session; the above is NEXT session (or explicit override).
+
 ## Verify plan
 
 - S1/S3: `npm run verify` + live app (observable nav/model change). Confirm tax

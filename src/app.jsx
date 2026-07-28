@@ -1014,7 +1014,7 @@ function QuickJump({ open, orders, onClose, onPick }) {
 
 // Text-input modal. Replaces window.prompt(), which Electron does not support.
 // state = { title, initial?, placeholder?, submitLabel?, onSubmit(value) } | null
-function NamePromptModal({ state, onClose }) {
+export function NamePromptModal({ state, onClose }) {
   const [value, setValue] = React.useState('');
   const inputRef = React.useRef(null);
   React.useEffect(() => { setValue(state ? (state.initial || '') : ''); }, [state]);
