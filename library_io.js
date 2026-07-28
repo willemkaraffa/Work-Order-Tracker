@@ -106,21 +106,57 @@ async function parseAmh(filePath) {
     const ws = wb.getWorksheet(tab);
     if (!ws) continue;
     let currentSection = '';
+    let currentFamily = null;
+    // Buffer the tab's rows first so we can look one row ahead: an HVAC equipment
+    // FAMILY header (e.g. 'Evaporator Coil') is only recognizable because SIZE rows
+    // ('1.5 Ton', '2 Ton') follow it. Its own col-D holds a SEER tier LABEL ('14 Seer'),
+    // not a price, so it must not be emitted as an item.
+    const rows = [];
     ws.eachRow((row, n) => {
       if (n < 2) return; // row 1 = fee prose; row 2 col-A is the first section
       const name = toStr(cellVal(row.getCell(1)));
-      if (!name) return;
-      const price = toPrice(cellVal(row.getCell(4))); // col D = Premier Pricing
-      if (isSectionHeader(name, price)) { currentSection = name; return; }
-      if (price == null) return; // no-price prose that is not a section header
-      const { material, labor } = splitFields(cellVal(row.getCell(2)), cellVal(row.getCell(3)));
+      if (!name) return; // skip blank-name rows so nextNamed is always the next real row
+      rows.push({
+        name,
+        price: toPrice(cellVal(row.getCell(4))), // col D = Premier Pricing / sell
+        bRaw: cellVal(row.getCell(2)),           // col B = Material Cost (or SEER tier)
+        cRaw: cellVal(row.getCell(3)),           // col C = Labor Cost (or SEER tier)
+      });
+    });
+    const nextNamed = (i) => rows[i + 1] || null;
+    for (let i = 0; i < rows.length; i++) {
+      const { name, price, bRaw, cRaw } = rows[i];
+      // Family header FIRST (before isSectionHeader): not itself a size, but the next
+      // row IS a size -> its D is a tier label, not money. Set the family and do not
+      // emit. Ordered ahead of the section check so a family whose D is blank/non-numeric
+      // isn't miscaught as a section (which would clear currentFamily and de-prefix the
+      // sizes). No real section header is directly followed by a size row.
+      const nxt = nextNamed(i);
+      if (!SIZE_RE.test(name) && nxt && SIZE_RE.test(nxt.name)) { currentFamily = name; continue; }
+      if (isSectionHeader(name, price)) { currentSection = name; currentFamily = null; continue; }
+      // Size row under a family (or bare): B/C are SEER cost tiers, NOT material/labor,
+      // so use the 'Included' sentinel and prefix the family name for a full item name.
+      if (SIZE_RE.test(name)) {
+        items.push({
+          name: currentFamily ? currentFamily + ' ' + name : name,
+          desc: '', price: price == null ? 0 : price, page: tab,
+          subCategory: currentFamily || currentSection,
+          material: MATERIAL_INCLUDED, labor: MATERIAL_INCLUDED,
+          taxable: SERVICE_ALWAYS_TAX_RE.test(name),
+        });
+        continue;
+      }
+      if (price == null) continue; // prose / banner rows w/ non-numeric D (keep family)
+      // Normal upper-section item.
+      currentFamily = null;
+      const { material, labor } = splitFields(bRaw, cRaw);
       // AMH Premier items are tax-INCLUSIVE -> never taxed, EXCEPT service call /
       // diagnostic / emergency, which are ALWAYS taxed (core truth #2/#3).
       items.push({
         name, desc: '', price, page: tab, subCategory: currentSection,
         material, labor, taxable: SERVICE_ALWAYS_TAX_RE.test(name),
       });
-    });
+    }
   }
   return items;
 }
@@ -150,6 +186,9 @@ const MSR_SHEET = 'Vendor HVAC Bid Sheet';
 // Refrigerants (R22, R-410A, R407c, R134a) and other physical materials are never taxed.
 const REFRIGERANT_RE = /^\s*R-?\d{2,3}[a-z]?\b/i;
 const SERVICE_ALWAYS_TAX_RE = /\b(service\s*call|diagnostic|emergency|trip\s*(fee|charge))\b/i;
+// A "size" row under an HVAC equipment family (e.g. '1.5 Ton', '2 Ton', '40 Gallon',
+// '3 - 3.5 Ton'). Used only in parseAmh to detect family headers by look-ahead.
+const SIZE_RE = /^\s*\d+(\.\d+)?(\s*-\s*\d+(\.\d+)?)?\s*(ton|gallon)s?\b/i;
 function msrTaxable(name, prose) {
   if (REFRIGERANT_RE.test(name)) return false;               // material
   if (SERVICE_ALWAYS_TAX_RE.test(name)) return true;         // core truth #3
