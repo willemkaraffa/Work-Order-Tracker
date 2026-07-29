@@ -1099,3 +1099,17 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
   }
   return { lines, changes, totalDelta, totalFlag };
 }
+
+// Rename a section label across the whole library: rewrite every item's
+// subCategory old->new in every catalog. Pure; caller persists the result.
+// Merge falls out naturally (two names -> one). Guards non-array values.
+export function renameSubCategory(lib, oldName, newName) {
+  if (!lib || !oldName || !newName || oldName === newName) return lib;
+  const next = {};
+  for (const [cat, arr] of Object.entries(lib)) {
+    next[cat] = Array.isArray(arr)
+      ? arr.map(it => it && it.subCategory === oldName ? { ...it, subCategory: newName } : it)
+      : arr;
+  }
+  return next;
+}

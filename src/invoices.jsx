@@ -8,7 +8,7 @@ import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog, NamePromptModal,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
-  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed } from './orders-logic.js';
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
@@ -404,6 +404,10 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
           singular="sub-category"
           items={subCats}
           setItems={setSubCats}
+          onRename={(oldN, newN) => {
+            setSubCats([...new Set((subCats || []).map(s => s === oldN ? newN : s))]);
+            if (lib) persist(renameSubCategory(lib, oldN, newN));
+          }}
           onClose={() => setSubCatsOpen(false)}
         />
       )}

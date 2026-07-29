@@ -295,6 +295,76 @@ Sequence proposal: S1b-fix (#1+#3, small UI) -> design #2 + #4 -> S2 (#5+#6, +
 plumbing load w/ material/labor). Spawn budget: 2 coders already spent this
 session; the above is NEXT session (or explicit override).
 
+### Progress 2026-07-28 (session 2)
+- #1 (sticky header gap) + #3 (hide empty Description col): DONE, commit dfc57d9.
+  Root cause #1 = scroll container 14px top padding under a sticky top:0 thead;
+  dropped padding + zIndex 1->2. #3 mirrors showSubCol (showDescCol on items).
+- #2 (family=section flatness): DONE code, commit c52851c. LIVE DATA differed
+  from this doc's heuristic: the flat HVAC block (rows 86-203) is a tonnage x
+  SEER-tier equipment MATRIX, not simple family+Ton. Family header rows carry
+  D="14 Seer" (a TIER LABEL, parsed as $14 before). DECIDED (user 2026-07-28):
+  col D = the sell price, ONE item per Ton size (B/C are SEER cost tiers,
+  ignored -> material/labor='Included'); bundles (System/Full-System
+  Replacements, rows 144-203) INCLUDED as items. parseAmh rewritten: buffer
+  rows + one-row look-ahead; a non-size row whose next row is Ton/Gallon becomes
+  the subCategory; sizes emit as "<family> <size>". Look-ahead runs BEFORE
+  isSectionHeader (reviewer finding 0b5c6b4b). KNOWN cosmetic: "80% Furnace" /
+  "93%+ Furnace" have a 2-row header (product line + "Adjust ECM..." note) so
+  they name after the note row -> rename via #4 later. REQUIRES user re-seed
+  (Settings > Seed AMH); no auto-migration. parseMsr UNCHANGED (MSR is flat).
+- REMAINING this batch: #4 (rename-in-manage reassigns), #5+#6 (S2 plumbing
+  seed + seed-target UI). Both need their own coder-spawn grant; #5+#6 wants its
+  own session (53-row load + user row-by-row PDF check).
+
+### Progress 2026-07-29 (session 3) - scope settled with user
+- SPAWN PLAN (user-decided): #4 ALONE this spawn. #6 is really #5's UI (the three
+  existing seeds have FIXED workbook+tab targets via replaceTab; a target-chooser
+  has no live seed to drive without the plumbing merge-seed path). So #5+#6 ship
+  TOGETHER next session, gated on the user's row-by-row PDF check of the 53 rows.
+- #4 DESIGN (locked, ready to build):
+  - ROOT CAUSE: two stores, no link. Label list = `settings.librarySubCats`
+    (app.jsx:3930). Items carry `subCategory` in the `service_library` store
+    (`useServiceLibraryStore`). `SimpleListEditor.commitRename` (app.jsx:3010)
+    rewrites the label list ONLY; items keep the old string -> rename orphans
+    instead of reassigning.
+  - MECHANISM: extract a PURE `renameSubCategory(lib, oldName, newName)` into
+    `src/orders-logic.js` (rewrite `subCategory` old->new across every catalog
+    array, guard Array.isArray) so it is unit-testable per the QA rule. Give the
+    generic `SimpleListEditor` optional `onRename(old,new)` / `onDelete(name)`
+    props that OWN the transaction (editor skips its own setItems when present).
+  - WIRING (BOTH call sites, each already holds `[lib, persist]`): `ServiceLibrary`
+    (invoices.jsx:402) + `LibraryToolsSection` (app.jsx:3172). Handler:
+    `setSubCats([...new Set(subCats.map(s=>s===old?new:s))])` (label list: replace
+    + DEDUP = merge) then `persist(renameSubCategory(lib, old, new))`. Miss either
+    site and that screen still orphans.
+  - MERGE = rename two sections to the same name; the Set collapses the dup label,
+    the cascade rewrites both item groups. Matches the 2026-07-28 decision.
+  - DELETE stays non-destructive (leave item strings; they still render as an
+    ad-hoc section via subOptions merge). Not wiring onDelete cascade this pass.
+  - SCOPE: subCategory (L3) only; `page` (L2) untouched. Files: src/orders-logic.js
+    (new pure fn + test), src/app.jsx (SimpleListEditor props + LibraryToolsSection
+    wiring), src/invoices.jsx (ServiceLibrary wiring).
+  - VERIFY: `npm run verify` (logic test for renameSubCategory incl. merge-dedup) +
+    live: rename a section in Manage, confirm items carrying it flip subCategory
+    and re-group; merge by renaming two to one name.
+  - #4 SHIPPED this session (verify green, 28 pass). renameSubCategory in
+    orders-logic.js; SimpleListEditor opt-in onRename/onDelete; both sites cascade.
+    Static+unit verified, not electron-clicked.
+
+### Item-name trimming (user 2026-07-29, for the #5/#2 re-seed next session)
+- Parser family=section recovery currently names size variants
+  `"<family> <size>"`, producing very long names like
+  `"Adjust ECM motor speed to match system tonnage for 1.5 - 2.5 & 3.5 Ton units 1.5 Ton"`.
+- USER DECISION: the section header already carries the family context, so the
+  ITEM name should be ONLY the tonnage/size token (e.g. `"1.5 Ton"`), not
+  `family + size`. Cleaner list; header supplies the meaning.
+- Apply in the parseAmh look-ahead branch (and the plumbing/MSR size recovery):
+  when a family row spawns size-variant items, emit `subCategory = <family>` and
+  `name = <size token only>` (the `\d+(\.\d+)?\s*Ton` / `\d+ Gallon` match), NOT
+  the family-prefixed string. Requires the AMH re-seed to take effect.
+  Watch the known 2-row-header families (80% / 93%+ Furnace) so the family name
+  used for the header is the product line, not the "Adjust ECM..." note row.
+
 ## Verify plan
 
 - S1/S3: `npm run verify` + live app (observable nav/model change). Confirm tax

@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION,
+  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -3003,19 +3003,23 @@ export function useServiceLibraryStore() {
   return [lib, persist];
 }
 
-export function SimpleListEditor({ title, items, setItems, onClose, singular }) {
+export function SimpleListEditor({ title, items, setItems, onClose, singular, onRename, onDelete }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [newName, setNewName] = React.useState('');
 
   const commitRename = (idx, val) => {
     const trimmed = (val || '').trim();
-    if (trimmed) setItems(items.map((v, i) => i === idx ? trimmed : v));
+    if (trimmed) {
+      if (onRename) onRename(items[idx], trimmed);
+      else setItems(items.map((v, i) => i === idx ? trimmed : v));
+    }
     setEditingIdx(null);
   };
 
   const deleteItem = async (idx) => {
     if (!(await confirmDialog('Remove "' + items[idx] + '"?', { danger: true, confirmLabel: 'Remove' }))) return;
-    setItems(items.filter((_, i) => i !== idx));
+    if (onDelete) onDelete(items[idx]);
+    else setItems(items.filter((_, i) => i !== idx));
   };
 
   const addItem = () => {
@@ -3174,6 +3178,10 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           singular="sub-category"
           items={subCats}
           setItems={setSubCats}
+          onRename={(oldN, newN) => {
+            setSubCats([...new Set((subCats || []).map(s => s === oldN ? newN : s))]);
+            if (lib) persist(renameSubCategory(lib, oldN, newN));
+          }}
           onClose={() => setSubCatsOpen(false)}
         />
       )}
