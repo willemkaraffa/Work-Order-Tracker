@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory,
+  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -2961,7 +2961,7 @@ function useLibraryTools(lib, persist, toast) {
       const r = await window.library.importRoundtrip(pick.path);
       if (!r || !r.ok) { toast((r && r.error) || 'Import failed', 'err'); return; }
       const next = { ...emptyLibrary() };
-      for (const k of Object.keys(r.tabs)) if (LIBRARY_TABS.includes(k)) next[k] = r.tabs[k];
+      for (const k of Object.keys(r.tabs)) next[k] = r.tabs[k]; // Item 2: keep custom catalogs, not just built-ins
       if (!(await confirmDialog('Replace the current library with the imported file?', { danger: true, confirmLabel: 'Replace' }))) return;
       persist(next);
       toast('Library imported');
@@ -3158,7 +3158,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
       toast('Snapshot restored');
     } catch { toast('Restore failed', 'err'); }
   };
-  const counts = LIBRARY_TABS.map(t => t + ': ' + (((lib && lib[t]) || []).length)).join(' · ');
+  const counts = Object.keys(lib || {}).map(t => t + ': ' + ((lib[t] || []).length)).join(' · '); // Item 2: all catalogs
   const tool = (label, onClick, primary) => (
     <button onClick={onClick} disabled={busy || lib === null} style={{
       height: 34, padding: '0 14px', borderRadius: 7, cursor: (busy || lib === null) ? 'default' : 'pointer',
@@ -3993,6 +3993,14 @@ function App() {
     const nextOrders = orders.map(w => w.pm === o ? { ...w, pm: n } : w);
     updateData({ pms: nextPms, orders: nextOrders });
   }, [pms, orders, updateData]);
+  // Item 2: renaming a CUSTOM catalog cascades to every saved invoice line's
+  // agreement so no billed line orphans (mirror of renameClientCode). Totals stable
+  // (custom catalogs => DEFAULT_CATALOG_TAX). Built-ins are guarded in the UI.
+  const cascadeCatalogRename = React.useCallback((oldName, newName) => {
+    const o = (oldName || '').trim(), n = (newName || '').trim();
+    if (!n || o === n) return;
+    updateData({ orders: renameLineAgreement(orders, o, n) });
+  }, [orders, updateData]);
   const types = ((data?.types && data.types.length) ? data.types : DEFAULT_TYPES.slice())
     .filter(t => String(t).toLowerCase() !== 'other');
   const setTypes = React.useCallback((v) => updateData({ types: v }), [updateData]);
@@ -6272,7 +6280,7 @@ function App() {
           <NavWing />
           <div />
           {currentModule === 'service-items' ? (
-            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} />
+            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} />
           ) : currentModule === 'maps' ? (
             <MapsModule
               activeOrders={mapOrders}

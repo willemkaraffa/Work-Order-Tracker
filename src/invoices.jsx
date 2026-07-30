@@ -8,7 +8,7 @@ import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog, NamePromptModal,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
-  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory } from './orders-logic.js';
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
@@ -113,7 +113,7 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
   );
 }
 
-export function ServiceLibrary({ toast, subCats, setSubCats }) {
+export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) {
   const [lib, persist] = useServiceLibraryStore();
   const [tab, setTab] = React.useState('General');
   // page = active L2 sub-page filter; null = L1 view (search ALL pages, existing behavior).
@@ -130,6 +130,25 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
     const extra = Object.keys(lib || {}).filter(k => !LIBRARY_TABS.includes(k));
     return [...LIBRARY_TABS, ...extra];
   }, [lib]);
+  // Item 8: split for the sidebar's PM-vs-custom grouping (LIBRARY_TABS is the
+  // discriminator, no new field). pm = built-ins, custom = user-added catalogs.
+  const pmTabs = allTabs.filter(t => LIBRARY_TABS.includes(t));
+  const customTabs = allTabs.filter(t => !LIBRARY_TABS.includes(t));
+  // Item 5: librarySubCats holds CUSTOM sections only. One-time purge on load --
+  // drop any entry matching a subCategory on a seeded (non-manual) item; those PM
+  // sections still render via item derivation, they only leave the Manage list +
+  // custom dropdowns. Fires once lib + subCats are both populated (both async).
+  const purgedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (purgedRef.current || !lib || !setSubCats || !(subCats && subCats.length)) return;
+    const seeded = new Set();
+    for (const arr of Object.values(lib)) {
+      for (const it of (arr || [])) if (it && it.subCategory && !it.manual) seeded.add(it.subCategory);
+    }
+    purgedRef.current = true;
+    const kept = subCats.filter(s => !seeded.has(s));
+    if (kept.length !== subCats.length) setSubCats(kept);
+  }, [lib, subCats, setSubCats]);
   // Switching L1 always drops back to the search-all view.
   const selectTab = (t) => { setTab(t); setPage(null); };
 
@@ -212,6 +231,21 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
     },
   });
 
+  // Item 2: rename a CUSTOM catalog (built-ins are pinned/semantic, not renamable).
+  // Renames the service_library key, then cascades saved invoice line agreements.
+  const renameTab = (t) => setCatPrompt({
+    title: 'Rename catalog', placeholder: 'New catalog name', submitLabel: 'Rename',
+    onSubmit: (raw) => {
+      const n = raw.trim();
+      if (!n || n === t) return;
+      if ((lib || {})[n] !== undefined) { toast('Category "' + n + '" already exists', 'err'); return; }
+      persist(renameCatalog(lib, t, n));
+      if (onRenameCatalog) onRenameCatalog(t, n);
+      if (tab === t) setTab(n);
+      toast('Renamed "' + t + '" to "' + n + '"');
+    },
+  });
+
   const btn = (label, onClick, primary) => (
     <button onClick={onClick} style={{
       height: 32, padding: '0 12px', borderRadius: 7, cursor: 'pointer',
@@ -244,6 +278,44 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
         fontFamily: 'inherit', fontSize: 13, textAlign: opts.type === 'number' ? 'right' : 'left',
       }}
     />
+  );
+
+  // Item 8: shared catalog-button renderer (a plain function called as
+  // renderCatBtn(t), NOT a <Component/>, so no remount). Used by both groups.
+  const renderCatBtn = (t) => (
+    <React.Fragment key={t}>
+      <button onClick={() => selectTab(t)} style={{
+        width: '100%', height: 30, padding: '0 10px', borderRadius: 7, cursor: 'pointer',
+        border: '1px solid ' + (tab === t ? 'var(--accent)' : 'var(--border-1)'),
+        background: tab === t ? 'var(--bg-row-sel)' : 'transparent',
+        color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+        fontWeight: tab === t ? 600 : 400, textAlign: 'left',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <span>{t}</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {!LIBRARY_TABS.includes(t) && (
+            <span
+              role="button"
+              title="Rename catalog"
+              onClick={(e) => { e.stopPropagation(); renameTab(t); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 12 }}
+            >{'✎'}</span>
+          )}
+          <span style={{ color: 'var(--text-3)' }}>{((lib && lib[t]) || []).length}</span>
+        </span>
+      </button>
+      {/* L2 page sub-entries under the active category (click = that page). */}
+      {tab === t && pages.map(p => (
+        <button key={p} onClick={() => setPage(p)} style={{
+          width: '100%', height: 26, padding: '0 10px', marginLeft: 12, borderRadius: 6, cursor: 'pointer',
+          border: '1px solid ' + (page === p ? 'var(--accent)' : 'transparent'),
+          background: page === p ? 'var(--bg-row-sel)' : 'transparent',
+          color: page === p ? 'var(--text-1)' : 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
+          fontWeight: page === p ? 600 : 400, textAlign: 'left',
+        }}>{p}</button>
+      ))}
+    </React.Fragment>
   );
 
   return (
@@ -281,31 +353,22 @@ export function ServiceLibrary({ toast, subCats, setSubCats }) {
           <div style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
             Catalogs
           </div>
-          {allTabs.map(t => (
-            <React.Fragment key={t}>
-              <button onClick={() => selectTab(t)} style={{
-                width: '100%', height: 30, padding: '0 10px', borderRadius: 7, cursor: 'pointer',
-                border: '1px solid ' + (tab === t ? 'var(--accent)' : 'var(--border-1)'),
-                background: tab === t ? 'var(--bg-row-sel)' : 'transparent',
-                color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
-                fontWeight: tab === t ? 600 : 400, textAlign: 'left',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              }}>
-                <span>{t}</span>
-                <span style={{ color: 'var(--text-3)' }}>{((lib && lib[t]) || []).length}</span>
-              </button>
-              {/* L2 page sub-entries under the active category (click = that page). */}
-              {tab === t && pages.map(p => (
-                <button key={p} onClick={() => setPage(p)} style={{
-                  width: '100%', height: 26, padding: '0 10px', marginLeft: 12, borderRadius: 6, cursor: 'pointer',
-                  border: '1px solid ' + (page === p ? 'var(--accent)' : 'transparent'),
-                  background: page === p ? 'var(--bg-row-sel)' : 'transparent',
-                  color: page === p ? 'var(--text-1)' : 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
-                  fontWeight: page === p ? 600 : 400, textAlign: 'left',
-                }}>{p}</button>
-              ))}
+          {/* Item 8: PM (private) built-ins grouped + accent-bordered at top; custom below a divider. */}
+          <div style={{ fontSize: 10, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            PM (private)
+          </div>
+          <div style={{ borderLeft: '3px solid var(--accent)', paddingLeft: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {pmTabs.map(renderCatBtn)}
+          </div>
+          {customTabs.length > 0 && (
+            <React.Fragment>
+              <div style={{ borderTop: '1px solid var(--border-1)', marginTop: 2 }} />
+              <div style={{ fontSize: 10, color: 'var(--text-3)', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                Custom
+              </div>
+              {customTabs.map(renderCatBtn)}
             </React.Fragment>
-          ))}
+          )}
           <button onClick={addCategory} style={{
             width: '100%', height: 28, padding: '0 10px', borderRadius: 7, cursor: 'pointer',
             border: '1px dashed var(--border-1)', background: 'transparent',

@@ -40,10 +40,10 @@ function check(label, fn) {
     assert.strictEqual(items.length, 2);
   });
   check('row-2 col-A became section 1', () => {
-    assert.strictEqual(items[0].subCategory, 'Clogs:');
+    assert.strictEqual(items[0].subCategory, 'Clogs');
   });
   check('second item carries its own section', () => {
-    assert.strictEqual(items[1].subCategory, 'Faucets and Fixtures:');
+    assert.strictEqual(items[1].subCategory, 'Faucets and Fixtures');
   });
   check('page = tab name', () => {
     assert.strictEqual(items[0].page, 'Plum Minor');
@@ -110,7 +110,7 @@ function check(label, fn) {
   check('normal Maintenance item keeps splitFields material/labor', () => {
     const it = hvac.find(i => i.name === 'Full System Test');
     assert.ok(it, 'Full System Test missing');
-    assert.strictEqual(it.subCategory, 'Maintenance:');
+    assert.strictEqual(it.subCategory, 'Maintenance');
     assert.strictEqual(it.price, 90);
     assert.strictEqual(it.material, 0);
     assert.strictEqual(it.labor, 0);
@@ -145,6 +145,34 @@ function check(label, fn) {
     assert.strictEqual(it.subCategory, 'Package Unit');
     assert.strictEqual(it.price, 3200);
     assert.strictEqual(blankfam.find(i => i.name === '2 Ton' && i.subCategory === 'Package Unit').price, 3500);
+  });
+
+  // Item 7: false-section banner. A long descriptive row precedes size rows but is
+  // NOT a family (guarded by length/colon) -> skipped; its sizes reparent to the
+  // true section, whose trailing colon is stripped ('Ductwork:' -> 'Ductwork').
+  const tmp4 = path.join(os.tmpdir(), 'amh_banner_test_' + Date.now() + '.xlsx');
+  const wb4 = new ExcelJS.Workbook();
+  const bn = wb4.addWorksheet('HVAC');
+  bn.addRow(['Minimum Job Fee $75 applies to all visits.']);                                   // row 1: fee prose
+  bn.addRow(['Ductwork:']);                                                                     // row 2: real section
+  bn.addRow(['Seal Ducts', 0, 0, 250]);                                                         // row 3: normal item
+  bn.addRow(['Adjust ECM motor speed to match system tonnage for 1.5 - 2.5 & 3.5 Ton units']); // row 4: BANNER, blank price
+  bn.addRow(['1.5 Ton', null, null, 400]);                                                      // row 5: size row
+  bn.addRow(['2 Ton', null, null, 450]);                                                        // row 6: size row
+  await wb4.xlsx.writeFile(tmp4);
+
+  let banner;
+  try { banner = await libIO.parseAmh(tmp4); }
+  catch (e) { console.log('SKIP parse-amh banner (parse threw): ' + e.message); try { fs.unlinkSync(tmp4); } catch {} process.exit(2); }
+  try { fs.unlinkSync(tmp4); } catch {}
+
+  check('banner skipped, sizes reparent to section, colon stripped (item 7)', () => {
+    assert.ok(!banner.some(i => /^Adjust ECM/.test(i.name)), 'banner leaked as an item');
+    assert.ok(!banner.some(i => i.subCategory && /^Adjust ECM/.test(i.subCategory)), 'banner leaked as a subCategory');
+    const it = banner.find(i => i.name === '1.5 Ton');
+    assert.ok(it, '1.5 Ton missing');
+    assert.strictEqual(it.subCategory, 'Ductwork');
+    assert.strictEqual(banner.find(i => i.name === 'Seal Ducts').subCategory, 'Ductwork');
   });
 
   console.log('');

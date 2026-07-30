@@ -1113,3 +1113,25 @@ export function renameSubCategory(lib, oldName, newName) {
   }
   return next;
 }
+
+// Item 2: rename a CUSTOM catalog = rename the service_library KEY in place
+// (Object.entries preserves order). Collision / missing / built-in guards are the
+// caller's (built-ins are semantic: General fallback, CATALOG_TAX, red-flag).
+export function renameCatalog(lib, oldName, newName) {
+  if (!lib || !oldName || !newName || oldName === newName || !(oldName in lib) || (newName in lib)) return lib;
+  const next = {};
+  for (const [cat, arr] of Object.entries(lib)) next[cat === oldName ? newName : cat] = arr;
+  return next;
+}
+
+// Item 2: cascade a catalog rename to saved invoice line agreements so a renamed
+// custom catalog does not orphan its billed lines (mirror of app.jsx renameClientCode).
+// Totals are unaffected: custom catalogs all resolve to DEFAULT_CATALOG_TAX.
+export function renameLineAgreement(orders, oldName, newName) {
+  if (!Array.isArray(orders) || !oldName || !newName || oldName === newName) return orders;
+  return orders.map(o => {
+    const li = o && o.invoice && Array.isArray(o.invoice.lineItems) ? o.invoice.lineItems : null;
+    if (!li || !li.some(l => l && l.agreement === oldName)) return o;
+    return { ...o, invoice: { ...o.invoice, lineItems: li.map(l => l && l.agreement === oldName ? { ...l, agreement: newName } : l) } };
+  });
+}
