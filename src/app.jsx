@@ -3133,10 +3133,209 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular, on
 
 // Settings > Service Library: data tools (seed/import/export) + sub-category
 // management, moved off the module header to declutter it.
+// Settings > Service Library: import an ARBITRARY price-list xlsx into a chosen
+// catalog with a column-mapping preview (S3). Distinct from the round-trip Backup
+// import (which restores a full library export). No blind write: the user maps
+// columns name/desc/price/taxable/page/section, sees a live preview, then confirms.
+const IMPORT_FIELDS = [
+  { key: 'name',    label: 'Name', required: true },
+  { key: 'desc',    label: 'Description' },
+  { key: 'price',   label: 'Price' },
+  { key: 'taxable', label: 'Taxable' },
+  { key: 'page',    label: 'Page' },
+  { key: 'section', label: 'Section' },
+];
+function colLabel(i) {
+  let s = ''; i += 1;
+  while (i > 0) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); }
+  return s;
+}
+function parseImportPrice(v) {
+  if (typeof v === 'number') return v;
+  const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : 0;
+}
+function guessMap(header) {
+  const m = { name: -1, desc: -1, price: -1, taxable: -1, page: -1, section: -1 };
+  (header || []).forEach((h, i) => {
+    const s = String(h || '').toLowerCase();
+    if (m.name < 0 && (/\bname\b/.test(s) || /\bitem\b/.test(s))) m.name = i;
+    else if (m.desc < 0 && /desc/.test(s)) m.desc = i;
+    else if (m.price < 0 && /price|total|amount|cost/.test(s)) m.price = i;
+    else if (m.taxable < 0 && /tax/.test(s)) m.taxable = i;
+    else if (m.page < 0 && /page/.test(s)) m.page = i;
+    else if (m.section < 0 && /section|categ|group/.test(s)) m.section = i;
+  });
+  return m;
+}
+
+function ImportXlsxModal({ open, onClose, lib, persist, toast }) {
+  const [sheets, setSheets] = React.useState(null); // null = loading, [] = error/none
+  const [err, setErr] = React.useState('');
+  const [sheetIdx, setSheetIdx] = React.useState(0);
+  const [hasHeader, setHasHeader] = React.useState(true);
+  const [map, setMap] = React.useState({ name: -1, desc: -1, price: -1, taxable: -1, page: -1, section: -1 });
+  const [tab, setTab] = React.useState('General');
+  const [mode, setMode] = React.useState('append');
+
+  React.useEffect(() => {
+    if (!open) return;
+    let live = true;
+    setSheets(null); setErr(''); setSheetIdx(0); setHasHeader(true); setMode('append');
+    (async () => {
+      try {
+        const pick = await window.library.chooseFile();
+        if (!pick || !pick.ok) { if (live) onClose(); return; }
+        const r = await window.library.importGrid(pick.path);
+        if (!live) return;
+        if (!r || !r.ok) { setErr((r && r.error) || 'Read failed'); setSheets([]); return; }
+        const sh = r.sheets || [];
+        setSheets(sh);
+        const first = sh[0];
+        setMap(guessMap(first && first.rows && first.rows[0] ? first.rows[0] : []));
+      } catch (e) { if (live) { setErr(String(e.message || e)); setSheets([]); } }
+    })();
+    return () => { live = false; };
+  }, [open]);
+
+  if (!open) return null;
+  const sheet = sheets && sheets[sheetIdx];
+  const rows = (sheet && sheet.rows) || [];
+  const header = hasHeader && rows[0] ? rows[0] : [];
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const colCount = sheet ? sheet.cols : 0;
+
+  const buildItems = () => {
+    const out = [];
+    for (const row of dataRows) {
+      const name = map.name >= 0 ? String(row[map.name] == null ? '' : row[map.name]).trim() : '';
+      if (!name) continue;
+      const it = { name, desc: '', price: 0, taxable: false };
+      if (map.desc >= 0) it.desc = String(row[map.desc] == null ? '' : row[map.desc]).trim();
+      if (map.price >= 0) it.price = parseImportPrice(row[map.price]);
+      if (map.taxable >= 0) it.taxable = /^(y|t|1|true|taxable)/i.test(String(row[map.taxable] == null ? '' : row[map.taxable]).trim());
+      if (map.page >= 0) { const p = String(row[map.page] == null ? '' : row[map.page]).trim(); if (p) it.page = p; }
+      if (map.section >= 0) { const s = String(row[map.section] == null ? '' : row[map.section]).trim(); if (s) it.subCategory = s; }
+      out.push(it);
+    }
+    return out;
+  };
+
+  const doImport = async () => {
+    const items = buildItems();
+    if (!items.length) { toast('No rows to import (map the Name column)', 'err'); return; }
+    if (mode === 'replace' && !(await confirmDialog(`Replace all ${((lib && lib[tab]) || []).length} ${tab} item(s) with ${items.length} imported item(s)?`, { danger: true, confirmLabel: 'Replace' }))) return;
+    const base = lib || emptyLibrary();
+    const next = mode === 'replace' ? items : [...((base[tab]) || []), ...items];
+    persist({ ...base, [tab]: next });
+    toast(`Imported ${items.length} item(s) into ${tab}`);
+    onClose();
+  };
+
+  const colOptions = [];
+  for (let i = 0; i < colCount; i++) {
+    const h = hasHeader && header[i] ? String(header[i]) : '';
+    colOptions.push({ v: i, label: 'Col ' + colLabel(i) + (h ? ' (' + h + ')' : '') });
+  }
+  const preview = buildItems();
+
+  return (
+    <Modal open onClose={onClose} title="Import from spreadsheet" width={720}>
+      {sheets === null ? (
+        <div style={{ color: 'var(--text-3)', fontSize: 13 }}>Choose a spreadsheet…</div>
+      ) : err ? (
+        <div style={{ color: 'var(--danger, #d33)', fontSize: 13 }}>{err}</div>
+      ) : !sheet ? (
+        <div style={{ color: 'var(--text-3)', fontSize: 13 }}>No sheets found.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13 }}>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            {sheets.length > 1 && (
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                Sheet
+                <select value={sheetIdx} onChange={e => { const i = +e.target.value; setSheetIdx(i); const s = sheets[i]; setMap(guessMap(s && s.rows && s.rows[0] ? s.rows[0] : [])); }}>
+                  {sheets.map((s, i) => <option key={i} value={i}>{s.name}</option>)}
+                </select>
+              </label>
+            )}
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={hasHeader} onChange={e => setHasHeader(e.target.checked)} />
+              First row is a header
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+            {IMPORT_FIELDS.map(f => (
+              <label key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span>{f.label}{f.required ? ' *' : ''}</span>
+                <select value={map[f.key]} onChange={e => setMap(m => ({ ...m, [f.key]: +e.target.value }))}>
+                  <option value={-1}>— none —</option>
+                  {colOptions.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
+                </select>
+              </label>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              Catalog
+              <select value={tab} onChange={e => setTab(e.target.value)}>
+                {LIBRARY_TABS.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="radio" name="impmode" checked={mode === 'append'} onChange={() => setMode('append')} /> Append
+            </label>
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="radio" name="impmode" checked={mode === 'replace'} onChange={() => setMode('replace')} /> Replace catalog
+            </label>
+          </div>
+
+          <div>
+            <div style={{ color: 'var(--text-3)', marginBottom: 6 }}>
+              {preview.length} row(s) will import{map.name < 0 ? ' — map the Name column' : ''}.
+            </div>
+            <div style={{ maxHeight: 220, overflow: 'auto', border: '1px solid var(--border-2)', borderRadius: 6 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', background: 'var(--bg-inset, var(--bg-surface))' }}>
+                    <th style={{ padding: '4px 8px' }}>Name</th>
+                    <th style={{ padding: '4px 8px' }}>Price</th>
+                    <th style={{ padding: '4px 8px' }}>Tax</th>
+                    <th style={{ padding: '4px 8px' }}>Page</th>
+                    <th style={{ padding: '4px 8px' }}>Section</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.slice(0, 12).map((it, i) => (
+                    <tr key={i} style={{ borderTop: '1px solid var(--border-2)' }}>
+                      <td style={{ padding: '4px 8px' }}>{it.name}</td>
+                      <td style={{ padding: '4px 8px' }}>{it.price}</td>
+                      <td style={{ padding: '4px 8px' }}>{it.taxable ? 'Y' : 'N'}</td>
+                      <td style={{ padding: '4px 8px' }}>{it.page || ''}</td>
+                      <td style={{ padding: '4px 8px' }}>{it.subCategory || ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button onClick={onClose} style={{ height: 34, padding: '0 14px', borderRadius: 7, border: '1px solid var(--border-2)', background: 'var(--bg-surface)', color: 'var(--text-1)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Cancel</button>
+            <button onClick={doImport} disabled={map.name < 0} style={{ height: 34, padding: '0 14px', borderRadius: 7, border: 'none', background: 'var(--accent)', color: 'var(--accent-fg)', cursor: map.name < 0 ? 'default' : 'pointer', opacity: map.name < 0 ? 0.6 : 1, fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>Import</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
   const { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  const [importOpen, setImportOpen] = React.useState(false);
   // S1a safety net: restore the most recent pre-migration snapshot (ISO-suffixed keys
   // sort chronologically). Resets the model-version to current so the restored library
   // is NOT immediately re-migrated.
@@ -3185,6 +3384,9 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           {tool('Export...', exportBackup, true)}
         </div>
       </SettingRow>
+      <SettingRow label="Import spreadsheet" hint="Map columns from any price-list xlsx into a catalog.">
+        {tool('Import xlsx...', () => setImportOpen(true))}
+      </SettingRow>
       <SettingRow label="Sub-categories" hint="Internal grouping for service items. Never exported to CSV/xlsx.">
         {tool('Manage (' + (subCats || []).length + ')...', () => setSubCatsOpen(true))}
       </SettingRow>
@@ -3204,6 +3406,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           onClose={() => setSubCatsOpen(false)}
         />
       )}
+      <ImportXlsxModal open={importOpen} onClose={() => setImportOpen(false)} lib={lib} persist={persist} toast={toast} />
     </div>
   );
 }

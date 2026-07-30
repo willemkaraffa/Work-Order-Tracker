@@ -1128,6 +1128,14 @@ ipcMain.handle('library-import-roundtrip', async (_e, filePath) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
+ipcMain.handle('library-import-grid', async (_e, filePath) => {
+  // Generic arbitrary-xlsx read for the mapped importer (S3). Renderer maps columns.
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'File not found.' };
+    return { ok: true, ...(await libraryIO.readGrid(filePath)) };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 ipcMain.handle('library-export', async (_e, tabs) => {
   try {
     const { canceled, filePath } = await dialog.showSaveDialog({

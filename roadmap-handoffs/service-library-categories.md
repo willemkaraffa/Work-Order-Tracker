@@ -433,3 +433,146 @@ session; the above is NEXT session (or explicit override).
 - S1/S3: `npm run verify` + live app (observable nav/model change). Confirm tax
   keys + snapshot/restore.
 - S2: live render + USER row-by-row check vs PDF (accuracy is the gate).
+
+## S4 - retire seed buttons for universality (added 2026-07-30)
+
+Context. S3 shipped a GENERIC importer (readGrid + ImportXlsxModal): any user,
+any spreadsheet, any columns, mapped into a chosen catalog, no code. The Seed
+buttons (Seed General/AMH/MSR/MSR Plumbing) are the OPPOSITE: they encode THIS
+user's business and cannot be made universal.
+
+Why seed is not universal (do NOT try to genericize it -- genericizing = deleting
+its content):
+- Hardcoded vendor paths. `AMH_DEFAULT` = a fixed OneDrive path (main.js:1076);
+  Seed MSR reads the user's live HVAC bid sheet (`BID_SKELETON.HVAC`), which also
+  doubles as the WO-folder automation skeleton (a real integration, not a plain
+  price load).
+- Bespoke parsers. `parseAmh`/`parseMsr`/`parseGeneral` know the exact column
+  layout of specific vendor files, incl. section-header banner-row recovery via
+  `isSectionHeader`.
+- Embedded data. `plumbingSeedItems` = 53 hand-transcribed rows (the user's price
+  list).
+- Fixed catalogs. `LIBRARY_TABS = ['General','AMH','MSR']` = the user's clients.
+
+DECISION (user, 2026-07-30): two layers.
+- UNIVERSAL/PUBLIC layer = the importer. Harden it (items 1-3 below) so a fresh
+  user builds their entire library through it and never needs seed.
+- PRIVATE layer = the seed buttons. Keep, but gate behind a private flag / dev
+  build (item 4). They stay the user's one-click convenience for recurring vendor
+  files. They never ship as a public feature.
+
+### Item 1 - map material/labor in the importer
+- Add `material` + `labor` to `IMPORT_FIELDS` (2 more mappable columns) and to
+  `buildItems` (reuse the 'Included' sentinel = `MATERIAL_INCLUDED` from
+  library_io when the mapped cell is blank; else the parsed number). Right now the
+  split is seed-only; without this an imported catalog loses the Material/Labour
+  breakdown the price sheets carry (see "Labor/material breakdown" section above).
+- Invariant note: `material+labor==price` holds for MSR only; AMH is cost-basis
+  (does not sum to price). Importer just stores what is mapped; it does NOT enforce
+  the sum. Small.
+
+### Item 2 - dynamic catalogs (create/rename), retire fixed LIBRARY_TABS
+- `LIBRARY_TABS`/`emptyLibrary` (app.jsx:2872-2873) are a hardcoded 3-tab const.
+  Universality needs user-created catalogs. Grep first: catalog name is the object
+  KEY in `service_library` ({ General:[], AMH:[], MSR:[] }); reuse that map, do not
+  add a parallel list. Migration: existing keys become the initial catalog set.
+- Importer target-catalog dropdown gains a "New catalog..." option. Downstream
+  readers assuming exactly 3 tabs must be found (grep `LIBRARY_TABS`,
+  `library.General|AMH|MSR`, `tabName`) and made catalog-agnostic. Medium; this is
+  the biggest gap, touches invoicing (resolveBidLine client->General fallback).
+
+### Item 3 - sections as a MAPPED column, not banner-row heuristic
+- Vendor sheets bury section headers as heading rows; parseAmh/parseMsr recover
+  them with `isSectionHeader`. That heuristic is a format-quirk crutch, not a
+  universal mechanism. In the importer, `section` is ALREADY a mappable column
+  (page too) -- so item 3 is mostly DOC: the universal contract is "one row per
+  item, section/page are columns." Optional nicety: a "fill section down" toggle
+  (carry last non-blank section value down blank rows) for sheets that print the
+  section once per group. Small/optional.
+
+### Item 4 - gate the seed buttons private
+- Wrap the four Seed buttons (app.jsx:3176-3179) behind a build/private flag (e.g.
+  an env or a `settings` dev toggle). Public build hides them; the user's build
+  shows them. The generic Import + Export + Restore stay public. Small.
+- Do NOT delete parseAmh/parseMsr/parseGeneral/plumbingSeedItems; they are the
+  user's private integration and keep working behind the flag.
+
+Ordering: 1 (small, immediate parity) -> 3 doc/toggle -> 4 gate -> 2 last (widest
+blast radius, invoicing coupling). Items 1+3+4 make seed obsolete for a new user;
+item 2 removes the last hardcoded assumption.
+
+### Verify plan (S4)
+- Item 1: `npm run verify` + import a sample xlsx WITH material/labor cols, confirm
+  split lands (incl. blank -> 'Included'). Live.
+- Item 2: `npm run verify` + create a new catalog via import, confirm it persists,
+  renders, and invoicing still resolves General fallback. Live + the invoicing
+  regression is the real risk -- test resolveBidLine explicitly.
+- Item 3/4: `verify` + code trace + one live glance (toggle hides seed; fill-down
+  optional).
+
+## S4 (cont.) - modularity + PM/custom separation (added 2026-07-30)
+
+Root cause (investigated 2026-07-30). Sections are NOT stored in a list; they are
+DERIVED from `item.subCategory` at render (invoices.jsx:158-162 union, :164 group).
+The user-editable "Sub-categories" Manage list = `settings.librarySubCats` is a thin
+overlay: ordering + a dropdown whitelist, written ONLY by manual add / the editor,
+never by seeds. So the list you SEE (grouping headers, dropdowns) is item-derived
+PM data; the list you can EDIT is a different, thinner list. That mismatch is why
+seeded PM sections cannot be pruned from the UI, and it is the "not modular enough".
+Design contract going forward: `item.subCategory` (+ `item.page`) is the SOLE source
+of truth for L2/L3; `librarySubCats` is CUSTOM ordering only; seeders own PM section
+names.
+
+### Item 5 - librarySubCats becomes custom-only
+- `librarySubCats` must never hold a PM/seeded section. Reuse the existing field
+  (do NOT add a parallel list): one-time purge on load = drop any `librarySubCats`
+  entry that equals a `subCategory` present on a seeded (non-`manual`) item in the
+  library. addFromModal already appends typed sub-cats (invoices.jsx:192-194); leave
+  that (those are custom). Nothing vanishes from the table: PM sections still render
+  via item derivation. Only the Manage list + custom dropdowns declutter. Small.
+- Verify: `npm run verify` + confirm a seeded section (e.g. an AMH family) is gone
+  from the Manage list but still groups items in the table.
+
+### Item 6 - seeders create/target any L1 catalog
+- Rides on item 2 (dynamic catalogs). Once catalogs are the object keys of
+  `service_library` and not the fixed `LIBRARY_TABS`, a seeder may create a new L1
+  (new client price sheet) instead of only General/AMH/MSR. L2 pages + L3 sections
+  already appear for free on re-seed (item-derived), so "seeder adds new sub-cats on
+  price-sheet update" needs NO extra code beyond item 2. Note in the seed flow:
+  `replaceTab` keeps `manual:true` items and replaces sheet-sourced ones, so a
+  re-seed that introduces new families is non-destructive to hand-adds.
+
+### Item 7 - normalize AMH sections in parseAmh (PRIVATE / PO)
+- Hardcoded personal data. Belongs to the private seeder layer, gated with item 4.
+  Concrete targets FOUND 2026-07-30 by dumping the live AMH source
+  (`New Structure-20260318 ... (1).xlsx`) through parseAmh (239 items, 29 sections):
+  1. FALSE SECTION: `"Adjust ECM motor speed to match system tonnage for 1.5 - 2.5
+     & 3.5 Ton units"` becomes a subCategory over 14 size rows. It is a descriptive
+     banner, not a family. Root: the family-header lookahead (library_io.js:135)
+     treats any non-size row followed by a size row as a family. Fix: recognize/skip
+     this banner (or require family headers to be short / colon-free) so its sizes
+     fall under the true section. VERIFY by re-dumping: section count drops, the 14
+     sizes reparent.
+  2. COSMETIC: upper-section names carry trailing colons (`"Clogs:"`, `"Toilet:"`,
+     `"Furnace:"`) while HVAC families do not (`"Evaporator Coil"`). Strip the
+     trailing colon in parseAmh for consistency (isSectionHeader-set names).
+  3. STALE "service call" sections the user sees are NOT in the current source
+     (only 3 service-ish items exist, already folded into real sections). They live
+     in the PERSISTED store from an older seed. Resolution = re-seed AMH (replaces
+     sheet-sourced items) OR the item-5 purge; NOT a parser change. Confirm by
+     re-seeding then re-reading the stored AMH subCategory set.
+- Data read is DONE; a coder spawn can implement 1+2 from the findings above. Item 3
+  is a user action (re-seed), no code.
+
+### Item 8 - left panel: PM vs custom visual separation
+- `allTabs` (invoices.jsx:129-132) already pins `LIBRARY_TABS` first, then custom
+  keys. Add a labeled "PM (private)" group at the TOP of the Catalogs sidebar with a
+  colored left-border / tint, a divider, then a "Custom" group below for the extra
+  keys. `LIBRARY_TABS.includes(t)` is the discriminator (no new field). Pure
+  presentation. Small.
+- Verify: live glance - built-ins bordered/grouped at top, custom below the divider.
+
+Ordering (revised): 1 -> 5 -> 7(1,2) -> 8 -> 4 -> 3 -> 2 -> 6. Items 1/5/7/8/4 are
+small and independent; 2 is the wide one (invoicing coupling) and 6 rides it. One
+coder spawn should batch 1+5+8 (+7 if private build in same pass); 2+6 is a second,
+separately-scoped spawn given blast radius.

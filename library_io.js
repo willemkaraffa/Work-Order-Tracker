@@ -344,6 +344,35 @@ async function parseRoundtrip(filePath) {
   return out;
 }
 
+// ── Generic import: read an ARBITRARY xlsx into a raw grid ────────────────────
+// Unlike parseRoundtrip (fixed export layout), this makes no assumption about the
+// columns. Returns { sheets: [{ name, rows: [[cell,...],...] }] } so the renderer
+// can show a preview + let the user map columns -> name/desc/price/taxable/page/
+// section. Numbers stay numbers (price parsing), everything else -> trimmed string.
+function gridCell(cell) {
+  const v = cellVal(cell);
+  if (v == null) return '';
+  if (typeof v === 'number') return v;
+  return toStr(v);
+}
+async function readGrid(filePath) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(filePath);
+  const sheets = [];
+  wb.eachSheet((ws) => {
+    const cols = ws.columnCount || 0;
+    const rows = [];
+    ws.eachRow((row) => {
+      const arr = [];
+      for (let c = 1; c <= cols; c++) arr.push(gridCell(row.getCell(c)));
+      // Drop fully-blank rows so the preview isn't padded with empties.
+      if (arr.some(x => x !== '' && x != null)) rows.push(arr);
+    });
+    sheets.push({ name: ws.name, cols, rows });
+  });
+  return { sheets };
+}
+
 // ── Export: write Service Library.xlsx, one sheet per tab ─────────────────────
 // tabs = { [tabName]: items[] }. Re-importable via parseRoundtrip.
 async function exportLibrary(filePath, tabs) {
@@ -378,4 +407,4 @@ async function exportLibrary(filePath, tabs) {
   await wb.xlsx.writeFile(filePath);
 }
 
-module.exports = { parseGeneral, parseAmh, parseMsr, parseRoundtrip, exportLibrary, isSectionHeader, splitFields, plumbingSeedItems, MATERIAL_INCLUDED };
+module.exports = { parseGeneral, parseAmh, parseMsr, parseRoundtrip, readGrid, exportLibrary, isSectionHeader, splitFields, plumbingSeedItems, MATERIAL_INCLUDED };
