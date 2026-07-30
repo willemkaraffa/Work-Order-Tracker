@@ -11,19 +11,22 @@
       {
         "matcher": "Bash",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "PowerShell",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/verify-thrash-guard.js" }
         ]
       },
       {
         "matcher": "Agent",
         "hooks": [
-          { "type": "command", "command": "node node_modules/project-overseer/hooks/role-router.js" }
+          { "type": "command", "command": "node node_modules/project-overseer/hooks/role-router.js" },
+          { "type": "command", "command": "node .claude/hooks/spawn-limiter.js" }
         ]
       },
       {
@@ -47,14 +50,22 @@
       {
         "matcher": "Edit",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/role-lock.js" },
+          { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/user-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
+          { "type": "command", "command": "node .claude/hooks/commit-authority-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/role-lock.js" },
+          { "type": "command", "command": "node .claude/hooks/coder-role-gate.js" },
           { "type": "command", "command": "node .claude/hooks/scraper-data-gate.js" },
+          { "type": "command", "command": "node .claude/hooks/user-authority-gate.js" },
           { "type": "command", "command": "node node_modules/project-overseer/hooks/plan-scope-guard.js" }
         ]
       }

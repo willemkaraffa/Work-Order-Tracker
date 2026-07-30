@@ -1,0 +1,43 @@
+#!/bin/sh
+# post-commit: retire a plan whose work has landed.
+#
+# WHY THIS EXISTS. `approved` used to have no exit. plan-step.js reaches only a step's
+# done/evidence fields and plan-approve.js only enters `approved`, so a plan with every
+# step done and its work already committed kept enforcing its scope over all later,
+# unrelated work. The only way out was overwriting .plan.json with the next architect
+# draft, which is a side effect, not a mechanism. On 2026-07-24 it bit twice in one day:
+# it blocked a documentation edit here, and it refused an unrelated commit in
+# Project-Overseer by citing a plan that had already been merged.
+#
+# WHY POST-COMMIT AND NOT PRE-COMMIT. Two reasons, both load-bearing:
+#   1. Status must not flip for a commit that might still be refused. commit-msg runs
+#      AFTER pre-commit, so a plan closed in pre-commit could be retired by a commit
+#      that never happened.
+#   2. Closing a plan RELEASES the scope guard. A close Claude can invoke is a leash
+#      Claude can drop. A git hook is the one caller Claude never reaches.
+#
+# WHAT HAS ALREADY HAPPENED BY THE TIME THIS RUNS. pre-commit's plan-check verified that
+# every done-step's cited evidence really appeared in the commit diff. So this does not
+# decide whether the work was done; it only stops a finished plan from enforcing. A step
+# falsely marked done was already caught upstream of here.
+#
+# NEVER FAILS A COMMIT. The commit exists by the time this runs, so there is nothing left
+# to refuse and a non-zero exit would only print alarming text about a commit that
+# succeeded. Every path exits 0.
+#
+# .plan.json is gitignored, so the write leaves no dirty tree and nothing to stage.
+#
+# WHY THIS FILE EXISTS SEPARATELY FROM THE PACKAGE: .githooks is PER-REPO and is not
+# shipped inside project-overseer, the same way .githooks/pre-commit here is a local
+# file that calls into node_modules. Installing the package alone does NOT install this.
+
+node -e "
+  try {
+    var id = require('project-overseer/scripts/plan.js').closeIfFinished();
+    if (id) console.log('[post-commit] plan ' + id + ' CLOSED: every step done, scope no longer enforced.');
+  } catch (e) {
+    console.warn('[post-commit] plan close skipped (' + e.message + ')');
+  }
+" || true
+
+exit 0

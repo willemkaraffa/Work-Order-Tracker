@@ -164,6 +164,39 @@ export function migrateOrders(orders, storedPhases) {
   });
 }
 
+// ── Service Library model migration (S1a) ─────────────────────────────────────
+// Introduces the 3-level model (L2 `page`). Pure + idempotent + version-guarded via
+// a SIBLING storage key (NOT stored inside the lib object -- that would pollute
+// Object.keys(lib)/LIBRARY_TABS iterations). AMH overloaded `desc` to hold its trade
+// -> promote to `page` and clear desc. MSR was flat/all-HVAC -> stamp page='HVAC'.
+// General already nests correctly and custom L1 categories are left alone. NEVER
+// mutates name/price/taxable or the L1 keys. Second run flips 0 rows.
+// Returns { lib, flipped } -- count flipped rows, do not trust the version flag alone.
+export const LIB_MODEL_VERSION = 1;
+export function migrateLibraryModel(lib) {
+  if (!lib || typeof lib !== 'object') return { lib, flipped: 0 };
+  let flipped = 0;
+  const out = {};
+  for (const key of Object.keys(lib)) {
+    const items = lib[key];
+    if (!Array.isArray(items)) { out[key] = items; continue; }
+    out[key] = items.map(it => {
+      if (!it || typeof it !== 'object') return it;
+      if (key === 'AMH' && !it.page && it.desc) {
+        flipped++;
+        const { desc, ...rest } = it;
+        return { ...rest, page: desc, desc: '' };
+      }
+      if (key === 'MSR' && !it.page) {
+        flipped++;
+        return { ...it, page: 'HVAC' };
+      }
+      return it;
+    });
+  }
+  return { lib: out, flipped };
+}
+
 // change11: migrate stored phases, statuses, statusColors in sync with
 // migrateOrders. Returns a patch object suitable for updateData(...).
 export function migrateSettingsForChange11(stored) {
@@ -1065,4 +1098,18 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
     if (Math.abs(off) > 0.005) totalFlag = off;
   }
   return { lines, changes, totalDelta, totalFlag };
+}
+
+// Rename a section label across the whole library: rewrite every item's
+// subCategory old->new in every catalog. Pure; caller persists the result.
+// Merge falls out naturally (two names -> one). Guards non-array values.
+export function renameSubCategory(lib, oldName, newName) {
+  if (!lib || !oldName || !newName || oldName === newName) return lib;
+  const next = {};
+  for (const [cat, arr] of Object.entries(lib)) {
+    next[cat] = Array.isArray(arr)
+      ? arr.map(it => it && it.subCategory === oldName ? { ...it, subCategory: newName } : it)
+      : arr;
+  }
+  return next;
 }

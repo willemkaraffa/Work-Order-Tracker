@@ -95,4 +95,37 @@ export default [
     files: ["test/**/*.js"],
     rules: { "no-unused-vars": "warn" },
   },
+  // The Chrome extension, vendored into this repo on 2026-07-22. It had lived in a
+  // loose folder on the Desktop with a git repo holding ZERO commits, so none of it
+  // was versioned and none of these gates reached it. That is how a scan that read
+  // the wrong browser tab shipped and stayed invisible.
+  //
+  // Browser + MV3 service-worker globals, no React, no node. no-undef is the rule
+  // that matters here for the same reason it matters in src/: a typo'd global in a
+  // content script fails silently on a portal page nobody is watching.
+  {
+    files: ["extension/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: "script",
+      globals: {
+        chrome: "readonly", window: "readonly", document: "readonly",
+        console: "readonly", fetch: "readonly", location: "readonly",
+        navigator: "readonly", localStorage: "readonly", alert: "readonly",
+        confirm: "readonly", prompt: "readonly",
+        setTimeout: "readonly", clearTimeout: "readonly",
+        setInterval: "readonly", clearInterval: "readonly",
+        Blob: "readonly", URL: "readonly", FormData: "readonly",
+        MutationObserver: "readonly", getComputedStyle: "readonly",
+        AbortSignal: "readonly", requestAnimationFrame: "readonly",
+        module: "writable", XMLHttpRequest: "readonly", Event: "readonly",
+        CustomEvent: "readonly", HTMLElement: "readonly", Node: "readonly",
+      },
+    },
+    rules: {
+      "no-undef": "error",
+      "no-empty": ["error", { allowEmptyCatch: true }],
+      "no-unused-vars": "warn",
+    },
+  },
 ];

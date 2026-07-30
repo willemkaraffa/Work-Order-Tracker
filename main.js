@@ -130,10 +130,75 @@ function startBridgeServer(win) {
       req.on('end', () => {
         try {
           const d = JSON.parse(body);
-          if (win && !win.isDestroyed()) win.webContents.send('msr-found', Array.isArray(d.items) ? d.items : []);
+          // `source` = which tab the extension actually scanned. Forwarded so the
+          // renderer can SHOW it: a scan of the wrong Amherst tab used to be
+          // indistinguishable from a scan of the right one (2026-07-22).
+          if (win && !win.isDestroyed()) win.webContents.send('msr-found', Array.isArray(d.items) ? d.items : [], d.source || null);
         } catch (e) {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
+    // ONE AMH EXTRACTOR, NOT TWO.
+    //
+    // The extension's on-page Capture button used to run its own DOM scraper for AMH
+    // (`scrapeAMH` in content.js) while bulk capture ran `scrape_amh.py` against the
+    // portal API. Same work order, two code paths, different answers: the button path
+    // returned no contactName, no contacts and NO BID AMOUNT, and nothing said so.
+    // Both reported success, which is how it went unnoticed.
+    //
+    // So the button now asks the APP to capture, and the app runs the same
+    // runAmhCapture the in-app buttons use. There is now one AMH extractor. Adding a
+    // field to it reaches every caller, which is the property that was missing.
+    //
+    // Slow on purpose: this spawns Edge and logs in. The extension side must allow for
+    // that; it is still faster than a wrong record.
+    if (req.method === 'POST' && req.url === '/capture-amh') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', async () => {
+        const send = (code, obj) => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(obj));
+        };
+        let woNum = '';
+        try { woNum = String((JSON.parse(body) || {}).woId || '').trim(); }
+        catch (e) { return send(400, { ok: false, error: 'bad JSON: ' + e.message }); }
+        if (!woNum) return send(400, { ok: false, error: 'no woId supplied' });
+
+        // ACK IMMEDIATELY, CAPTURE AFTERWARDS.
+        //
+        // This used to hold the HTTP response open for the whole capture, which spawns
+        // Edge and signs in and takes tens of seconds. The caller is an MV3 service
+        // worker, and Chrome terminates those while idle: it was killed mid-fetch, the
+        // response was dropped, and the on-page button sat on "Tracker capturing..."
+        // forever with no error path. Observed live on the first real test.
+        //
+        // The round trip was pointless anyway. The app is the thing that captures, so
+        // the app keeps the result: it goes into the SAME 'extension-import' channel a
+        // normal extension import uses, which merges it, dedups it and raises the usual
+        // notification. The extension does not need the record back.
+        send(200, { ok: true, started: true, woId: woNum });
+
+        try {
+          const results = await runAmhCapture([woNum], amhCredential());
+          const one = results[woNum];
+          if (one && one.ok && one.wo) {
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('extension-import', [one.wo]);
+              win.show();
+            }
+          } else if (win && !win.isDestroyed()) {
+            // A failure must reach the user too. Silence after a long job reads as
+            // success, and that is the exact failure mode this whole sweep keeps finding.
+            win.webContents.send('capture-failed',
+              { woId: woNum, error: (one && one.error) || 'AMH scraper returned nothing for this WO.' });
+          }
+        } catch (e) {
+          if (win && !win.isDestroyed()) win.webContents.send('capture-failed', { woId: woNum, error: e.message });
+        }
       });
       return;
     }
@@ -412,6 +477,9 @@ ipcMain.handle('storage-set', (_e, key, value) => {
 });
 ipcMain.handle('storage-delete', (_e, key) => {
   try { const s = readStore(); delete s[key]; writeStore(s); return { key, deleted: true }; } catch { return null; }
+});
+ipcMain.handle('storage-list', (_e, prefix) => {
+  try { const s = readStore(); const p = prefix || ''; return { keys: Object.keys(s).filter(k => k.startsWith(p)) }; } catch { return { keys: [] }; }
 });
 ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(false, true); });
 ipcMain.handle('log-lock-event', (_e, data) => { appendLockLog({ src: 'renderer', ...(data && typeof data === 'object' ? data : { data }) }); return true; });
@@ -1005,7 +1073,7 @@ ipcMain.handle('export-remittance-xlsx', async (_e, report) => {
 // ── IPC: Service-item Library (xlsx seed / import / export via exceljs) ───────
 // Renderer owns persistence (window.storage key 'service_library'); main only
 // does the xlsx file I/O. All handlers return { ok, ... } and never throw.
-const AMH_DEFAULT = path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'MSR Excel', 'AMH Premier Pricing All scopes.xlsx');
+const AMH_DEFAULT = path.join(app.getPath('home'), 'OneDrive', 'Desktop', 'excel', 'PM Bids Excel', 'New Structure-20260318- Carolina - Raleigh (1).xlsx');
 
 ipcMain.handle('library-choose-file', async () => {
   const r = await dialog.showOpenDialog({
@@ -1042,6 +1110,14 @@ ipcMain.handle('library-seed-msr', async (_e, overridePath) => {
       : path.join(BID_SKELETONS(), BID_SKELETON.HVAC);
     if (!fs.existsSync(p)) return { ok: false, error: `MSR HVAC bid sheet not found at:\n  ${p}` };
     return { ok: true, items: await libraryIO.parseMsr(p), path: p };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('library-seed-msr-plumbing', async () => {
+  // MSR Plumbing price list is hand-transcribed (no source xlsx); 53 rows live in
+  // library_io.plumbingSeedItems(). page:'Plumbing' so it coexists with MSR HVAC.
+  try {
+    return { ok: true, items: libraryIO.plumbingSeedItems() };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 

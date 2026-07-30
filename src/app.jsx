@@ -11,7 +11,7 @@ import {
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
-  recomputeInvoice, normWoNum, matchMsrRow,
+  recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
 export { DEFAULT_STATUSES };
@@ -1014,7 +1014,7 @@ function QuickJump({ open, orders, onClose, onPick }) {
 
 // Text-input modal. Replaces window.prompt(), which Electron does not support.
 // state = { title, initial?, placeholder?, submitLabel?, onSubmit(value) } | null
-function NamePromptModal({ state, onClose }) {
+export function NamePromptModal({ state, onClose }) {
   const [value, setValue] = React.useState('');
   const inputRef = React.useRef(null);
   React.useEffect(() => { setValue(state ? (state.initial || '') : ''); }, [state]);
@@ -2676,6 +2676,36 @@ function UpdateBanner({ state, onInstall }) {
 // When total is known (MSR per-WO loop) it shows a "done / total" counter + a
 // determinate bar; otherwise an indeterminate animated bar (AMH is one atomic
 // API call with no per-WO step).
+// A capture button that shows it was pressed.
+//
+// CaptureBanner already reports what a capture is doing, and it always did, but it
+// renders at the TOP of the window while the button lives in a toolbar elsewhere on
+// screen. Press it and look at it, and nothing happens: the app HAS reacted, just not
+// where the user is looking. AMH capture spawns a browser and signs in, so that dead
+// interval is many seconds long.
+//
+// Driven by the EXISTING `captureStatus`, which every capture path already sets. No new
+// state: a second in-progress flag could disagree with the banner, and two sources of
+// truth for one fact is how a spinner ends up stuck on forever.
+//
+// Hoisted rather than defined inside the render that uses it (rule A5): an inline
+// component is a new function identity every render, which remounts the button and
+// drops focus and hover.
+function CaptureButton({ busy, onClick, title, children }) {
+  return (
+    <button onClick={onClick} disabled={busy} title={title} style={{
+      height: 26, padding: '0 12px', borderRadius: 999,
+      border: '1px solid var(--border-1)', background: 'transparent',
+      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
+      fontWeight: 600, cursor: busy ? 'progress' : 'pointer', lineHeight: 1,
+      opacity: busy ? 0.65 : 1,
+    }}>
+      {busy && <span className="wo-spinner" />}
+      {children}
+    </button>
+  );
+}
+
 function CaptureBanner({ status }) {
   if (!status) return null;
   const { label, done, total } = status;
@@ -2904,6 +2934,24 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
+  // Plumbing coexists with HVAC in the one MSR tab. Re-run DROPS the existing
+  // page:'Plumbing' subset and appends the 53 fresh rows; HVAC items untouched.
+  const seedMsrPlumbing = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const r = await window.library.seedMsrPlumbing();
+      if (!r || !r.ok) { toast((r && r.error) || 'MSR Plumbing seed failed', 'err'); return; }
+      const cur = (lib && lib.MSR) || [];
+      const plumbCount = cur.filter(it => it && it.page === 'Plumbing').length;
+      const kept = cur.filter(it => !(it && it.page === 'Plumbing'));
+      if (plumbCount > 0 && !(await confirmDialog(
+        `Replace ${plumbCount} existing MSR Plumbing item(s) with ${r.items.length} from the plumbing price list? (MSR HVAC items kept)`))) return;
+      persist({ ...(lib || emptyLibrary()), MSR: [...kept, ...r.items] });
+      toast(`MSR Plumbing seeded: ${r.items.length} items`);
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
   const importBackup = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -2930,7 +2978,7 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-  return { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup };
+  return { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup };
 }
 
 // Loads + persists the service_library file. Shared by ServiceLibrary (module)
@@ -2943,7 +2991,25 @@ export function useServiceLibraryStore() {
       try {
         const r = window.storage && await window.storage.get('service_library');
         const v = r && r.value;
-        if (live) setLib(v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary());
+        let base = v && typeof v === 'object' ? { ...emptyLibrary(), ...v } : emptyLibrary();
+        // S1a: one-time library-model migration (version-guarded via a SIBLING key,
+        // idempotent). Snapshots to service_library_backup_<ISO> first (mirrors the
+        // wo_data_pre_migration_backup pattern), then migrates + bumps the version.
+        try {
+          if (window.storage && window.storage.set) {
+            const vr = await window.storage.get('service_library_model_version');
+            const ver = (vr && vr.value) || 0;
+            if (ver < LIB_MODEL_VERSION) {
+              await window.storage.set('service_library_backup_' + new Date().toISOString(), base);
+              const { lib: migrated, flipped } = migrateLibraryModel(base);
+              base = migrated;
+              await window.storage.set('service_library', base);
+              await window.storage.set('service_library_model_version', LIB_MODEL_VERSION);
+              console.info('[lib-migrate] flipped', flipped, 'rows');
+            }
+          }
+        } catch { /* migration best-effort; base still renders */ }
+        if (live) setLib(base);
       } catch { if (live) setLib(emptyLibrary()); }
     })();
     return () => { live = false; };
@@ -2955,19 +3021,23 @@ export function useServiceLibraryStore() {
   return [lib, persist];
 }
 
-export function SimpleListEditor({ title, items, setItems, onClose, singular }) {
+export function SimpleListEditor({ title, items, setItems, onClose, singular, onRename, onDelete }) {
   const [editingIdx, setEditingIdx] = React.useState(null);
   const [newName, setNewName] = React.useState('');
 
   const commitRename = (idx, val) => {
     const trimmed = (val || '').trim();
-    if (trimmed) setItems(items.map((v, i) => i === idx ? trimmed : v));
+    if (trimmed) {
+      if (onRename) onRename(items[idx], trimmed);
+      else setItems(items.map((v, i) => i === idx ? trimmed : v));
+    }
     setEditingIdx(null);
   };
 
   const deleteItem = async (idx) => {
     if (!(await confirmDialog('Remove "' + items[idx] + '"?', { danger: true, confirmLabel: 'Remove' }))) return;
-    setItems(items.filter((_, i) => i !== idx));
+    if (onDelete) onDelete(items[idx]);
+    else setItems(items.filter((_, i) => i !== idx));
   };
 
   const addItem = () => {
@@ -3065,8 +3135,29 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular }) 
 // management, moved off the module header to declutter it.
 export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
-  const { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
+  const { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  // S1a safety net: restore the most recent pre-migration snapshot (ISO-suffixed keys
+  // sort chronologically). Resets the model-version to current so the restored library
+  // is NOT immediately re-migrated.
+  const restoreSnapshot = async () => {
+    if (!window.storage || !window.storage.list || !window.storage.get) { toast('Storage unavailable', 'err'); return; }
+    let keys = [];
+    try { const r = await window.storage.list('service_library_backup_'); keys = (r && r.keys) || []; }
+    catch { toast('Could not list snapshots', 'err'); return; }
+    if (!keys.length) { toast('No snapshot found', 'err'); return; }
+    keys.sort();
+    const latest = keys[keys.length - 1];
+    const when = latest.replace('service_library_backup_', '');
+    if (!(await confirmDialog('Restore the most recent Service Library snapshot (' + when + ')? This REPLACES the current library and cannot be undone.', { danger: true, confirmLabel: 'Restore' }))) return;
+    try {
+      const r = await window.storage.get(latest);
+      if (!r || !r.value) { toast('Snapshot empty', 'err'); return; }
+      persist(r.value);
+      if (window.storage.set) await window.storage.set('service_library_model_version', LIB_MODEL_VERSION);
+      toast('Snapshot restored');
+    } catch { toast('Restore failed', 'err'); }
+  };
   const counts = LIBRARY_TABS.map(t => t + ': ' + (((lib && lib[t]) || []).length)).join(' · ');
   const tool = (label, onClick, primary) => (
     <button onClick={onClick} disabled={busy || lib === null} style={{
@@ -3085,6 +3176,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           {tool('Seed General', seedGeneral)}
           {tool('Seed AMH', seedAmh)}
           {tool('Seed MSR', seedMsr)}
+          {tool('Seed MSR Plumbing', seedMsrPlumbing)}
         </div>
       </SettingRow>
       <SettingRow label="Backup" hint={'Round-trip xlsx. ' + (lib === null ? '' : counts)}>
@@ -3096,12 +3188,19 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
       <SettingRow label="Sub-categories" hint="Internal grouping for service items. Never exported to CSV/xlsx.">
         {tool('Manage (' + (subCats || []).length + ')...', () => setSubCatsOpen(true))}
       </SettingRow>
+      <SettingRow label="Restore" hint="Roll back to the most recent auto-snapshot taken before a library migration.">
+        {tool('Restore last snapshot', restoreSnapshot)}
+      </SettingRow>
       {subCatsOpen && (
         <SimpleListEditor
           title="Library sub-categories"
           singular="sub-category"
           items={subCats}
           setItems={setSubCats}
+          onRename={(oldN, newN) => {
+            setSubCats([...new Set((subCats || []).map(s => s === oldN ? newN : s))]);
+            if (lib) persist(renameSubCategory(lib, oldN, newN));
+          }}
           onClose={() => setSubCatsOpen(false)}
         />
       )}
@@ -4176,10 +4275,22 @@ function App() {
         if (window.extensionBridge.acknowledge) window.extensionBridge.acknowledge();
       });
     }
+    if (window.extensionBridge && window.extensionBridge.onCaptureFailed) {
+      // Extension-initiated AMH capture failed. The on-page button already returned,
+      // so this is the only surface the user can learn from.
+      window.extensionBridge.onCaptureFailed((info) => {
+        setCaptureStatus(null);
+        pushNotif({ kind: 'capture', captureType: 'import',
+          title: 'AMH capture failed · WO ' + (info.woId || '?'),
+          sub: String(info.error || 'unknown error').slice(0, 160),
+          payload: { batch: [], ts: Date.now() } });
+        toast('AMH capture failed: ' + String(info.error || 'unknown error').slice(0, 120), 'err');
+      });
+    }
     if (window.extensionBridge && window.extensionBridge.onFoundWos) {
       // Extension scanned an MSR list page; diff its WO numbers against the
       // tracker and surface the ones not yet added.
-      window.extensionBridge.onFoundWos((items) => {
+      window.extensionBridge.onFoundWos((items, source) => {
         // Results arrived: clear the in-flight scan banner (mirror onImport).
         if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
         setCaptureStatus(null);
@@ -4207,7 +4318,13 @@ function App() {
         }
         // Notification instead of auto-popping the modal; click opens the list.
         pushNotif({ kind: 'capture', captureType: 'msr', title: fresh.length ? (fresh.length + ' new MSR WO' + (fresh.length === 1 ? '' : 's')) : 'MSR scan: no new WOs',
-          sub: fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'), payload: { items: fresh, scanned: arr.length } });
+          // Name the PAGE that was scanned. A scan of a stale work-order detail tab
+          // returns a handful of plausible WOs and used to read exactly like a clean
+          // scan of the list, so "no new WOs" could mean "looked in the wrong place".
+          sub: (fresh.length ? 'Click to review' : (arr.length + ' scanned, all in tracker'))
+            + (source && source.title ? ' · ' + String(source.title).slice(0, 60) : '')
+            + (source && source.tabCount > 1 ? ' (' + source.tabCount + ' MSR tabs open)' : ''),
+          payload: { items: fresh, scanned: arr.length, source: source || null } });
         toast(fresh.length ? (fresh.length + ' new MSR WO(s) found' + (trashedSkipped ? ', ' + trashedSkipped + ' cancelled skipped' : ''))
                            : (trashedSkipped ? trashedSkipped + ' cancelled skipped; no new MSR WOs' : 'No new MSR WOs on this list'));
       });
@@ -5617,9 +5734,20 @@ function App() {
       const batch = [...newBatch, ...updatedBatch];
       // Notification instead of an auto-popping modal so the scrape doesn't
       // interrupt; click the item to open the review modal.
-      if (batch.length) pushNotif({ kind: 'capture', captureType: 'import',
-        title: 'AMH capture · ' + added + ' new, ' + updated + ' updated',
-        sub: 'Click to review' + (warned ? (' · ' + warned + ' warnings') : ''),
+      // ALWAYS notify, including the nothing-changed run. This used to fire only when
+      // `batch` was non-empty, so a capture that found no new work and changed nothing
+      // ended in total silence: the banner vanished and the bell stayed empty, which
+      // reads exactly like a capture that failed. A long operation that finishes must
+      // say so, even when the answer is "no change".
+      pushNotif({ kind: 'capture', captureType: 'import',
+        title: batch.length
+          ? ('AMH capture · ' + added + ' new, ' + updated + ' updated')
+          : 'AMH capture · no changes',
+        sub: batch.length
+          ? ('Click to review' + (warned ? (' · ' + warned + ' warnings') : ''))
+          : ('Portal checked, nothing new'
+             + (trashedSkipped ? (' · ' + trashedSkipped + ' cancelled skipped') : '')
+             + (fail ? (' · ' + fail + ' failed') : '')),
         payload: { batch, ts: Date.now(), dupSkipped, warnByNum, modifiedCount: updated } });
       toast('Captured ' + updated + ' updated, ' + added + ' new'
         + (warned ? (', ' + warned + ' with warnings') : '')
@@ -6220,20 +6348,16 @@ function App() {
               headerRight={(
                 <div style={{ display: 'flex', gap: 6 }}>
                   {(window.scraper && window.scraper.captureAllAMH) && (
-                    <button onClick={captureAllAMH} title="Capture all active AMH work orders from the portal" style={{
-                      height: 26, padding: '0 12px', borderRadius: 999,
-                      border: '1px solid var(--border-1)', background: 'transparent',
-                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
-                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
-                    }}>Capture all AMH</button>
+                    <CaptureButton busy={!!captureStatus} onClick={captureAllAMH}
+                      title="Capture all active AMH work orders from the portal">
+                      Capture all AMH
+                    </CaptureButton>
                   )}
                   {(window.extensionBridge && window.extensionBridge.requestFindNewMsr) && (
-                    <button onClick={findNewMsr} title="Scan the open MSR list page for work orders not yet in the tracker (Chrome + extension must be open)" style={{
-                      height: 26, padding: '0 12px', borderRadius: 999,
-                      border: '1px solid var(--border-1)', background: 'transparent',
-                      color: 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
-                      fontWeight: 600, cursor: 'pointer', lineHeight: 1,
-                    }}>Find new MSR WOs</button>
+                    <CaptureButton busy={!!captureStatus} onClick={findNewMsr}
+                      title="Scan the open MSR list page for work orders not yet in the tracker (Chrome + extension must be open)">
+                      Find new MSR WOs
+                    </CaptureButton>
                   )}
                 </div>
               )}

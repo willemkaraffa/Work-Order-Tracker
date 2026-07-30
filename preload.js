@@ -4,7 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('storage', {
   get:    (key)        => ipcRenderer.invoke('storage-get', key),
   set:    (key, value) => ipcRenderer.invoke('storage-set', key, value),
-  delete: (key)        => ipcRenderer.invoke('storage-delete', key)
+  delete: (key)        => ipcRenderer.invoke('storage-delete', key),
+  list:   (prefix)     => ipcRenderer.invoke('storage-list', prefix)
 });
 
 // CSV export
@@ -35,7 +36,11 @@ contextBridge.exposeInMainWorld('extensionBridge', {
   // arrive via onFoundWos. (MSR batch capture was dropped — Aura lazy-render made
   // off-screen scraping unreliable; the user adds new WOs via the on-page button.)
   requestFindNewMsr: () => ipcRenderer.invoke('queue-ext-command', 'findNewMsr'),
-  onFoundWos: (cb) => ipcRenderer.on('msr-found', (_e, items) => cb(items)),
+  onFoundWos: (cb) => ipcRenderer.on('msr-found', (_e, items, source) => cb(items, source)),
+  // An AMH capture started from the extension's on-page button failed. The button
+  // acks immediately (see main.js /capture-amh), so the app is the only place this
+  // can surface; without it the failure would be silent.
+  onCaptureFailed: (cb) => ipcRenderer.on('capture-failed', (_e, info) => cb(info || {})),
 });
 
 // Service-item library bridge — xlsx seed / import / export (persistence stays
@@ -45,6 +50,7 @@ contextBridge.exposeInMainWorld('library', {
   seedGeneral:      (path)       => ipcRenderer.invoke('library-seed-general', path || ''),
   seedAmh:          (path)       => ipcRenderer.invoke('library-seed-amh', path || ''),
   seedMsr:          ()           => ipcRenderer.invoke('library-seed-msr'),
+  seedMsrPlumbing:  ()           => ipcRenderer.invoke('library-seed-msr-plumbing'),
   importRoundtrip:  (path)       => ipcRenderer.invoke('library-import-roundtrip', path || ''),
   export:           (tabs)       => ipcRenderer.invoke('library-export', tabs),
 });
