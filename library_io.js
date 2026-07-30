@@ -132,8 +132,15 @@ async function parseAmh(filePath) {
       // isn't miscaught as a section (which would clear currentFamily and de-prefix the
       // sizes). No real section header is directly followed by a size row.
       const nxt = nextNamed(i);
-      if (!SIZE_RE.test(name) && nxt && SIZE_RE.test(nxt.name)) { currentFamily = name; continue; }
-      if (isSectionHeader(name, price)) { currentSection = name; currentFamily = null; continue; }
+      // A real family header is short + colon-free ('Evaporator Coil'). A long
+      // descriptive banner ('Adjust ECM motor speed ... for 1.5 - 2.5 & 3.5 Ton
+      // units') also precedes size rows but is NOT a family; guard by length/colon
+      // (item 7) so it falls through to the skip below and its sizes reparent to
+      // the true section instead of becoming a bogus subCategory over 14 rows.
+      if (!SIZE_RE.test(name) && nxt && SIZE_RE.test(nxt.name) && name.length <= 48 && !name.includes(':')) { currentFamily = name; continue; }
+      // Strip a trailing colon so AMH sections ('Clogs:') read like HVAC families
+      // ('Evaporator Coil') -- cosmetic consistency (item 7).
+      if (isSectionHeader(name, price)) { currentSection = name.replace(/:\s*$/, ''); currentFamily = null; continue; }
       // Size row under a family (or bare): B/C are SEER cost tiers, NOT material/labor,
       // so use the 'Included' sentinel. Name = the size token ALONE (e.g. '1.5 Ton'):
       // the section header (subCategory=family) already carries the family context, so
