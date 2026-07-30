@@ -62,7 +62,9 @@ function check(label, fn) {
   // A 'Maintenance:' section header + a normal item, then two equipment families
   // ('Evaporator Coil', a coil/coil bundle) whose col-D is a SEER tier LABEL, not
   // a price, recognized only because 'Ton' size rows follow. Family rows must NOT
-  // emit; size rows must emit as '<family> <size>' with Included material/labor.
+  // emit; size rows emit as the size token ALONE (name='1.5 Ton', subCategory=family)
+  // with Included material/labor. Two families share a size token, so find by
+  // name AND subCategory together.
   const tmp2 = path.join(os.tmpdir(), 'amh_hvac_test_' + Date.now() + '.xlsx');
   const wb2 = new ExcelJS.Workbook();
   const hv = wb2.addWorksheet('HVAC');
@@ -86,21 +88,21 @@ function check(label, fn) {
     assert.ok(!hvac.some(i => i.name === 'Evaporator Coil'), 'Evaporator Coil leaked as item');
     assert.ok(!hvac.some(i => i.name === 'Condenser / Evaporator Coil Replacement'), 'bundle family leaked');
   });
-  check('size row -> "Evaporator Coil 1.5 Ton", subCategory family, price=D', () => {
-    const it = hvac.find(i => i.name === 'Evaporator Coil 1.5 Ton');
+  check('size row -> name "1.5 Ton", subCategory family, price=D', () => {
+    const it = hvac.find(i => i.name === '1.5 Ton' && i.subCategory === 'Evaporator Coil');
     assert.ok(it, 'Evaporator Coil 1.5 Ton missing');
     assert.strictEqual(it.subCategory, 'Evaporator Coil');
     assert.strictEqual(it.price, 995.59);
     assert.strictEqual(it.material, 'Included');
     assert.strictEqual(it.labor, 'Included');
   });
-  check('second size row emits with family prefix + D price', () => {
-    const it = hvac.find(i => i.name === 'Evaporator Coil 2 Ton');
+  check('second size row emits under family + D price', () => {
+    const it = hvac.find(i => i.name === '2 Ton' && i.subCategory === 'Evaporator Coil');
     assert.ok(it, 'Evaporator Coil 2 Ton missing');
     assert.strictEqual(it.price, 1139.27);
   });
   check('bundle size row grouped under bundle family', () => {
-    const it = hvac.find(i => i.name === 'Condenser / Evaporator Coil Replacement 1.5 Ton');
+    const it = hvac.find(i => i.name === '1.5 Ton' && i.subCategory === 'Condenser / Evaporator Coil Replacement');
     assert.ok(it, 'bundle size row missing');
     assert.strictEqual(it.price, 2716.83);
     assert.strictEqual(it.subCategory, 'Condenser / Evaporator Coil Replacement');
@@ -138,11 +140,11 @@ function check(label, fn) {
   check('blank-price family header NOT emitted, sizes keep prefix (reorder)', () => {
     assert.strictEqual(blankfam.length, 2);
     assert.ok(!blankfam.some(i => i.name === 'Package Unit'), 'blank-price family leaked as item/section');
-    const it = blankfam.find(i => i.name === 'Package Unit 1.5 Ton');
+    const it = blankfam.find(i => i.name === '1.5 Ton' && i.subCategory === 'Package Unit');
     assert.ok(it, 'Package Unit 1.5 Ton missing');
     assert.strictEqual(it.subCategory, 'Package Unit');
     assert.strictEqual(it.price, 3200);
-    assert.strictEqual(blankfam.find(i => i.name === 'Package Unit 2 Ton').price, 3500);
+    assert.strictEqual(blankfam.find(i => i.name === '2 Ton' && i.subCategory === 'Package Unit').price, 3500);
   });
 
   console.log('');

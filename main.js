@@ -1113,6 +1113,14 @@ ipcMain.handle('library-seed-msr', async (_e, overridePath) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
+ipcMain.handle('library-seed-msr-plumbing', async () => {
+  // MSR Plumbing price list is hand-transcribed (no source xlsx); 53 rows live in
+  // library_io.plumbingSeedItems(). page:'Plumbing' so it coexists with MSR HVAC.
+  try {
+    return { ok: true, items: libraryIO.plumbingSeedItems() };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 ipcMain.handle('library-import-roundtrip', async (_e, filePath) => {
   try {
     if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'File not found.' };

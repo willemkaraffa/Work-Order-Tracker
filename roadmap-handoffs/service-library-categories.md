@@ -365,6 +365,69 @@ session; the above is NEXT session (or explicit override).
   Watch the known 2-row-header families (80% / 93%+ Furnace) so the family name
   used for the header is the product line, not the "Adjust ECM..." note row.
 
+### Progress 2026-07-29 (session 4) - #5+#6 PARTIAL, blocked by API 529
+- library_io.js DONE (role gate allowed it):
+  - parseAmh look-ahead size rows now emit `name: name` (size token alone, e.g.
+    "1.5 Ton"); dropped the `family + ' ' + name` prefix. subCategory still = family.
+    (item-name trim.)
+  - New `plumbingSeedItems()` = the 53 rows from this doc's table, built as
+    { name, desc:'', price:Total, taxable:false, page:'Plumbing', subCategory:<section>,
+    manual:true, material, labor }. 7 bundled rows use MATERIAL_INCLUDED ('Included').
+    Exported in module.exports.
+- NOT DONE (blocked): main.js IPC `library-seed-msr-plumbing`, preload.js
+  `seedMsrPlumbing` bridge, app.jsx `seedMsrPlumbing` merge + "Seed MSR Plumbing"
+  button, parse-amh.test.js name-assertion fixups, new test/parse-plumbing.test.js.
+  `npm run verify` NOT run. Gate NOT green. Nothing committed.
+- DESIGN LOCKED for the pending wiring (hand to a builder verbatim next session):
+  - main.js: handler returns { ok:true, items: libraryIO.plumbingSeedItems() }.
+  - preload.js: `seedMsrPlumbing: () => ipcRenderer.invoke('library-seed-msr-plumbing')`.
+  - app.jsx useLibraryTools: a NEW `seedMsrPlumbing` (NOT replaceTab -- Plumbing must
+    coexist with HVAC in the one MSR tab). Merge = drop existing `page==='Plumbing'`
+    items, append the 53. Idempotent, HVAC untouched, confirmDialog with existing count.
+    Add to hook return + destructure in LibraryToolsSection + button after Seed MSR.
+  - parse-amh.test.js: size items now named by size token alone; find by
+    name AND subCategory (multiple families share "1.5 Ton").
+  - test/parse-plumbing.test.js: 53 items; all page/taxable:false/manual:true/desc:'';
+    numeric material+labor==price (7 'Included' rows exempt); exactly 7 'Included';
+    spot-check 40 Gal Gas = 1503.82 / 828.82 / 675 / 'Water Heater Replacement'.
+- ROOT CAUSE of the stall: two builder spawns died on Anthropic API 529 (Overloaded)
+  before any work; the spawn-limiter counts attempts, so a 3rd = declared system
+  failure and hard-blocked. NOT a scope/approach fault. Grant for spawn 2 does not
+  carry. FIX: fresh session resets the counter; re-dispatch the same spec.
+- GATE for #5 data: user's row-by-row PDF check of the 53 plumbing rows still pending.
+
+### Progress 2026-07-29 (session 5) - DATA GATE PASSED, wiring still blocked by 529
+- DATA GATE GREEN: 53/53 plumbing rows in library_io.js PLUMBING_TABLE verified
+  row-by-row vs ~/Downloads/pricesheet.pdf section 4. Prices (material/labour/total)
+  exact; material+labor==total holds every numeric row; 7 'Included' sentinels
+  correct (Sewer 5, Toilet 1, Sinks 1); section names verbatim; Permit + Minimum
+  Job Fee + Other correctly EXCLUDED. plumbingSeedItems() may seed as-is.
+- Builder spawn died on API 529 (Overloaded) again before any work. NOT a scope
+  fault. No files touched. library_io.js partial edits still stand.
+- RESUME: re-dispatch the SAME builder spec (5 wiring items: main.js IPC,
+  preload bridge, app.jsx seedMsrPlumbing merge+button, parse-amh.test fixups,
+  new test/parse-plumbing.test.js) then npm run verify. Spec verbatim in the
+  DESIGN LOCKED block above (lines ~381-392). Counter resets next session.
+
+### Progress 2026-07-30 (session 6) - S2 WIRING DONE, gate green + live-verified, NOT committed
+- Builder (2nd spawn, human-granted via AskUserQuestion) built all 5 wiring items
+  first try. npm run verify GREEN: 29 pass / 0 fail / 0 skip, incl new
+  test/parse-plumbing.test.js. Chain consistent: main.js:1116 handler
+  library-seed-msr-plumbing -> preload.js:53 seedMsrPlumbing (window.library) ->
+  app.jsx:2943 window.library.seedMsrPlumbing().
+- app.jsx seedMsrPlumbing (2939-2954) MERGE (not replaceTab): kept = MSR items
+  NOT page==='Plumbing'; append the 53 (all page==='Plumbing') = idempotent;
+  confirmDialog only when existing Plumbing count>0; cancel returns pre-persist.
+- LIVE-VERIFIED in Electron by USER: fresh seed = 53 across 7 sections + HVAC
+  intact; re-seed = confirm dialog, stays 53 (not 106); cancel = no change. PASS.
+- REVIEWER: could NOT run. gemini-review.js is NOT on this branch
+  (fix/msr-scan-wrong-tab); it lives on branch chore/gemini-reviewer. Extracted it
+  to scratchpad + ran with .gemini-key: Gemini API 503 (upstream overload) on 3
+  attempts, exit 2 = DID NOT RUN (not a clean pass). External review still owed.
+- NOT committed (commit = architect/overseer + human authority). Open before green
+  light: (1) Gemini review unrun, retry when upstream up; user MAY accept gate+live
+  in lieu. (2) gemini-review.js missing on this branch = infra gap to fix.
+
 ## Verify plan
 
 - S1/S3: `npm run verify` + live app (observable nav/model change). Confirm tax

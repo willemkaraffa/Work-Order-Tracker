@@ -135,10 +135,12 @@ async function parseAmh(filePath) {
       if (!SIZE_RE.test(name) && nxt && SIZE_RE.test(nxt.name)) { currentFamily = name; continue; }
       if (isSectionHeader(name, price)) { currentSection = name; currentFamily = null; continue; }
       // Size row under a family (or bare): B/C are SEER cost tiers, NOT material/labor,
-      // so use the 'Included' sentinel and prefix the family name for a full item name.
+      // so use the 'Included' sentinel. Name = the size token ALONE (e.g. '1.5 Ton'):
+      // the section header (subCategory=family) already carries the family context, so
+      // prefixing it produced long redundant names (user 2026-07-29 item-name trim).
       if (SIZE_RE.test(name)) {
         items.push({
-          name: currentFamily ? currentFamily + ' ' + name : name,
+          name: name,
           desc: '', price: price == null ? 0 : price, page: tab,
           subCategory: currentFamily || currentSection,
           material: MATERIAL_INCLUDED, labor: MATERIAL_INCLUDED,
@@ -216,6 +218,98 @@ async function parseMsr(filePath) {
   return items;
 }
 
+// ── MSR Plumbing: hand-transcribed price list (no source file) ────────────────
+// pricesheet.pdf section 4, effective 7/10/2026, user-verified. No plumbing bid-sheet
+// xlsx exists, so these 53 rows are the source of record (roadmap-handoffs/
+// service-library-categories.md, S2). page:'Plumbing', taxable:false (fully burdened,
+// tax included -- same as MSR HVAC). manual:true so a "Seed MSR" (HVAC) re-seed keeps
+// them. price = Total = Material + Labour. 'Included' (7 rows) = material bundled into
+// labour on the sheet, stored as the sentinel (NOT 0). Minimum Job Fee + Permit
+// EXCLUDED. Table columns: [item, material, labor, total]; 'I' = Included sentinel.
+const PLUMBING_TABLE = {
+  'Water Heater Replacement': [
+    ['40 Gallon Water Heater: Gas', 828.82, 675.00, 1503.82],
+    ['40 Gallon Water Heater: Electric', 674.45, 625.00, 1299.45],
+    ['50 Gallon Water Heater: Gas', 856.12, 675.00, 1531.12],
+    ['50 Gallon Water Heater: Electric', 723.85, 625.00, 1348.85],
+    ['Direct Vent Water Heater', 1627.02, 725.00, 2352.02],
+  ],
+  'Water Heater Repair/Service': [
+    ['Expansion Tank', 38.97, 100.00, 138.97],
+    ['3/4 inch Water Ball Valve', 22.07, 90.00, 112.07],
+    ['Drain Pan', 25.97, 22.50, 48.47],
+    ['Water Heater Tune-Up Kit: upper/lower thermostats and 2 elements', 45.47, 200.00, 245.47],
+    ['T&P Valve', 27.91, 90.00, 117.91],
+    ['Anode Rod', 45.47, 90.00, 135.47],
+    ['Thermocouple', 15.57, 90.00, 105.57],
+  ],
+  'Sewer & Drain Lines': [
+    ['Unclog Main Sewer Line with Power Auger', 'I', 300.00, 300.00],
+    ['Unclog Drain Line Through Roof Vent', 'I', 350.00, 350.00],
+    ['Unclog Drain Line Through Removing and Resetting Existing Toilet', 'I', 350.00, 350.00],
+    ['Unclog Main Sewer Line with Hydrojet Machine', 'I', 500.00, 500.00],
+    ['Scope Sewer Lines with Camera', 'I', 350.00, 350.00],
+  ],
+  'Toilet': [
+    ['Toilet with Wax Ring and Bolts', 131.27, 180.00, 311.27],
+    ['Wax Ring and Bolts', 9.07, 90.00, 99.07],
+    ['Flange with Wax Ring and Bolts', 23.71, 175.00, 198.71],
+    ['Full Tank Repair Kit with Supply Line and Angle Stop', 51.57, 130.00, 181.57],
+    ['Toilet Seat', 16.86, 22.50, 39.36],
+    ['Unclog Toilet Using Auger', 'I', 150.00, 150.00],
+  ],
+  'Tub & Shower': [
+    ['Garden Tub / Roman Tub', 0.00, 900.00, 900.00],
+    ['Tub Insert', 388.70, 350.00, 738.70],
+    ['3-Piece Tub Surround', 492.70, 650.00, 1142.70],
+    ['Tile Surround (per square foot)', 0.00, 5.00, 5.00],
+    ['3-Piece Shower Surround', 544.70, 700.00, 1244.70],
+    ['Shower Pan', 336.70, 600.00, 936.70],
+    ['Mixing Valve', 103.97, 200.00, 303.97],
+    ['Tub/Shower Trim Kit with Valve', 128.70, 200.00, 328.70],
+    ['Bath Tub Handle', 15.87, 45.00, 60.87],
+    ['Showerhead: 3 Spray', 12.97, 22.50, 35.47],
+    ['Toe-Touch Drain Bath Tub Kit', 31.17, 45.00, 76.17],
+    ['Shower Head Arm', 18.17, 22.50, 40.67],
+    ['Shower/Tub Cartridge', 0.00, 90.00, 90.00],
+  ],
+  'Sinks': [
+    ['Bathroom: Pedestal Sink / Free Standing Vanity', 141.38, 250.00, 391.38],
+    ['Bathroom: Undermount Sink', 91.10, 200.00, 291.10],
+    ['Bathroom: Sink Faucet', 38.97, 90.00, 128.97],
+    ['Bathroom: Pop-Up Assembly', 16.32, 22.50, 38.82],
+    ['Kitchen: Undermount Sink', 162.84, 200.00, 362.84],
+    ['Kitchen: Faucet', 128.70, 90.00, 218.70],
+    ['Kitchen: Sink Strainer and Drain Assembly', 6.34, 45.00, 51.34],
+    ['P-trap', 6.42, 22.50, 28.92],
+    ['Sink Cartridge', 14.74, 90.00, 104.74],
+    ['Snake Kitchen/Bathroom Sink', 'I', 150.00, 150.00],
+  ],
+  'Miscellaneous': [
+    ['Exterior Water Spigot / Hose Bibb', 15.31, 134.69, 150.00],
+    ['1/2 inch Gas Ball Valve', 15.34, 90.00, 105.34],
+    ['1/2 inch Angle Stop Shutoff Valve', 14.83, 45.00, 59.83],
+    ['Washer Box and Valves', 29.56, 225.00, 254.56],
+    ['Backflow Preventer / Pressure Vacuum Breaker', 0.00, 300.00, 300.00],
+    ['Sump Pump', 0.00, 400.00, 400.00],
+    ['Stainless Steel Supply Line', 9.46, 22.50, 31.96],
+  ],
+};
+function plumbingSeedItems() {
+  const items = [];
+  for (const [section, rows] of Object.entries(PLUMBING_TABLE)) {
+    for (const [name, mat, lab, total] of rows) {
+      items.push({
+        name, desc: '', price: total, taxable: false,
+        page: 'Plumbing', subCategory: section, manual: true,
+        material: mat === 'I' ? MATERIAL_INCLUDED : mat,
+        labor: lab === 'I' ? MATERIAL_INCLUDED : lab,
+      });
+    }
+  }
+  return items;
+}
+
 // ── Round-trip restore: Service Library.xlsx (our own export) ─────────────────
 // One sheet per tab, header row [Item Name, Description, Price, Taxable, Page,
 // Section, Material, Labor]. Page/Section/Material/Labor read back into
@@ -284,4 +378,4 @@ async function exportLibrary(filePath, tabs) {
   await wb.xlsx.writeFile(filePath);
 }
 
-module.exports = { parseGeneral, parseAmh, parseMsr, parseRoundtrip, exportLibrary, isSectionHeader, splitFields, MATERIAL_INCLUDED };
+module.exports = { parseGeneral, parseAmh, parseMsr, parseRoundtrip, exportLibrary, isSectionHeader, splitFields, plumbingSeedItems, MATERIAL_INCLUDED };

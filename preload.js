@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('library', {
   seedGeneral:      (path)       => ipcRenderer.invoke('library-seed-general', path || ''),
   seedAmh:          (path)       => ipcRenderer.invoke('library-seed-amh', path || ''),
   seedMsr:          ()           => ipcRenderer.invoke('library-seed-msr'),
+  seedMsrPlumbing:  ()           => ipcRenderer.invoke('library-seed-msr-plumbing'),
   importRoundtrip:  (path)       => ipcRenderer.invoke('library-import-roundtrip', path || ''),
   export:           (tabs)       => ipcRenderer.invoke('library-export', tabs),
 });

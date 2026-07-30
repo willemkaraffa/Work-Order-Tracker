@@ -2934,6 +2934,24 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
+  // Plumbing coexists with HVAC in the one MSR tab. Re-run DROPS the existing
+  // page:'Plumbing' subset and appends the 53 fresh rows; HVAC items untouched.
+  const seedMsrPlumbing = async () => {
+    if (!needLib()) return;
+    setBusy(true);
+    try {
+      const r = await window.library.seedMsrPlumbing();
+      if (!r || !r.ok) { toast((r && r.error) || 'MSR Plumbing seed failed', 'err'); return; }
+      const cur = (lib && lib.MSR) || [];
+      const plumbCount = cur.filter(it => it && it.page === 'Plumbing').length;
+      const kept = cur.filter(it => !(it && it.page === 'Plumbing'));
+      if (plumbCount > 0 && !(await confirmDialog(
+        `Replace ${plumbCount} existing MSR Plumbing item(s) with ${r.items.length} from the plumbing price list? (MSR HVAC items kept)`))) return;
+      persist({ ...(lib || emptyLibrary()), MSR: [...kept, ...r.items] });
+      toast(`MSR Plumbing seeded: ${r.items.length} items`);
+    } catch (e) { toast(String(e.message || e), 'err'); }
+    finally { setBusy(false); }
+  };
   const importBackup = async () => {
     if (!needLib()) return;
     setBusy(true);
@@ -2960,7 +2978,7 @@ function useLibraryTools(lib, persist, toast) {
     } catch (e) { toast(String(e.message || e), 'err'); }
     finally { setBusy(false); }
   };
-  return { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup };
+  return { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup };
 }
 
 // Loads + persists the service_library file. Shared by ServiceLibrary (module)
@@ -3117,7 +3135,7 @@ export function SimpleListEditor({ title, items, setItems, onClose, singular, on
 // management, moved off the module header to declutter it.
 export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
-  const { busy, seedGeneral, seedAmh, seedMsr, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
+  const { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
   // S1a safety net: restore the most recent pre-migration snapshot (ISO-suffixed keys
   // sort chronologically). Resets the model-version to current so the restored library
@@ -3158,6 +3176,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           {tool('Seed General', seedGeneral)}
           {tool('Seed AMH', seedAmh)}
           {tool('Seed MSR', seedMsr)}
+          {tool('Seed MSR Plumbing', seedMsrPlumbing)}
         </div>
       </SettingRow>
       <SettingRow label="Backup" hint={'Round-trip xlsx. ' + (lib === null ? '' : counts)}>
