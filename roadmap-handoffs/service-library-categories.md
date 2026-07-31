@@ -433,3 +433,50 @@ session; the above is NEXT session (or explicit override).
 - S1/S3: `npm run verify` + live app (observable nav/model change). Confirm tax
   keys + snapshot/restore.
 - S2: live render + USER row-by-row check vs PDF (accuracy is the gate).
+
+### Progress 2026-07-31 (session 7) - library admin: dev-seed gate + custom-catalog delete
+
+Merged to main via PR #6 (fast-forward). Two commits: d6c008d (seed gate), 3b80fa8
+(catalog delete). verify green both (30 pass / 0 fail, 0 lint errors); review gate
+green (1 finding dismissed, see below).
+
+- SEED GATE (dev-only). The Settings > Service Library "Seed catalogs" row (Seed
+  General/AMH/MSR/MSR Plumbing) REPLACES a catalog from a workbook = destructive;
+  it is a dev tool, not for end users. Now hidden unless `app.isPackaged === false`.
+  - main.js: `ipcMain.handle('app-is-packaged', () => app.isPackaged)`.
+  - preload.js: `window.appInfo.isPackaged()` bridge.
+  - app.jsx LibraryToolsSection: `showSeed` state defaults FALSE, set to `!isPackaged`
+    in a mount effect, gates the row (`{showSeed && <SettingRow.../>}`). Default-false
+    is DELIBERATE so a packaged build never flashes destructive buttons before the
+    async check resolves. Review flagged the async init as a "flash" risk; architect
+    DISMISSED it as correct-by-design (finding 0e7a8715) - the only transient is in
+    dev (buttons appear a tick late), harmless; packaged never shows them.
+  - LIVE-VERIFIED (2026-07-31), two proofs, both PASS:
+    - Real Electron (dev): hidden BrowserWindow loads the shipped preload.js; renderer
+      `window.appInfo.isPackaged()` === main `app.isPackaged` === false. Bridge +
+      channel name agree end to end.
+    - Shipped LibraryToolsSection in jsdom, all 3 branches: isPackaged=false -> row
+      SHOWN; isPackaged=true -> HIDDEN; no appInfo bridge -> HIDDEN (fail-safe).
+    - RESIDUAL: no packaged binary was built+clicked. `app.isPackaged=true` is
+      Electron-internal; the renderer's hide-on-true is proven directly, so the gap is
+      only the real binary emitting true, not the gate logic.
+
+- CUSTOM-CATALOG DELETE. Custom (non-PM) catalogs were create+rename only; now
+  deletable. PM built-ins (General/AMH/MSR = LIBRARY_TABS) stay pinned.
+  - orders-logic.js: `deleteCatalog(lib, name)` pure transform (drop the key,
+    order-preserving, guarded), mirrors renameCatalog. Unit-tested in
+    rename-catalog.test.js (3 cases).
+  - invoices.jsx: `×` control on custom catalog buttons (next to the ✎ rename), and
+    `deleteTab(t)` handler - confirmDialog warns the item count, LIBRARY_TABS guard,
+    switches tab off the deleted one. Rendered for customTabs only.
+  - Non-destructive to saved invoices: an orphaned line `agreement` keeps its string
+    and resolves to DEFAULT_CATALOG_TAX (custom catalogs already did), so totals are
+    unaffected - same policy as the subcat-delete decision. No cascade wired.
+  - Static + unit verified; NOT electron-clicked (create custom cat -> × -> confirm
+    PM has no ×).
+
+- TAXABLE-IN-SEEDER (deferred by user this session). The dropped "fill-down toggle"
+  idea (bulk-set taxable across rows) would mistax rows unless sections are
+  taxable-homogeneous. USER DECISION: taxable belongs in the SEEDER instead - PM
+  catalogs mostly non-taxable, set per-catalog at seed time; generic items toggled at
+  creation. Invoice/Remittance tax correctness is the higher priority. Not built.
