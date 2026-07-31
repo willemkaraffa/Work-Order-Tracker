@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld('updater', {
 
 contextBridge.exposeInMainWorld('isElectron', true);
 
+// App-info bridge — renderer gates dev-only UI (seed buttons) on packaged state.
+contextBridge.exposeInMainWorld('appInfo', {
+  isPackaged: () => ipcRenderer.invoke('app-is-packaged'),
+});
+
 // Extension import bridge — fires when native host writes orders to disk
 contextBridge.exposeInMainWorld('extensionBridge', {
   onImport: (cb) => ipcRenderer.on('extension-import', (_e, orders) => cb(orders)),

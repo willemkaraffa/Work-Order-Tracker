@@ -3137,6 +3137,17 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   const [lib, persist] = useServiceLibraryStore();
   const { busy, seedGeneral, seedAmh, seedMsr, seedMsrPlumbing, importBackup, exportBackup } = useLibraryTools(lib, persist, toast);
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
+  // Item 4: Seed catalogs is a destructive dev tool (replaces a catalog from a
+  // workbook). Gate it to dev builds. Default false so a packaged build never
+  // flashes the buttons before the async isPackaged check resolves.
+  const [showSeed, setShowSeed] = React.useState(false);
+  React.useEffect(() => {
+    let live = true;
+    if (window.appInfo && window.appInfo.isPackaged) {
+      window.appInfo.isPackaged().then(p => { if (live) setShowSeed(!p); }).catch(() => {});
+    }
+    return () => { live = false; };
+  }, []);
   // S1a safety net: restore the most recent pre-migration snapshot (ISO-suffixed keys
   // sort chronologically). Resets the model-version to current so the restored library
   // is NOT immediately re-migrated.
@@ -3171,7 +3182,8 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
   return (
     <div>
       <SettingTitle sub="Seed, back up, and organize the Service Library catalogs.">Service Library</SettingTitle>
-      <SettingRow label="Seed catalogs" hint="Replace a catalog's items from the source workbook.">
+      {showSeed && (
+      <SettingRow label="Seed catalogs" hint="Dev-only. Replace a catalog's items from the source workbook.">
         <div style={{ display: 'flex', gap: 8 }}>
           {tool('Seed General', seedGeneral)}
           {tool('Seed AMH', seedAmh)}
@@ -3179,6 +3191,7 @@ export function LibraryToolsSection({ subCats, setSubCats, toast }) {
           {tool('Seed MSR Plumbing', seedMsrPlumbing)}
         </div>
       </SettingRow>
+      )}
       <SettingRow label="Backup" hint={'Round-trip xlsx. ' + (lib === null ? '' : counts)}>
         <div style={{ display: 'flex', gap: 8 }}>
           {tool('Import...', importBackup)}
