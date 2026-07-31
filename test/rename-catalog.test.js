@@ -7,7 +7,7 @@
 //   node test/rename-catalog.test.js  (exit 0 pass / 1 fail)
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
-const { renameCatalog, renameLineAgreement, computeInvoiceTotals } = loadEsm('src/orders-logic.js');
+const { renameCatalog, deleteCatalog, renameLineAgreement, computeInvoiceTotals } = loadEsm('src/orders-logic.js');
 
 let fails = 0;
 function check(label, fn) {
@@ -37,6 +37,24 @@ check('no-op when oldName absent', () => {
 
 check('non-object guard returns input', () => {
   assert.strictEqual(renameCatalog(null, 'a', 'b'), null);
+});
+
+console.log('delete catalog (custom only)');
+
+check('drops the key, preserves survivors + order', () => {
+  const lib = { General: [1], AMH: [2], Custom: [3], MSR: [4] };
+  const out = deleteCatalog(lib, 'Custom');
+  assert.deepStrictEqual(Object.keys(out), ['General', 'AMH', 'MSR']);
+  assert.strictEqual(out.General, lib.General); // survivor arr refs preserved
+});
+
+check('no-op when name absent', () => {
+  const lib = { General: [1] };
+  assert.strictEqual(deleteCatalog(lib, 'Nope'), lib);
+});
+
+check('non-object guard returns input', () => {
+  assert.strictEqual(deleteCatalog(null, 'a'), null);
 });
 
 console.log('rename line agreement cascade');

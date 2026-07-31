@@ -481,6 +481,8 @@ ipcMain.handle('storage-delete', (_e, key) => {
 ipcMain.handle('storage-list', (_e, prefix) => {
   try { const s = readStore(); const p = prefix || ''; return { keys: Object.keys(s).filter(k => k.startsWith(p)) }; } catch { return { keys: [] }; }
 });
+// Dev-only gate: renderer hides the destructive Seed catalogs row in packaged builds.
+ipcMain.handle('app-is-packaged', () => app.isPackaged);
 ipcMain.handle('install-update', () => { autoUpdater.quitAndInstall(false, true); });
 ipcMain.handle('log-lock-event', (_e, data) => { appendLockLog({ src: 'renderer', ...(data && typeof data === 'object' ? data : { data }) }); return true; });
 ipcMain.handle('set-global-hotkey', (_e, combo) => registerGlobalHotkey(combo));
