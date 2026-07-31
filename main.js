@@ -6,6 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const { runAmhCapture } = require('./amh-runner');
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
+const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems } = require('./bid-select');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -825,7 +826,13 @@ async function readSheetOtherItems(file, sheetName) {
   const ExcelJS = require('exceljs');
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(file);
-  const ws = wb.getWorksheet(sheetName) || wb.worksheets[0];
+  // Bug B: pick the bid sheet that actually EXISTS in this workbook (BID_CELLS is the
+  // single source of truth for canonical names) rather than trusting the caller's
+  // rec.type guess -- a WO whose type misses the HVAC regex would otherwise seek the
+  // Plumbing sheet in an HVAC-only file and read zero items. Ambiguous (both/neither)
+  // -> null -> fall back to the passed-in type guess.
+  const resolved = resolveBidSheetName(wb.worksheets.map(w => w.name), BID_CELLS) || sheetName;
+  const ws = wb.getWorksheet(resolved) || wb.worksheets[0];
   if (!ws) return [];
   const cellText = (row, c) => {
     try {
@@ -895,7 +902,9 @@ async function readSheetOtherItems(file, sheetName) {
       }
     }
   }
-  return items;
+  // Fuzzy dedup: the SAME work often appears in both the main table and OTHER with
+  // wording/rounding drift; collapse those overlaps (Bug A) before returning.
+  return dedupeLineItems(items);
 }
 
 // All bid/CO .xlsx anywhere under `root` (recursive), skipping temp locks (~$).
@@ -925,16 +934,22 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec) => {
     if (r.error) return { ok: false, error: r.error };
     const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
     const sheetName = BID_CELLS[trade].sheet;
-    const seen = new Set(); const items = [];
-    for (const f of allBidCoSheets(r.folder)) {
+    // Bug A: read EVERY bid/CO candidate once (rows are self-deduped by
+    // readSheetOtherItems). DROP zero-row sheets so a blank newer revision (empty
+    // 09-07) can neither win nor zero the WO. chooseBidCoFiles then supersedes older
+    // Bids with the newest NON-EMPTY Bid (+ all COs). Finally dedupeLineItems across
+    // the merged rows collapses cross-sheet overlap.
+    const candidates = [];
+    for (const p of allBidCoSheets(r.folder)) {
       let rows = [];
-      try { rows = await readSheetOtherItems(f, sheetName); } catch (_) { rows = []; }
-      for (const it of rows) {
-        const k = it.desc.toLowerCase() + '|' + it.unitPrice;
-        if (seen.has(k)) continue;
-        seen.add(k); items.push(it);
-      }
+      try { rows = await readSheetOtherItems(p, sheetName); } catch (_) { rows = []; }
+      if (!rows.length) continue;
+      let mtime = 0; try { const st = fs.statSync(p); mtime = st.birthtimeMs || st.mtimeMs; } catch (_) { /* unreadable -> mtime 0 */ }
+      candidates.push({ name: path.basename(p), mtime, path: p, rows });
     }
+    const merged = [];
+    for (const f of chooseBidCoFiles(candidates)) for (const it of f.rows) merged.push(it);
+    const items = dedupeLineItems(merged);
     return { ok: true, items, count: items.length };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });

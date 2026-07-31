@@ -13,7 +13,7 @@
 // bridge. Exit 0 pass / 1 fail.
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
-const { resolveBidLine, bidItemsToInvoiceLines, invoiceHasServiceCall, categoryLabel, isPmListed } = loadEsm('src/orders-logic.js');
+const { resolveBidLine, bidItemsToInvoiceLines, invoiceHasServiceCall, categoryLabel, isPmListed, sentinelTag } = loadEsm('src/orders-logic.js');
 
 // Inert filler: unique throwaway tokens, never shared with any test wording, purely to
 // grow N so IDF(distinctive single token) reaches the live-catalog range.
@@ -176,6 +176,15 @@ test('categoryLabel: confirmed PM item reads its client; unlisted/General reads 
   assert.strictEqual(isPmListed({ name: 'AMH!', agreement: 'AMH' }), false);
   // General confirmed item -> labor/material, never a client label.
   assert.strictEqual(categoryLabel({ name: 'Some Labor', agreement: 'General', category: 'material' }), 'material');
+});
+
+test('sentinelTag: all four RazorSync catalog sentinels', () => {
+  // Confirmed PM items -> client sentinel (via categoryLabel/isPmListed).
+  assert.strictEqual(sentinelTag({ name: 'Replace contactor', agreement: 'AMH', category: 'labor' }), 'AMH!');
+  assert.strictEqual(sentinelTag({ name: 'Replace valve', agreement: 'MSR', category: 'labor' }), 'MSR!');
+  // Unlisted / General -> labor|material fallback sentinel.
+  assert.strictEqual(sentinelTag({ name: 'Labor!', agreement: 'AMH', category: 'labor' }), 'Labor!');
+  assert.strictEqual(sentinelTag({ name: 'Materials!', agreement: 'General', category: 'material' }), 'Materials!');
 });
 
 test('sentinel labels by action verb; verbless/Material- = material', () => {
