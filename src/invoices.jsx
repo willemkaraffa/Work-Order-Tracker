@@ -8,7 +8,7 @@ import {
   LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog, NamePromptModal,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
-  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog } from './orders-logic.js';
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
@@ -246,6 +246,20 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
     },
   });
 
+  // Delete a CUSTOM catalog (built-ins are pinned; only rendered for customTabs).
+  // Non-destructive to saved invoices: lines keep their agreement string and fall
+  // to DEFAULT_CATALOG_TAX, so totals are unaffected (mirrors renameCatalog policy).
+  const deleteTab = async (t) => {
+    if (LIBRARY_TABS.includes(t)) return; // guard: never delete a built-in
+    const n = ((lib || {})[t] || []).length;
+    const msg = 'Delete category "' + t + '"' + (n ? ' and its ' + n + ' item' + (n === 1 ? '' : 's') : '') +
+      '? This cannot be undone.';
+    if (!(await confirmDialog(msg, { danger: true, confirmLabel: 'Delete' }))) return;
+    persist(deleteCatalog(lib, t));
+    if (tab === t) { setTab(LIBRARY_TABS[0]); setPage(null); }
+    toast('Deleted "' + t + '"');
+  };
+
   const btn = (label, onClick, primary) => (
     <button onClick={onClick} style={{
       height: 32, padding: '0 12px', borderRadius: 7, cursor: 'pointer',
@@ -301,6 +315,14 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
               onClick={(e) => { e.stopPropagation(); renameTab(t); }}
               style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 12 }}
             >{'✎'}</span>
+          )}
+          {!LIBRARY_TABS.includes(t) && (
+            <span
+              role="button"
+              title="Delete catalog"
+              onClick={(e) => { e.stopPropagation(); deleteTab(t); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}
+            >{'×'}</span>
           )}
           <span style={{ color: 'var(--text-3)' }}>{((lib && lib[t]) || []).length}</span>
         </span>

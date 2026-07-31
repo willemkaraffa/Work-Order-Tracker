@@ -1124,6 +1124,18 @@ export function renameCatalog(lib, oldName, newName) {
   return next;
 }
 
+// Delete a CUSTOM catalog = drop the service_library KEY (order preserved for the
+// survivors). Built-in guard is the caller's (built-ins are semantic: General
+// fallback, CATALOG_TAX, red-flag) -- mirrors renameCatalog. Non-destructive to
+// saved invoices: any line whose agreement named this catalog keeps the string and
+// resolves to DEFAULT_CATALOG_TAX (same tax as before), so totals are unaffected.
+export function deleteCatalog(lib, name) {
+  if (!lib || !name || !(name in lib)) return lib;
+  const next = {};
+  for (const [cat, arr] of Object.entries(lib)) { if (cat !== name) next[cat] = arr; }
+  return next;
+}
+
 // Item 2: cascade a catalog rename to saved invoice line agreements so a renamed
 // custom catalog does not orphan its billed lines (mirror of app.jsx renameClientCode).
 // Totals are unaffected: custom catalogs all resolve to DEFAULT_CATALOG_TAX.
