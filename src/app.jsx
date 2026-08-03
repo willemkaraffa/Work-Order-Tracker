@@ -4315,6 +4315,14 @@ function App() {
         // Results arrived: clear the in-flight scan banner (mirror onImport).
         if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
         setCaptureStatus(null);
+        // Scan could not run (no/ambiguous MSR tab, or page not ready). Surface the
+        // reason in the app; previously this only fired a Chrome notification the
+        // user never saw, and the app just cleared the banner with no explanation.
+        if (source && source.error) {
+          pushNotif({ kind: 'capture', captureType: 'msr', title: 'MSR scan could not run', sub: String(source.error).slice(0, 120), payload: { items: [], scanned: 0, source } });
+          toast(source.error);
+          return;
+        }
         const arr = Array.isArray(items) ? items : [];
         const normNum = s => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
         // Split known (active) from trashed (deleted). Trashed WOs were

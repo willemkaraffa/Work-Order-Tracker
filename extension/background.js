@@ -63,15 +63,32 @@ async function pickMsrTab() {
   return { tab: null, matches: all };
 }
 
+// POST scan result to the tracker. `source.error`, when set, tells the app the
+// scan could not run (no/ambiguous tab) so it clears its in-flight banner and
+// shows the reason, instead of the app spinning for 2 min then silently
+// clearing, which read as "nothing happened" (the Chrome notify below is the
+// ONLY prior feedback, and it is invisible when the app has focus).
+async function postFound(items, source) {
+  try {
+    await fetch(BRIDGE_URL + '/found-wos', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, source }), signal: AbortSignal.timeout(3000),
+    });
+  } catch (_) {}
+}
+
 async function backgroundFindNew() {
   const { tab, matches } = await pickMsrTab();
   if (!tab && !matches.length) {
-    notify('Find new MSR WOs', 'Open an MSR list page (amherst.my.site.com) first.');
+    const msg = 'Open an MSR list page (amherst.my.site.com) first.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { error: msg, tabCount: 0 });
     return;
   }
   if (!tab) {
-    notify('Find new MSR WOs',
-      matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.');
+    const msg = matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { error: msg, tabCount: matches.length });
     return;
   }
   const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
@@ -80,12 +97,10 @@ async function backgroundFindNew() {
   // because the result never said which page produced it: 3 WOs off the wrong tab
   // and 3 WOs off the right one are indistinguishable downstream.
   const source = { url: tab.url || '', title: tab.title || '', tabCount: matches.length };
-  try {
-    await fetch(BRIDGE_URL + '/found-wos', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items, source }), signal: AbortSignal.timeout(3000),
-    });
-  } catch (_) {}
+  // Content script unreachable (not injected / page not loaded) is its own silent
+  // failure: items=[] would otherwise read as a clean "no new WOs".
+  if (!r || !r.ok) source.error = 'MSR page not ready, reload the list tab and try again.';
+  await postFound(items, source);
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
