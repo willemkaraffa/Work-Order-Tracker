@@ -815,9 +815,9 @@ function parseOtherCell(text) {
 //       Price" (= Qty x Total Price). Big-ticket SELECTED items live here (e.g.
 //       "50 Gallon Water Heater - Gas" $1123). Columns differ HVAC vs Plumbing, so
 //       they are found by HEADER LABEL, not fixed index. The HVAC service call /
-//       diagnostic (INCURRED COSTS) is EXCLUDED here -- it is left out of the HVAC bid
-//       total and re-entered as "Service Call $85" in OTHER, so counting it twice
-//       would double the service call.
+//       diagnostic (INCURRED COSTS) is emitted here as a CANONICAL "Service Call" line;
+//       when OTHER restates "Service Call $85" the fuzzy dedup collapses the two, and
+//       when OTHER is blank (diagnostic-only visit) the canonical line still survives.
 //   (2) the OTHER section -- packed "$amount desc" custom lines (parseOtherCell).
 // Reading OTHER only (the prior behavior) UNDER-COUNTED any sheet that selected a
 // main-table catalog item. Defensive cell access (exceljs `.text` can throw).
@@ -879,11 +879,14 @@ async function readSheetOtherItems(file, sheetName) {
         const row = ws.getRow(rn);
         const q = num(row, col.qty); if (!Number.isFinite(q) || q <= 0) continue;
         const name = cellText(row, col.item).trim() || cellText(row, col.desc).trim();
-        if (/diagnostic fee|service call/i.test(name)) continue;   // HVAC service call: see note above
         let price = col.line ? num(row, col.line) : NaN;
         if (!Number.isFinite(price) || price <= 0) price = q * (num(row, col.total) || 0);
         if (!Number.isFinite(price) || price <= 0) continue;
-        items.push({ desc: name, unitPrice: Math.round(price * 100) / 100, qty: 1 });
+        // Diagnostic/service-call: emit CANONICAL 'Service Call' (not skip) so a
+        // diagnostic-only visit whose OTHER is blank (WO 03753381 Buffalo Way) still
+        // reads; dedupeLineItems collapses it when OTHER restates "$85 Service Call".
+        const desc = /diagnostic fee|service call/i.test(name) ? 'Service Call' : name;
+        items.push({ desc, unitPrice: Math.round(price * 100) / 100, qty: 1 });
       }
     }
   }

@@ -145,6 +145,20 @@ test('price near-miss keeps both (Capacitor@124.58 vs Capacitor@150)', () => {
   assert.strictEqual(out.length, 2);
 });
 
+test('two canonical Service Call @85 collapse to one (diagnostic + OTHER restate)', () => {
+  const out = dedupeLineItems([
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+  ]);
+  assert.strictEqual(out.length, 1);
+});
+
+test('lone canonical Service Call survives (diagnostic-only, OTHER blank)', () => {
+  const out = dedupeLineItems([{ desc: 'Service Call', unitPrice: 85, qty: 1 }]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].unitPrice, 85);
+});
+
 test('empty input -> []', () => {
   assert.deepStrictEqual(dedupeLineItems([]), []);
 });
