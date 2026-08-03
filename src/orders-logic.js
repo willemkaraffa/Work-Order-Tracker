@@ -580,26 +580,11 @@ export function computeInvoiceTotals(invoice, defaultAgreement) {
 
 const priceOf = (p) => (typeof p === 'number' ? p : (parseFloat(p) || 0));
 
-// Keyword tokens for fuzzy catalog matching. Lowercase, strip punctuation, drop
-// stopwords, and crudely stem trailing -ing/-ed/-es/-s so "replace"/"replacing"/
-// "replaced" collapse to one token. Bid wording is human + varies; tokens absorb it.
-const MATCH_STOP = new Set(['to','the','a','an','of','for','and','with','in','on','at','new',
-  'my','is','are','be','per','up','down','into','through','from','it','that','this','or']);
-// Service-catalog BOILERPLATE (post-stem). These recur verbatim on a handful of AMH
-// items ("- no additional labor fee", "Includes ...") so plain IDF wrongly ranks them
-// DISTINCTIVE and their unshared mass sinks the real item's coverage below the gate.
-// They carry no identity, so strip them at tokenization -- object nouns (contactor,
-// faucet, coil) still carry the match. Also matches the handoff's "fee/labor near-zero".
-const MATCH_BOILER = new Set(['fee','labor','no','additional','include','includ','necessary',
-  'provide','provid','as','when']);
-function matchTokens(s) {
-  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/)
-    .filter(Boolean).map(t => t.replace(/(ing|ed|es|s)$/, ''))
-    // Drop stopwords, boilerplate, and BARE NUMBERS ("9 lbs" must not match "9-GPM
-    // tankless"; tonnage variants disambiguate by PRICE, not the digit). Alphanumerics
-    // like "r410a"/"50ft" survive as one token.
-    .filter(t => t && !MATCH_STOP.has(t) && !MATCH_BOILER.has(t) && !/^\d+$/.test(t));
-}
+// matchTokens (with MATCH_STOP/MATCH_BOILER) now lives in the root CJS
+// text-normalize.js so the CJS bid-select.js and this ESM module tokenize
+// identically. Safe: orders-logic.js is only ever consumed bundled (esbuild) or via
+// the loadEsm test bridge, both of which can import a CJS module.
+import { matchTokens } from '../text-normalize.js';
 
 // Best keyword resolution within ONE catalog. PRICE is a CONFIRMER, not a gate:
 // invoice price is always the bid price (we may charge above the library over time),
@@ -867,13 +852,14 @@ export function reconcileMsrRow(row, match, bidItems) {
     // icon (FlagResolveModal) for a price-off / unconfirmed line the user should vet.
     priceFlag: (it && it.priceFlag) || undefined,
     suspects: (it && it.suspects) || undefined,
+    category: (it && it.category) || undefined,
     agreement: 'MSR',
   }));
   const t = computeInvoiceTotals({ lineItems: invLines }, 'MSR');
   const lines = invLines.map((l, i) => {
     const post = money(l.unitPrice * l.qty);
     const pre = t.rows[i] ? t.rows[i].lineSubtotal : post;   // pre-tax (divide-out for taxable)
-    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, priceFlag: l.priceFlag, suspects: l.suspects, pre, tax: money(post - pre), post };
+    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, priceFlag: l.priceFlag, suspects: l.suspects, category: l.category, agreement: 'MSR', pre, tax: money(post - pre), post };
   });
   const preTax = money(t.taxableSubtotal + t.nonTaxableSubtotal);
   const tax = t.tax;
@@ -942,7 +928,7 @@ export function reconcileAmhRow(row, match, apiItems, inclusiveTotal) {
     const taxable = SERVICE_TAXABLE_RE.test(name) || SERVICE_TAXABLE_RE.test(desc);
     subtotal += unit * qty; perLineTax += vtax;
     const pre = money(unit * qty);
-    return { name, desc, qty, unitPrice: unit, vendorTax: vtax, pre, tax: vtax, post: money(pre + vtax), amount: money(pre + vtax), taxable };
+    return { name, desc, qty, unitPrice: unit, vendorTax: vtax, category: 'labor', agreement: 'AMH', pre, tax: vtax, post: money(pre + vtax), amount: money(pre + vtax), taxable };
   });
   subtotal = money(subtotal);
   // Tax: prefer the summed per-line vendorTax (exact, post-fix captures). If it is zero
@@ -1056,6 +1042,13 @@ export function categoryLabel(line) {
   if (isPmListed(line)) return line.agreement;
   return (line && line.category === 'material') ? 'material' : 'labor';
 }
+// RazorSync catalog SENTINEL for a line = the catalog "name" the user picks in
+// RazorSync (which sets taxability RazorSync-side). Display/copy-only, no new field:
+// derived from categoryLabel. AMH/MSR = the confirmed client item; labor/material =
+// the unlisted fallback. { AMH:'AMH!', MSR:'MSR!', labor:'Labor!', material:'Materials!' }.
+export function sentinelTag(line) {
+  return { AMH: 'AMH!', MSR: 'MSR!', labor: 'Labor!', material: 'Materials!' }[categoryLabel(line)];
+}
 export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, defaultAgreement, authoritativeTotal) {
   const saved = (savedInvoice && Array.isArray(savedInvoice.lineItems)) ? savedInvoice.lineItems : [];
   const changes = [];
@@ -1146,4 +1139,21 @@ export function renameLineAgreement(orders, oldName, newName) {
     if (!li || !li.some(l => l && l.agreement === oldName)) return o;
     return { ...o, invoice: { ...o.invoice, lineItems: li.map(l => l && l.agreement === oldName ? { ...l, agreement: newName } : l) } };
   });
+}
+
+// Item 1: persisted remittance history reducers (renderer holds the array; window.storage
+// key `remittance_history`). Pure so they test without electron.
+// upsert: newest-first, de-duped on source+fileName+invoiceDate so re-parsing the same
+// statement on the same day REPLACES the prior snapshot instead of piling up.
+export function upsertRemittanceHistory(list, snapshot) {
+  const arr = Array.isArray(list) ? list : [];
+  if (!snapshot) return arr;
+  const key = s => String((s && s.source) || '') + '|' + String((s && s.fileName) || '') + '|' + String((s && s.invoiceDate) || '');
+  const k = key(snapshot);
+  return [snapshot, ...arr.filter(s => key(s) !== k)];
+}
+// remove one snapshot by id; unknown id is a no-op (returns the same-content array).
+export function removeRemittanceById(list, id) {
+  const arr = Array.isArray(list) ? list : [];
+  return arr.filter(s => !(s && s.id === id));
 }

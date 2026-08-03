@@ -10,6 +10,14 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+// Live-hook self-test: skip inside a git hook (pre-commit). It spawns the real
+// PreToolUse hook and asserts runtime blocking, which the commit subprocess env
+// cannot reproduce (no live Agent call). Exercised standalone / CI instead.
+if (process.env.GIT_INDEX_FILE || process.env.GIT_DIR) {
+  console.log('SKIP: gate self-test not runnable inside git hook');
+  process.exit(2);
+}
+
 const GATE = path.join(__dirname, '..', '.claude', 'hooks', 'role-lock.js');
 const REPO = path.join(__dirname, '..');
 const question = (rel) => 'Unlock the role definition for editing "' + rel + '"?';

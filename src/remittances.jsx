@@ -7,7 +7,30 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import { HeaderChips, useServiceLibraryStore } from './app.jsx';
-import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow, bidItemsToInvoiceLines, reconcileBlockToInvoice, normWoNum } from './orders-logic.js';
+import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow, bidItemsToInvoiceLines, reconcileBlockToInvoice, normWoNum, sentinelTag, upsertRemittanceHistory, removeRemittanceById } from './orders-logic.js';
+
+// Item 1: load + persist the remittance_history KV array (window.storage over
+// wo-data.json). Mirrors useServiceLibraryStore (app.jsx): mount-load, callback-persist,
+// single key, no new IPC/file. Default [] while loading / when storage is unavailable.
+function useRemittanceHistory() {
+  const [history, setHistory] = React.useState([]);
+  React.useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const r = window.storage && await window.storage.get('remittance_history');
+        const v = r && r.value;
+        if (live) setHistory(Array.isArray(v) ? v : []);
+      } catch { if (live) setHistory([]); }
+    })();
+    return () => { live = false; };
+  }, []);
+  const persist = React.useCallback((next) => {
+    setHistory(next);
+    if (window.storage && window.storage.set) window.storage.set('remittance_history', next).catch(() => {});
+  }, []);
+  return [history, persist];
+}
 
 const STATUS_STYLE = {
   match:      { label: 'MATCH',        fg: '#065f46', bg: 'rgba(16,185,129,0.15)' },
@@ -27,6 +50,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
   // divide-out tax breakdown is accurate. May be null while loading -> lines fall back to
   // non-taxable (tax 0), total still matches (MSR grand = face regardless).
   const [lib] = useServiceLibraryStore();
+  const [history, persistHistory] = useRemittanceHistory();
 
   // Re-reconcile ONE AMH block from a freshly captured wo (per-line vendorTax). Defined
   // above run() so the import auto-fetch can reuse it without a dep-array TDZ.
@@ -116,6 +140,13 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       const total = source === 'amh' ? res.paymentTotal : res.statementTotal;
       setReport({ blocks, statementTotal: total, fileName, source });
 
+      // Item 1: persist the reconciled report so the user can reopen it later. Snapshot =
+      // the report (blocks carry woId/orderId for live rehydrate) plus stamp fields; upsert
+      // de-dupes on source+fileName+invoiceDate so a same-day re-parse replaces, not piles.
+      const invoiceDate = new Date().toISOString().slice(0, 10);
+      const snapshot = { blocks, statementTotal: total, fileName, source, id: source + '-' + Date.now(), invoiceDate };
+      persistHistory(upsertRemittanceHistory(history, snapshot));
+
       // R5: auto-populate the Invoice record for VERIFIED-ACCURATE WOs (status 'match',
       // per-line tax present). AMH blocks already carry fresh per-line tax (capture-first
       // above). FILL-EMPTY-ONLY -- never clobber a saved/edited invoice on a re-parse; the
@@ -137,7 +168,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
     setLoading(false);
-  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance, onEnsureMsrOrders]);
+  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance, onEnsureMsrOrders, history, persistHistory]);
 
   const updateBlock = React.useCallback((idx, next) => {
     setReport(r => r ? { ...r, blocks: r.blocks.map((b, i) => i === idx ? next : b) } : r);
@@ -289,13 +320,18 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
 
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 18px' }}>
         {!report && (
-          <div style={{ color: 'var(--text-3)', fontSize: 14, maxWidth: 560, lineHeight: 1.6 }}>
-            Open an <b>MSR</b> "Vendor ACH Payment Detail" or an <b>AMH</b> "ACHVendor" remittance PDF.
-            Each paid work order is matched (MSR by Invoice Notes number, AMH by the W#B# invoice), its
-            line items are pulled (MSR from the WO folder bid sheet, AMH from the captured bid), and the
-            computed total is checked against the amount paid. AMH WOs that aged out of the portal API
-            window show as "unavailable" (enter items manually).
-          </div>
+          <>
+            <div style={{ color: 'var(--text-3)', fontSize: 14, maxWidth: 560, lineHeight: 1.6 }}>
+              Open an <b>MSR</b> "Vendor ACH Payment Detail" or an <b>AMH</b> "ACHVendor" remittance PDF.
+              Each paid work order is matched (MSR by Invoice Notes number, AMH by the W#B# invoice), its
+              line items are pulled (MSR from the WO folder bid sheet, AMH from the captured bid), and the
+              computed total is checked against the amount paid. AMH WOs that aged out of the portal API
+              window show as "unavailable" (enter items manually).
+            </div>
+            <RemittanceHistoryPanel history={history}
+              onOpen={setReport}
+              onDelete={(id) => persistHistory(removeRemittanceById(history, id))} />
+          </>
         )}
 
         {report && (
@@ -341,6 +377,46 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
   );
 }
 
+// Item 1: saved-remittance list (top-level component, not inline -- A5). Rows newest-
+// first (upsert already prepends). Click a row -> rehydrate via onOpen(setReport); the
+// blocks carry woId/orderId so the module's Fetch/Bill/Save act on the CURRENT orders.
+// Per-row delete is a hard delete of the user's own log.
+function RemittanceHistoryPanel({ history, onOpen, onDelete }) {
+  if (!history || !history.length) return null;
+  const rowBtn = {
+    height: 24, padding: '0 8px', borderRadius: 6, cursor: 'pointer',
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-2)',
+    fontFamily: 'inherit', fontSize: 11, fontWeight: 600,
+  };
+  return (
+    <div style={{ marginTop: 20, maxWidth: 720 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-3)', marginBottom: 8 }}>
+        Saved remittances
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {history.map((s) => {
+          const blocks = Array.isArray(s.blocks) ? s.blocks : [];
+          const match = blocks.filter(b => b.status === 'match').length;
+          const flagged = blocks.filter(b => b.status !== 'match').length;
+          return (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+              border: '1px solid var(--border-1)', borderRadius: 8, background: 'var(--bg-surface)' }}>
+              <div onClick={() => onOpen(s)} title="Reopen this remittance"
+                style={{ flex: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{s.invoiceDate}</span>
+                <span style={{ fontWeight: 700, textTransform: 'uppercase' }}>{s.source}</span>
+                <span style={{ color: 'var(--text-2)' }}>{s.fileName}</span>
+                <span style={{ color: 'var(--text-3)' }}>· {match} match / {flagged} flagged</span>
+              </div>
+              <button onClick={() => onDelete(s.id)} title="Delete this saved remittance" style={rowBtn}>Delete</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
   const st = STATUS_STYLE[b.status] || STATUS_STYLE.unmatched;
   const offBy = Math.abs(b.delta);
@@ -356,10 +432,14 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
   };
   // Click-to-copy field: mid weight (600, below the 700 address), monospace-ish tabular
   // for the numbers, cursor+title cueing the copy. Falls back to plain text if no onCopy.
-  const copyField = (label, value) => {
+  // transform (optional) maps the DISPLAYED value to the COPIED string (e.g. WO# copies
+  // as "WO <num>" for the AMH memo, but shows the bare number). Copy-string only -- the
+  // stored woId/id are never mutated.
+  const copyField = (label, value, transform) => {
     if (!value) return null;
+    const copied = transform ? transform(value) : value;
     return (
-      <span onClick={onCopy ? () => onCopy(value) : undefined}
+      <span onClick={onCopy ? () => onCopy(copied) : undefined}
         title={onCopy ? 'Click to copy ' + label : label}
         style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-2)', cursor: onCopy ? 'pointer' : 'default',
           fontVariantNumeric: 'tabular-nums' }}>
@@ -374,7 +454,7 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
         <div style={{ fontWeight: 700, fontSize: 15 }}>{b.address || '(no address)'}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-3)' }}>
           <span style={{ fontSize: 11, color: 'var(--text-3)' }}>WO</span>
-          {copyField('WO number', b.orderId || b.woId) || <span>?</span>}
+          {copyField('WO number', b.orderId || b.woId, v => 'WO ' + v) || <span>?</span>}
           <span style={{ color: 'var(--text-3)' }}>·</span>
           <span style={{ fontSize: 11, color: 'var(--text-3)' }}>Inv</span>
           {copyField('invoice #', b.invoiceNum) || <span style={{ color: 'var(--text-3)' }}>no invoice #</span>}
@@ -408,14 +488,37 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
             <span>Item</span><span style={{ textAlign: 'right' }}>Pre-tax</span>
             <span style={{ textAlign: 'right' }}>Tax</span><span style={{ textAlign: 'right' }}>Post-tax</span>
           </div>
-          {b.lines.map((l, i) => (
-            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '3px 0', fontSize: 13, borderTop: '1px solid var(--border-1)' }}>
-              <span style={{ color: 'var(--text-1)' }}>{l.desc || '(no description)'}{l.qty > 1 ? ' ×' + l.qty : ''}</span>
-              <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.pre)}</span>
-              <span style={{ textAlign: 'right', color: l.tax > 0 ? 'var(--text-1)' : 'var(--text-3)' }}>{fmt(l.tax)}</span>
-              <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.post)}</span>
-            </div>
-          ))}
+          {b.lines.map((l, i) => {
+            // RazorSync entry: the catalog SENTINEL chip, the Description, and the PRE-TAX
+            // Price are each click-to-copy (2d). Price copies l.pre (pre-tax) because
+            // RazorSync re-applies tax on a taxable-sentinel line -- copying post would
+            // double-tax; non-taxable lines have pre === post anyway.
+            const tag = sentinelTag(l);
+            return (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '3px 0', fontSize: 13, borderTop: '1px solid var(--border-1)' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-1)', minWidth: 0 }}>
+                  {tag && (
+                    <span onClick={onCopy ? () => onCopy(tag) : undefined}
+                      title={onCopy ? 'Click to copy catalog name ' + tag : tag}
+                      style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, padding: '1px 6px', borderRadius: 5,
+                        border: '1px solid var(--border-1)', color: 'var(--text-2)', background: 'var(--bg-canvas)',
+                        cursor: onCopy ? 'pointer' : 'default' }}>{tag}</span>
+                  )}
+                  <span onClick={onCopy ? () => onCopy(l.desc || '') : undefined}
+                    title={onCopy ? 'Click to copy description' : undefined}
+                    style={{ cursor: onCopy ? 'pointer' : 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {l.desc || '(no description)'}{l.qty > 1 ? ' ×' + l.qty : ''}
+                  </span>
+                </span>
+                <span onClick={onCopy ? () => onCopy(l.pre) : undefined}
+                  title={onCopy ? 'Click to copy pre-tax price' : undefined}
+                  style={{ textAlign: 'right', color: 'var(--text-2)', cursor: onCopy ? 'pointer' : 'default' }}>{fmt(l.pre)}</span>
+                <span style={{ textAlign: 'right', color: l.tax > 0 ? 'var(--text-1)' : 'var(--text-3)' }}>{fmt(l.tax)}</span>
+                <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.post)}</span>
+              </div>
+            );
+          })}
+          <CopyStepper lines={b.lines} onCopy={onCopy} />
         </div>
       )}
 
@@ -439,6 +542,48 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Item 2f: walk a WO's fields in RazorSync ENTRY ORDER -- per line [sentinel, description,
+// pre-tax price] -- copying one field per click so the user can tab straight through the
+// RazorSync form. Top-level component (A5), one per ReportBlock. Keeps the per-field
+// buttons above as a fallback.
+function CopyStepper({ lines, onCopy }) {
+  const steps = React.useMemo(() => {
+    const out = [];
+    for (const l of Array.isArray(lines) ? lines : []) {
+      const line = l.desc || '(no description)';
+      out.push({ value: sentinelTag(l), line, field: 'catalog name' });
+      out.push({ value: l.desc || '', line, field: 'description' });
+      out.push({ value: l.pre, line, field: 'pre-tax price' });
+    }
+    return out;
+  }, [lines]);
+  // cursor = the next field to copy. This is LEGIT user-driven state (each click advances
+  // it); the renderer cannot compute it, so useState is correct here -- NOT an A1/A2
+  // derived-state smell. Do not hoist or derive it.
+  const [cursor, setCursor] = React.useState(0);
+  if (!steps.length || !onCopy) return null;
+  const done = cursor >= steps.length;
+  const next = done ? null : steps[cursor];
+  const copyNext = () => { if (done) return; onCopy(next.value); setCursor(c => c + 1); };
+  const btn = {
+    height: 26, padding: '0 12px', borderRadius: 6, cursor: 'pointer',
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 12, fontWeight: 600,
+  };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-1)' }}>
+      <button onClick={copyNext} disabled={done} style={{ ...btn, opacity: done ? 0.5 : 1, cursor: done ? 'default' : 'pointer' }}>
+        {done ? 'All copied' : 'Copy next'}
+      </button>
+      <button onClick={() => setCursor(0)} style={{ ...btn, fontWeight: 500 }}>Reset</button>
+      <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+        {done ? 'Walked all ' + steps.length + ' fields — Reset to restart'
+              : 'Next: ' + next.line + ' · ' + next.field}
+      </span>
     </div>
   );
 }
