@@ -41,26 +41,24 @@ async function pollCommand() {
 // off-screen batch capture.)
 const MSR_TAB_MATCH = '*://amherst.my.site.com/*';
 
-// WHICH Amherst tab to scan.
+// WHICH Amherst tab to host the hidden list iframe.
 //
-// This used to be `tabs[0]`: the first match in tab order, with no preference for
-// the one the user is actually looking at. With a single Amherst tab open that is
-// correct by accident. With several it silently scans an arbitrary one, and on
-// 2026-07-22 that meant scanning a stale WORK ORDER DETAIL tab instead of the
-// pending-bid list. A detail page carries 3 /workorder/ anchors of its own, so the
-// scan returned 3 plausible-looking WOs, the tracker diffed them, and the whole
-// thing reported success while never looking at the list the user had open.
+// The 2026-07-22 wrong-tab hazard (scanning a stale WORK ORDER DETAIL tab's own
+// /workorder/ anchors instead of the pending-bid list) is gone: the scan now loads
+// the canonical MSR_ASSESSMENT_URL in a same-origin iframe rather than reading the
+// host tab's DOM, so which page the tab happens to show no longer matters and
+// multi-tab ambiguity is no longer a failure.
 //
-// Preference order: the tab the user is on, then a lone match. Several matches and
-// none of them active is AMBIGUOUS, and ambiguity is reported rather than resolved
-// by guessing, because guessing is what produced a silent wrong answer.
+// Preference order: the tab the user is on, then any match.
 async function pickMsrTab() {
   const active = await chrome.tabs.query({ url: MSR_TAB_MATCH, active: true, currentWindow: true });
   if (active && active[0]) return { tab: active[0], matches: active };
   const all = await chrome.tabs.query({ url: MSR_TAB_MATCH });
   if (!all || !all.length) return { tab: null, matches: [] };
-  if (all.length === 1) return { tab: all[0], matches: all };
-  return { tab: null, matches: all };
+  // Any amherst tab can host the hidden list iframe (the scan loads
+  // MSR_ASSESSMENT_URL itself rather than reading the host tab's own DOM),
+  // so ambiguity no longer matters: pick the first match.
+  return { tab: all[0], matches: all };
 }
 
 // POST scan result to the tracker. `source.error`, when set, tells the app the

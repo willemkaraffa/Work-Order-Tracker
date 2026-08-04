@@ -869,12 +869,12 @@
   // datatable row stopped being detected (missed 03907321). So detection is the ORIGINAL
   // anchor scan (num+url, no row required); the street address is layered on best-effort
   // ONLY when the anchor sits in a row. Address never gates a WO out of the result.
-  function scanMsrList() {
+  function scanMsrList(doc = document) {
     // Street column index, resolved once from the header (fallback = the assessment-list
     // position 6). Mirrors scrapeMSRList's col('street'); kept separate BECAUSE that
     // function gates on <tr> and must not be the detection path.
     let headCells = [];
-    const headRow = document.querySelector('thead tr');
+    const headRow = doc.querySelector('thead tr');
     if (headRow) headCells = Array.from(headRow.children).map(c => (c.innerText || '').trim().toLowerCase());
     let streetIdx = headCells.indexOf('street');
     if (streetIdx < 0) streetIdx = headCells.findIndex(t => t.includes('street'));
@@ -882,7 +882,7 @@
 
     const seen = new Set();
     const items = [];
-    for (const a of Array.from(document.querySelectorAll('a[href*="/workorder/"]'))) {
+    for (const a of Array.from(doc.querySelectorAll('a[href*="/workorder/"]'))) {
       const num = (a.textContent || a.getAttribute('title') || '').trim();
       if (!num || seen.has(num)) continue;
       seen.add(num);
@@ -903,7 +903,15 @@
       sendResponse({ ok: false, error: 'not on an MSR page' });
       return;
     }
-    sendResponse({ ok: true, items: scanMsrList() });
+    (async () => {
+      // Load a FRESH assessment list in a hidden iframe so the scan does not
+      // depend on the host tab being focused, front, or recently refreshed
+      // (Lightning virtualizes rows; a stale/backgrounded live DOM misses
+      // anchors). Any open amherst tab can host this same-origin iframe.
+      const doc = await loadInIframe(MSR_ASSESSMENT_URL);
+      sendResponse({ ok: true, items: scanMsrList(doc || document) });
+    })();
+    return true; // async sendResponse
   });
 
   // Full headless capture: list iframe -> row stubs -> per-WO detail iframes.
