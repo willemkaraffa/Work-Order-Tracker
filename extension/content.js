@@ -59,6 +59,14 @@
     return m ? m[1].trim() : '';
   }
 
+  // Pull the AMH order GUID out of the WO detail URL. The live-verified single-WO
+  // endpoint is GET Order/{orderGuid}, and the GUID lives in the page URL:
+  //   https://www.amh.com/my-amh/vendor-user-orders/{guid}?tabId=general
+  function extractAmhOrderGuid() {
+    const m = (window.location.href || '').match(/vendor-user-orders\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    return m ? m[1] : '';
+  }
+
   // ── WO number extraction ───────────────────────────────────────────────────
   // AMH WO numbers are exactly 7 digits. AMH portal sometimes concatenates a
   // property nonce after the WO# (e.g. "9698891706" for WO 9698891 + 706).
@@ -695,30 +703,31 @@
   function withCapturedData(mappings, btn, cb) {
     if (isMSRPage()) { cb(scrapeMSR(mappings)); return; }
 
+    // AMH: hand off to the app, which captures via the live-verified single-WO
+    // endpoint GET Order/{orderGuid} (the old Order/Query now 403s). The GUID is in
+    // the WO detail URL; without it we cannot capture, so REFUSE rather than DOM-scrape.
     const woId = extractWONumber();
-    if (!woId) {
+    const orderGuid = extractAmhOrderGuid();
+    if (!orderGuid) {
       resetBtn(btn);
-      showToast('Could not read the WO number', '#ef4444', ['Open the work order page, then capture']);
+      showToast('Could not read the order id', '#ef4444', ['Open the work order detail page, then capture']);
       return;
     }
-    btn.innerHTML = '⏳ Handing to Tracker…';
-    chrome.runtime.sendMessage({ action: 'captureAmhViaApp', woId }, (r) => {
-      resetBtn(btn);
+    btn.innerHTML = '⏳ Tracker capturing…';
+    chrome.runtime.sendMessage({ action: 'captureAmhViaApp', woId, orderGuid }, (r) => {
       if (!r || !r.ok) {
+        resetBtn(btn);
         showToast('Capture failed', '#ef4444', [
           (r && r.error) ? String(r.error).slice(0, 120) : 'no response from Work Order Tracker',
           'AMH capture runs in the app so it matches bulk capture.',
         ]);
         return;
       }
-      // The APP captures and KEEPS the record; it does not come back here. So the
-      // extension's saved list is deliberately not touched for AMH, and `cb` is never
-      // called. Storing a copy here would put the same work order in two places and
-      // re-create the two-sources problem this change removed.
-      showToast('Capture started in Tracker', '#10b981', [
-        'WO ' + woId,
-        'Watch the tracker window: it reports the result there.',
-      ]);
+      resetBtn(btn);
+      showToast('✓ Capture started in Tracker', '#10b981', [
+        woId ? 'WO #: ' + woId : null,
+        'The Work Order Tracker is capturing this WO.',
+      ].filter(Boolean));
     });
   }
 
@@ -903,15 +912,20 @@
       sendResponse({ ok: false, error: 'not on an MSR page' });
       return;
     }
+    // ACK IMMEDIATELY, SCAN AFTERWARDS. Holding the message channel open for the
+    // up-to-35s iframe load does not survive MV3: the service worker sleeps during
+    // the wait and the response is lost (seen live: no result ever posted). Mirror
+    // startMsrCapture/msrCaptureResult: ack now, post the result via a fresh message.
+    sendResponse({ ok: true, started: true });
     (async () => {
-      // Load a FRESH assessment list in a hidden iframe so the scan does not
-      // depend on the host tab being focused, front, or recently refreshed
-      // (Lightning virtualizes rows; a stale/backgrounded live DOM misses
-      // anchors). Any open amherst tab can host this same-origin iframe.
+      console.log('[wo] find-new: loading hidden assessment list iframe');
       const doc = await loadInIframe(MSR_ASSESSMENT_URL);
-      sendResponse({ ok: true, items: scanMsrList(doc || document) });
+      const items = scanMsrList(doc || document);
+      console.log('[wo] find-new: iframe doc=' + (!!doc) + ' items=' + items.length);
+      chrome.runtime.sendMessage({ action: 'foundWosResult', items,
+        error: (!doc && !items.length) ? 'MSR list did not render (keep an amherst tab open and loaded, then try again).' : '' });
     })();
-    return true; // async sendResponse
+    // no async sendResponse; do NOT return true.
   });
 
   // Full headless capture: list iframe -> row stubs -> per-WO detail iframes.

@@ -533,6 +533,12 @@ def build_wo(item: dict) -> dict:
 ALL_OPEN_SENTINEL = "__ALL_OPEN__"
 _CLOSED_STATUSES = {"completed", "canceled", "cancelled"}
 
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def is_guid(s: str) -> bool:
+    return bool(_GUID_RE.match((s or "").strip()))
+
 
 def main():
     raw = sys.stdin.read().strip()
@@ -542,20 +548,36 @@ def main():
         return
     all_open = ALL_OPEN_SENTINEL in wo_numbers
 
-    print(f"[API] Capturing {'ALL OPEN' if all_open else len(wo_numbers)} WO(s)...", file=sys.stderr)
-    driver = make_driver()
-    try:
-        token = login_and_get_token(driver)
-    finally:
-        try: driver.quit()
-        except Exception: pass
+    # Single-WO capture passes an order GUID (live-verified GET Order/{guid}). WO-number
+    # inputs still go through Order/Query. Partition so a pure-GUID capture never touches
+    # Order/Query, which now 403s and would raise, killing the capture.
+    guid_inputs = [w for w in wo_numbers if is_guid(w)]
+    non_guid_inputs = [w for w in wo_numbers if w != ALL_OPEN_SENTINEL and not is_guid(w)]
 
-    print("[API] Fetching Order/Query...", file=sys.stderr)
-    orders = as_order_list(api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"}))
-    print(f"[API] Order/Query: {len(orders)} order(s).", file=sys.stderr)
+    print(f"[API] Capturing {'ALL OPEN' if all_open else len(wo_numbers)} WO(s)...", file=sys.stderr)
+    # Playwright path (amh-runner AMH_PW flag): a Bearer captured from a persisted
+    # session is handed in via AMH_TOKEN, so skip the Selenium/Edge login+token
+    # bootstrap entirely (the slow/fragile part). Absent the env var, behave exactly
+    # as before -- Selenium login and its fallback stay the default path.
+    token = os.environ.get("AMH_TOKEN")
+    if token:
+        print("[API] Using provided Bearer (Playwright path); Selenium login skipped.", file=sys.stderr)
+    else:
+        driver = make_driver()
+        try:
+            token = login_and_get_token(driver)
+        finally:
+            try: driver.quit()
+            except Exception: pass
 
     order_map: Dict[str, dict] = {}
-    index_orders(orders, order_map)
+    if all_open or non_guid_inputs:
+        print("[API] Fetching Order/Query...", file=sys.stderr)
+        orders = as_order_list(api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"}))
+        print(f"[API] Order/Query: {len(orders)} order(s).", file=sys.stderr)
+        index_orders(orders, order_map)
+    else:
+        print("[API] Pure-GUID capture; skipping Order/Query.", file=sys.stderr)
 
     # Old paid WOs age out of Order/Query (~100 most-recent only). Targeted lookups below
     # fall back to fetch_admin_order (VendorAdminOrders WO-number search) to reach them.
@@ -575,7 +597,7 @@ def main():
                 results[name] = {"ok": False, "error": f"extract failed: {exc}"}
         print(f"  all-open: {len(results)} WO(s)", file=sys.stderr)
     else:
-        for wo_num in wo_numbers:
+        for wo_num in non_guid_inputs:
             stripped = re.sub(r"^WO-", "", wo_num, flags=re.I).strip()
             base = base_wo_num(wo_num)
             item = (order_map.get(stripped) or order_map.get(base)
@@ -591,6 +613,19 @@ def main():
                       file=sys.stderr)
             except Exception as exc:
                 results[wo_num] = {"ok": False, "error": f"extract failed: {exc}"}
+
+    # GUID inputs: live-verified single-WO endpoint GET Order/{guid}. api_get returns the
+    # order envelope dict directly (identical shape to an Order/Query item), which build_wo
+    # consumes verbatim -- do NOT pass it through as_order_list.
+    for guid in guid_inputs:
+        try:
+            env = api_get("Order/" + guid, token, {"today": today_api_value()})
+            results[guid] = build_wo(env)
+            w = results[guid]["wo"]
+            print(f"  {guid}: type={w['type']} items={len(w['bidItems'])} ${w['bidAmount']}",
+                  file=sys.stderr)
+        except Exception as exc:
+            results[guid] = {"ok": False, "error": f"extract failed: {exc}"}
 
     print(json.dumps(results), flush=True)
 

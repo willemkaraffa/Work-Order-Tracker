@@ -89,16 +89,16 @@ async function backgroundFindNew() {
     await postFound([], { error: msg, tabCount: matches.length });
     return;
   }
+  console.log('[wo] find-new: dequeued, host tab', tab.id, tab.url);
   const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
-  const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
-  // Report WHAT WAS SCANNED, always. The failure above was invisible precisely
-  // because the result never said which page produced it: 3 WOs off the wrong tab
-  // and 3 WOs off the right one are indistinguishable downstream.
-  const source = { url: tab.url || '', title: tab.title || '', tabCount: matches.length };
-  // Content script unreachable (not injected / page not loaded) is its own silent
-  // failure: items=[] would otherwise read as a clean "no new WOs".
-  if (!r || !r.ok) source.error = 'MSR page not ready, reload the list tab and try again.';
-  await postFound(items, source);
+  if (!r || !r.ok) {
+    const msg = 'MSR page not ready, keep an amherst tab open and loaded, then try again.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { url: tab.url || '', title: tab.title || '', tabCount: matches.length, error: msg });
+    return;
+  }
+  // Scan runs in the content script; its result arrives later via foundWosResult.
+  console.log('[wo] find-new: scan started, awaiting foundWosResult');
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -190,24 +190,14 @@ async function backgroundStartMsr(one) {
   return { ok: true, started: true };
 }
 
-// ── Message handlers ──────────────────────────────────────────────────────────
 // Ask the APP to capture an AMH work order with its own scraper, so the extension
-// never runs a second, divergent AMH extractor (see main.js /capture-amh).
-//
-// The app ACKS immediately and captures afterwards, so this returns in milliseconds.
-//
-// It used to hold the request open for the whole capture (~180s). That does not work
-// from an MV3 service worker: Chrome terminates idle workers, the pending fetch died
-// with it, sendResponse never fired, and the on-page button hung on
-// "Tracker capturing..." with no error path. Seen on the first real test.
-//
-// The result now lands in the app itself, and a failure is reported there too, so
-// nothing depends on this worker surviving.
-async function captureAmhViaApp(woId) {
+// never runs a second, divergent AMH extractor (see main.js /capture-amh). The app
+// captures via the live-verified GET Order/{orderGuid}; pass orderGuid through.
+async function captureAmhViaApp(woId, orderGuid) {
   try {
     const r = await fetch(BRIDGE_URL + '/capture-amh', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ woId }), signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ woId, orderGuid }), signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return { ok: false, error: 'tracker returned HTTP ' + r.status };
     return await r.json();
@@ -216,9 +206,10 @@ async function captureAmhViaApp(woId) {
   }
 }
 
+// ── Message handlers ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'captureAmhViaApp') {
-    captureAmhViaApp(msg.woId).then(sendResponse);
+    captureAmhViaApp(msg.woId, msg.orderGuid).then(sendResponse);
     return true;   // async response
   }
 
@@ -324,6 +315,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         result.ok ? `${orders.length} work order(s) sent to the tracker.`
                   : `Import failed: ${result.error || 'tracker not running'}.`);
     })();
+    return false; // no response expected
+  }
+
+  // Result posted back by the content script after the hidden find-new list scan.
+  if (msg.action === 'foundWosResult') {
+    console.log('[wo] find-new: foundWosResult items=' + ((msg.items && msg.items.length) || 0) + ' error=' + (msg.error || ''));
+    postFound(Array.isArray(msg.items) ? msg.items : [], { error: msg.error || '' });
     return false; // no response expected
   }
 
