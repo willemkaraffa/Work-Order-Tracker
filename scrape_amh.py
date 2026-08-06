@@ -508,7 +508,7 @@ def build_wo(item: dict) -> dict:
         "state":       normalize_text(addr.get("state")),
         "zip":         normalize_text(addr.get("zipCode")),
         "propertyId":  normalize_text(prop.get("propertyNo")),
-        "status":      normalize_text(order.get("statusName")),
+        "status":      "Open",
         "subStatus":   normalize_text(order.get("subStatusName")),
         "type":        wo_type,
         "notes":       notes,
