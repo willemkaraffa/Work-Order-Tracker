@@ -3974,6 +3974,10 @@ function App() {
   // never written to the xlsx export (exportLibrary whitelists fields).
   const librarySubCats = (settings && Array.isArray(settings.librarySubCats)) ? settings.librarySubCats : [];
   const setLibrarySubCats = React.useCallback((v) => updateSettings({ librarySubCats: v }), [updateSettings]);
+  // Master-catalog pointer: which catalog is the generic cross-catalog fallback
+  // (the else-bucket for non-AMH/MSR WOs). Defaults to the built-in 'General'.
+  const masterCatalog = (settings && typeof settings.masterCatalog === 'string') ? settings.masterCatalog : 'General';
+  const setMasterCatalog = React.useCallback((v) => updateSettings({ masterCatalog: v }), [updateSettings]);
   // Slice 3 (#8): Tech Job Types. The WO's existing `type` field IS the trade
   // (no separate tradeList/tradeTag — that duplicated settings.types + wo.type +
   // mapTypeColors). techJobTypes is the only new state: keyed by tech NAME, then
@@ -5118,14 +5122,14 @@ function App() {
       const v = r && r.value;
       if (v && typeof v === 'object') lib = { General: [], AMH: [], MSR: [], ...v };
     } catch { /* keep empty library */ }
-    const tabOf = (pm) => { const u = String(pm || '').toUpperCase(); return u === 'AMH' ? 'AMH' : u === 'MSR' ? 'MSR' : 'General'; };
+    const tabOf = (pm) => { const u = String(pm || '').toUpperCase(); return u === 'AMH' ? 'AMH' : u === 'MSR' ? 'MSR' : masterCatalog; };
     let changed = 0, withInvoice = 0;
     for (const o of orders) {
       if (o.deleted || !o.invoice || !Array.isArray(o.invoice.lineItems) || !o.invoice.lineItems.length) continue;
       withInvoice++;
       const tab = tabOf(o.pm);
       const client = Array.isArray(lib[tab]) ? lib[tab] : [];
-      const gen = tab !== 'General' && Array.isArray(lib.General) ? lib.General : null;
+      const gen = tab !== masterCatalog && Array.isArray(lib[masterCatalog]) ? lib[masterCatalog] : null;
       const { lines, changes } = recomputeInvoice(o.invoice, client, gen, tab);
       if (!changes.length) continue;
       changed++;
@@ -5141,7 +5145,7 @@ function App() {
     if (changed) toast('Refreshed ' + changed + ' of ' + withInvoice + ' saved invoice(s)');
     else if (withInvoice) toast('All ' + withInvoice + ' saved invoice(s) already current');
     else toast('No saved invoices to recompute -- open a WO and Save an invoice first');
-  }, [orders, updateOrder, toast]);
+  }, [orders, updateOrder, toast, masterCatalog]);
 
   // Bill a batch of WOs from a verified remittance: write each reconciled invoice
   // (fill empty OR overwrite existing -- the paid remittance is authoritative) in one
@@ -6306,7 +6310,7 @@ function App() {
           <NavWing />
           <div />
           {currentModule === 'service-items' ? (
-            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} />
+            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} />
           ) : currentModule === 'maps' ? (
             <MapsModule
               activeOrders={mapOrders}
@@ -6347,7 +6351,7 @@ function App() {
               onRefreshAll={refreshAllInvoices}
             />
           ) : currentModule === 'remittances' ? (
-            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
+            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} masterCatalog={masterCatalog} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}
@@ -6603,6 +6607,7 @@ function App() {
               onSave={(invoice, errMsg) => saveInvoice(invoiceEditorWO, invoice, errMsg)}
               onClear={() => clearInvoice(invoiceEditorWO)}
               onClose={() => setInvoiceEditorWO(null)}
+              masterCatalog={masterCatalog}
             />
           );
         })()}

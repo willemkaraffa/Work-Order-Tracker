@@ -63,8 +63,12 @@ name). So the agreement string stays literal `'General'`; only the item-SOURCE r
 ### W2 — Master-catalog pointer (C1)  [medium]
 - New setting `masterCatalog` (string, default 'General'), stored like `librarySubCats`.
 - Rewire the 3 item-SOURCE reads to `library[masterCatalog]`: invoices.jsx:611,
-  remittances.jsx:118, app.jsx:5123. Leave the `agreement:'General'` sentinel + `tabName`
-  else-bucket literal (tax/flag name-agnostic; proven above).
+  remittances.jsx:118, app.jsx:5123.
+- ALSO: the hardcoded else-bucket tabName mapping (invoices.jsx ~607, app.jsx tabOf ~5121)
+  MUST follow masterCatalog too — else a torn-down/emptied General becomes the OWN catalog
+  of every non-AMH/MSR WO. The agreement label (invoices.jsx:623) follows it as well.
+  Safe because name-agnostic: tax = catalogTax DEFAULT for any non-AMH/MSR name, red/yellow
+  flag keys off is-AMH/MSR — so the pointer changes WHICH catalog is generic, not tax/flag.
 - UI: "Set as master library" action + star marker on the designated catalog button
   (renderCatBtn). Setting it to SML lets General be deleted safely.
 - CATALOG_TAX: no change. catalogTax('SML') returns DEFAULT = identical to General entry.

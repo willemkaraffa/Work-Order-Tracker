@@ -113,7 +113,7 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
   );
 }
 
-export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) {
+export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, masterCatalog, setMasterCatalog }) {
   const [lib, persist] = useServiceLibraryStore();
   const [tab, setTab] = React.useState('General');
   // page = active L2 sub-page filter; null = L1 view (search ALL pages, existing behavior).
@@ -309,6 +309,19 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
       }}>
         <span>{t}</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {t === masterCatalog ? (
+            <span
+              title="Master library"
+              style={{ color: 'var(--accent)', fontSize: 12 }}
+            >{'★'}</span>
+          ) : setMasterCatalog && (
+            <span
+              role="button"
+              title="Set as master library"
+              onClick={(e) => { e.stopPropagation(); setMasterCatalog(t); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 12 }}
+            >{'☆'}</span>
+          )}
           {!LIBRARY_TABS.includes(t) && (
             <span
               role="button"
@@ -595,7 +608,7 @@ function blankLine() {
   return { name: '', desc: '', qty: 1, unitPrice: 0, category: 'labor', taxable: false, agreement: '' };
 }
 const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
-export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear, onClose }) {
+export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear, onClose, masterCatalog = 'General' }) {
   useModalOpenFlag(true);   // full-screen overlay: silence type-to-search underneath
   const pm = (order && order.pm) || '';
   const pmUpper = String(pm).toUpperCase();
@@ -605,11 +618,11 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     () => new Set((existingNumbers || []).map(normInvoiceNum)),
     [existingNumbers]
   );
-  const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : 'General';
+  const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : masterCatalog;
   const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
-  // Fallback library for the resolveBidLine chain (client -> General -> sentinel).
-  // On a General WO the client catalog IS General, so no separate fallback needed.
-  const generalCatalog = (tabName !== 'General' && library && Array.isArray(library.General)) ? library.General : null;
+  // Fallback library for the resolveBidLine chain (client -> master -> sentinel).
+  // On a master-catalog WO the client catalog IS the master, so no separate fallback needed.
+  const generalCatalog = (tabName !== masterCatalog && library && Array.isArray(library[masterCatalog])) ? library[masterCatalog] : null;
   // Picker list = the WO's PM catalog PLUS General as a cross-category fallback, so an
   // AMH/MSR WO can pick a General item when nothing in the PM library matches (core
   // truth #6). catalogByName maps name -> { it, agreement }: General is inserted first
@@ -620,10 +633,10 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
   );
   const catalogByName = React.useMemo(() => {
     const m = new Map();
-    if (generalCatalog) for (const it of generalCatalog) if (it && it.name) m.set(it.name, { it, agreement: 'General' });
+    if (generalCatalog) for (const it of generalCatalog) if (it && it.name) m.set(it.name, { it, agreement: masterCatalog });
     for (const it of catalog) if (it && it.name) m.set(it.name, { it, agreement: tabName });
     return m;
-  }, [catalog, generalCatalog, tabName]);
+  }, [catalog, generalCatalog, tabName, masterCatalog]);
 
   const existing = order && order.invoice;
   const [number, setNumber] = React.useState((existing && existing.number) || '');

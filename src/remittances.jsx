@@ -40,7 +40,7 @@ const STATUS_STYLE = {
   unmatched:  { label: 'NO WO',        fg: 'var(--text-2)', bg: 'var(--bg-surface-2)' },
 };
 
-export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBatch, onCaptureAmhForRemittance, onEnsureMsrOrders, onSaveInvoice, onBillMatched }) {
+export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBatch, onCaptureAmhForRemittance, onEnsureMsrOrders, onSaveInvoice, onBillMatched, masterCatalog = 'General' }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [report, setReport] = React.useState(null);   // { blocks, statementTotal, fileName } | null
   const [loading, setLoading] = React.useState(false);
@@ -115,7 +115,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
         // row (ensureMsrOrders) so it lands in the nexus; its line items still come from the
         // folder bid sheet (MSR's official itemization source; no in-app portal API).
         const msrLib = (lib && Array.isArray(lib.MSR)) ? lib.MSR : [];
-        const genLib = (lib && Array.isArray(lib.General)) ? lib.General : null;
+        const genLib = (lib && Array.isArray(lib[masterCatalog])) ? lib[masterCatalog] : null;
         const ensured = onEnsureMsrOrders ? onEnsureMsrOrders(rows) : {};
         blocks = await Promise.all(rows.map(async (row) => {
           const ens = ensured[normWoNum(row.woId)];
@@ -168,7 +168,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
       toast && toast('Parse error: ' + (e.message || e), 'err');
     }
     setLoading(false);
-  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance, onEnsureMsrOrders, history, persistHistory]);
+  }, [orders, toast, lib, onBillMatched, onCaptureAmhForRemittance, onEnsureMsrOrders, history, persistHistory, masterCatalog]);
 
   const updateBlock = React.useCallback((idx, next) => {
     setReport(r => r ? { ...r, blocks: r.blocks.map((b, i) => i === idx ? next : b) } : r);
