@@ -174,12 +174,13 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
   // (uncategorized first, then settings order, then unknown alphabetical).
   const showSubCol = (subCats && subCats.length > 0) || items.some(it => it && it.subCategory);
   const showDescCol = items.some(it => it && it.desc && String(it.desc).trim() !== '');
+  const showBreakdown = items.some(it => it && ((it.material != null && it.material !== '') || (it.labor != null && it.labor !== '')));
   const subOptions = React.useMemo(() => {
     const set = new Set(subCats || []);
     for (const it of items) if (it && it.subCategory) set.add(it.subCategory);
     return [...(subCats || []), ...[...set].filter(s => !(subCats || []).includes(s)).sort()];
   }, [subCats, items]);
-  const colCount = 2 /* Name + Price */ + (showDescCol ? 1 : 0) + 2 /* Material + Labor */ + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
+  const colCount = 2 /* Name + Price */ + (showDescCol ? 1 : 0) + (showBreakdown ? 2 : 0) + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
   const grouped = React.useMemo(() => {
     if (!filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
     const order = [''].concat(subCats || []);
@@ -417,8 +418,8 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
                 {showDescCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '16%' }}>Description</th>}
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 96 }}>Price</th>
                 {/* AMH material/labor are internal COST (do NOT sum to price); MSR/General are a sell-side split. */}
-                <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Material (cost)' : 'Material'}</th>
-                <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Labor (cost)' : 'Labor'}</th>
+                {showBreakdown && <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Material (cost)' : 'Material'}</th>}
+                {showBreakdown && <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Labor (cost)' : 'Labor'}</th>}
                 {showSubCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Sub-category</th>}
                 <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 60 }}>Taxable</th>
                 <th style={{ width: 34 }} />
@@ -439,8 +440,8 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.desc, (v) => updateItem(i, { desc: v }))}</td>
                   )}
                   <td style={{ padding: '4px 6px' }}>{cellInput(it.price, (v) => updateItem(i, { price: v === '' ? 0 : parseFloat(v) || 0 }), { type: 'number', step: '0.01' })}</td>
-                  <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.material)}</td>
-                  <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.labor)}</td>
+                  {showBreakdown && (<td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.material)}</td>)}
+                  {showBreakdown && (<td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.labor)}</td>)}
                   {showSubCol && (
                   <td style={{ padding: '4px 6px' }}>
                     <select value={it.subCategory || ''} onChange={(e) => updateItem(i, { subCategory: e.target.value || undefined })} style={{

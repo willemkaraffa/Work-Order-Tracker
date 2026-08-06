@@ -2869,7 +2869,12 @@ function ToastHost({ toasts }) {
 // Generic source-of-truth library. Tabs are SOURCE-scoped (General / AMH), not
 // PM agreements. Persists to storage key 'service_library' independent of wo_data.
 // xlsx seed/import/export delegated to window.library (main process, exceljs).
-export const LIBRARY_TABS = ['General', 'AMH', 'MSR'];
+// AMH/MSR are the only PINNED built-ins (semantic: CATALOG_TAX keyed on the name,
+// resolveBidLine red-flag string compare, scraper import target). General was
+// unpinned so it can be renamed/deleted like any custom catalog and disassembled
+// into a user-defined master library; General still exists as a seeded key and
+// stays the generic cross-catalog fallback until a master-catalog pointer lands.
+export const LIBRARY_TABS = ['AMH', 'MSR'];
 export function emptyLibrary() { return { General: [], AMH: [], MSR: [] }; }
 
 // Invoice tax model (TAX_RATE/money/computeInvoiceTotals) carved out to ./invoices.jsx.
