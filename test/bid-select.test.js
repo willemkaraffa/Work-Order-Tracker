@@ -2,7 +2,7 @@
 // chooseBidCoFiles (Bug A) + resolveBidSheetName (Bug B): pure main-process helpers,
 // tested by direct require (no electron/fs). Exit 0 pass / 1 fail.
 const assert = require('assert');
-const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems } = require('../bid-select.js');
+const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('../bid-select.js');
 
 const results = [];
 function test(name, fn) {
@@ -161,6 +161,47 @@ test('lone canonical Service Call survives (diagnostic-only, OTHER blank)', () =
 
 test('empty input -> []', () => {
   assert.deepStrictEqual(dedupeLineItems([]), []);
+});
+
+// ---- parseOtherCell (Bug 1: OTHER free-text, drop struck-negative + warranty) ----
+const otherSum = (arr) => Math.round(arr.reduce((a, x) => a + x.unitPrice, 0) * 100) / 100;
+
+test('Advantis: warranty line dropped, kept items sum to rollup 317.50', () => {
+  const cell = '$85 Service Call\n$150 Clean Condenser Coil\n$124.58 Capacitor replacement - Warranty\n$62.5 Material - 1.25lbs R410A\n$20 Replaced return air filter';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 4);
+  assert.strictEqual(otherSum(out), 317.5);
+  assert.ok(!out.some(i => /warranty/i.test(i.desc)));
+});
+
+test('Dell Meadows: negative struck lines dropped, kept sum to 230.66', () => {
+  const cell = '$85 Service Call\n-$800 for no compressor install\n-$300 no R32 charge\n-$124.58 no capacitor replacement\n$125.66 condenser contactor replacement\n$20 filter replacement';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 3);
+  assert.strictEqual(otherSum(out), 230.66);
+});
+
+test('Nightshade: all-positive lines kept, sum to 1595', () => {
+  const cell = '$85 Service Call\n$400 Labor to install new 50 gallon electric water heater\n$700 Material - new 50 gallon electric water heater\n$75 Labor to install new 2gallon expansion tank\n$35 Material - new 2 gallon expansion tank\n$150 Labor to replace kitchen faucet with new chrome gooseneck on granite countertop\n$150 Material - new chrome gooseneck kitchen faucet';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 7);
+  assert.strictEqual(otherSum(out), 1595);
+});
+
+test('negative "-$800" is dropped, never read as +800', () => {
+  assert.strictEqual(parseOtherCell('-$800 for no compressor install').length, 0);
+});
+
+test('multiple "$amount desc" on one line both parse', () => {
+  const out = parseOtherCell('$20 Labor/$20Material to replace filters');
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0].unitPrice, 20);
+  assert.strictEqual(out[1].unitPrice, 20);
+});
+
+test('blank cell -> []', () => {
+  assert.deepStrictEqual(parseOtherCell(''), []);
+  assert.deepStrictEqual(parseOtherCell('\n  \n'), []);
 });
 
 console.log('bid-select test');
