@@ -6,7 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const { runAmhCapture } = require('./amh-runner');
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
-const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems } = require('./bid-select');
+const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -790,33 +790,6 @@ ipcMain.handle('wo-create-subfolder', async (_e, rec) => {
     return { ok: true, path: sub, co, coSkip };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-
-// Parse one OTHER-cell description into individual line items. Each packed cell is
-// newline-separated "$<amount> <description>" sub-items (e.g. "$85 Service Call\n
-// $145 Labor to clean coil"). Lines without a leading dollar amount are skipped.
-// The $amount is the per-item price (the sheet's Total Price column is a formula
-// that already excludes the HVAC service call, so parse the amounts instead).
-// -> [{desc, unitPrice}].
-function parseOtherCell(text) {
-  const out = [];
-  for (const raw of String(text || '').split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    // A single line can pack MORE than one "$amount desc" (e.g. "$20 Labor/$20Material
-    // to replace filters"). Split on each "$" and parse every segment; a leading
-    // segment with no "$" (e.g. "200 Labor...") still parses.
-    for (const seg of line.split('$')) {
-      const s = seg.trim();
-      if (!s) continue;
-      const m = s.match(/^([\d,]+(?:\.\d+)?)\s*(.+?)\s*$/);
-      if (!m) continue;
-      const price = parseFloat(m[1].replace(/,/g, ''));
-      if (!Number.isFinite(price) || price <= 0) continue;
-      out.push({ desc: m[2].trim(), unitPrice: Math.round(price * 100) / 100 });
-    }
-  }
-  return out;
-}
 
 // Read the priced line items from one bid/CO sheet. Bid items come from TWO places:
 //   (1) the MAIN fixed-catalog table -- rows with Quantity>0, priced by "Line Item

@@ -139,6 +139,35 @@ test('MSR non-taxable line -> tax 0, pre == post', () => {
   assert.strictEqual(rep.postTax, 145);
 });
 
+test('reconcileMsrRow: Advantis warranty-free items reconcile to paid 317.50', () => {
+  const r = row({ woId: '02615338', amount: 317.5 });
+  const items = [
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+    { desc: 'Clean Condenser Coil', unitPrice: 150, qty: 1 },
+    { desc: 'Material - 1.25lbs R410A', unitPrice: 62.5, qty: 1 },
+    { desc: 'Replaced return air filter', unitPrice: 20, qty: 1 },
+  ];
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), items);
+  assert.strictEqual(rep.computed, 317.5);
+  assert.strictEqual(rep.status, 'match');
+});
+
+test('reconcileMsrRow: Nightshade bid 1595 > paid 1343 stays off (genuine underpay)', () => {
+  const r = row({ woId: '02615338', amount: 1343 });
+  const items = [
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+    { desc: 'Labor install WH', unitPrice: 400, qty: 1 },
+    { desc: 'Material WH', unitPrice: 700, qty: 1 },
+    { desc: 'Labor expansion tank', unitPrice: 75, qty: 1 },
+    { desc: 'Material expansion tank', unitPrice: 35, qty: 1 },
+    { desc: 'Labor faucet', unitPrice: 150, qty: 1 },
+    { desc: 'Material faucet', unitPrice: 150, qty: 1 },
+  ];
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), items);
+  assert.strictEqual(rep.computed, 1595);
+  assert.strictEqual(rep.status, 'off');
+});
+
 console.log('reconcile-msr test');
 console.log('==================');
 let pass = 0, fail = 0;

@@ -77,4 +77,46 @@ function dedupeLineItems(items) {
   return kept.map(k => ({ desc: k.desc, unitPrice: k.unitPrice, qty: k.qty }));
 }
 
-module.exports = { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems };
+// OTHER free-text bid lines: the human hand-writes MSR's Salesforce summary as packed
+// "$amount desc" lines (one or more per cell row) and the vendor's Material/Labor rollup
+// counts only the POSITIVE, non-warranty ones. Two kinds of line are NOT billable and
+// are DROPPED so the parsed set matches that rollup:
+//   - a NEGATIVE line = struck/removed scope, written "-$800 for no compressor install".
+//     Splitting on '$' put the '-' at the tail of the PRIOR segment, so the amount read
+//     as +800 and INFLATED the bid; the sign is now recovered and the line dropped.
+//   - a WARRANTY line = designated non-billable to the PM ("$124.58 Capacitor - Warranty").
+// A line can pack several "$amount desc"; a leading no-'$' segment ("200 Labor...") still
+// parses. Verified against Advantis (317.50), Dell Meadows (230.66), Nightshade (1595).
+// Pure. -> [{desc, unitPrice}].
+function parseOtherCell(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const parts = line.split('$');
+    for (let i = 0; i < parts.length; i++) {
+      const s = parts[i].trim();
+      if (!s) continue;
+      // Sign: a struck line reads "-$800 ...", so the '-' sits at the END of the segment
+      // BEFORE this '$' (parts[i-1] ends with '-'). A leading no-'$' segment (i===0)
+      // carries its own leading sign.
+      let neg = i > 0 && /-\s*$/.test(parts[i - 1]);
+      let body = s;
+      if (i === 0) {
+        const lead = body.match(/^(-)?\s*(.*)$/);
+        if (lead && lead[1]) { neg = true; body = lead[2]; }
+      }
+      const m = body.match(/^([\d,]+(?:\.\d+)?)\s*(.+?)\s*$/);
+      if (!m) continue;
+      const price = parseFloat(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(price) || price <= 0) continue;
+      if (neg) continue;                        // struck/removed scope: not charged
+      const desc = m[2].trim();
+      if (/warranty/i.test(desc)) continue;     // designated non-billable to the PM
+      out.push({ desc, unitPrice: Math.round(price * 100) / 100 });
+    }
+  }
+  return out;
+}
+
+module.exports = { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell };
