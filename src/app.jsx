@@ -3974,6 +3974,14 @@ function App() {
   // never written to the xlsx export (exportLibrary whitelists fields).
   const librarySubCats = (settings && Array.isArray(settings.librarySubCats)) ? settings.librarySubCats : [];
   const setLibrarySubCats = React.useCallback((v) => updateSettings({ librarySubCats: v }), [updateSettings]);
+  // S5: persistent EMPTY containers for the Service Library. Pages/sections
+  // normally derive from items; these two stores let a page or section with zero
+  // items persist ("empty container" model). libraryPages: { [catalog]: string[] }.
+  // librarySections: { [catalog]: { [pageKey]: string[] } } (pageKey '' = no-page view).
+  const libraryPages = (settings && settings.libraryPages && typeof settings.libraryPages === 'object') ? settings.libraryPages : {};
+  const setLibraryPages = React.useCallback((v) => updateSettings({ libraryPages: v }), [updateSettings]);
+  const librarySections = (settings && settings.librarySections && typeof settings.librarySections === 'object') ? settings.librarySections : {};
+  const setLibrarySections = React.useCallback((v) => updateSettings({ librarySections: v }), [updateSettings]);
   // Master-catalog pointer: which catalog is the generic cross-catalog fallback
   // (the else-bucket for non-AMH/MSR WOs). Defaults to the built-in 'General'.
   const masterCatalog = (settings && typeof settings.masterCatalog === 'string') ? settings.masterCatalog : 'General';
@@ -6310,7 +6318,7 @@ function App() {
           <NavWing />
           <div />
           {currentModule === 'service-items' ? (
-            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} />
+            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} libraryPages={libraryPages} setLibraryPages={setLibraryPages} librarySections={librarySections} setLibrarySections={setLibrarySections} />
           ) : currentModule === 'maps' ? (
             <MapsModule
               activeOrders={mapOrders}

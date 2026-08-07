@@ -98,12 +98,90 @@ name). So the agreement string stays literal `'General'`; only the item-SOURCE r
 - UI: rename/delete affordance on page sub-entries in the sidebar (invoices.jsx:331-339).
 
 ## Slice order
-- S1: W1 + W5 (IN BUILD).
-- S2: W2 (master pointer + fallback rewire) — unblocks safe General teardown.
-- S3: W4 + W6 (modal edit + page edit — the "edit everything" slice).
-- S4: W3 (drag-drop merge) — folds HVAC/Plumbing into SML last.
+- S1: W1 + W5 (DONE, d7aeebc).
+- S2: W2 (master pointer + fallback rewire) — DONE, 0cd680b. Unblocks safe General teardown.
+- S3: W4 + W6 (modal edit + page edit) — BUILT 2026-08-06, gate green, NOT live-verified.
+- S4: W3 (drag-drop merge) — BUILT 2026-08-06, gate green, NOT live-verified.
 
 ## Gate
 `npm run verify` per slice. New pure logic (mergeCatalogAsPage, renamePage, master-pointer
 fallback) gets logic tests via test/_load.js. Modal + drag = live-verify in app, not
 static read.
+
+## Progress 2026-08-06 (S3 + S4) — gate green, NOT committed, NOT live-verified
+
+One builder spawn built W4 + W6 + W3. `npm run verify` GREEN: 33 pass / 0 fail / 1 skip
+(skip = msr-extract, fixtures absent, pre-existing). Build ok. ESLint 0 err.
+
+- orders-logic.js: `renamePage` (:1114), `deletePage` (:1122, non-destructive — nulls
+  item.page, items survive), `mergeCatalogAsPage` (:1157). All React-free, immutable,
+  order-preserving. Logic-tested: test/rename-page.test.js, test/merge-catalog.test.js.
+- invoices.jsx: `AddServiceItemModal` -> `ServiceItemModal({mode,initial})` (adds
+  material/labor/taxable, prefill on edit). Item rows now READ-ONLY; edit (✎) button in
+  the width col opens the modal; `saveFromModal` patches same-catalog / MOVEs on
+  catalog-change. `mergeCatalogs` (drag catalog onto catalog, confirm-gated).
+  `renamePageAt`/`deletePageAt` on sidebar page sub-entries.
+- DEVIATION (dispositioned APPROVED): `mergeCatalogAsPage(lib,src,dest,opts)` took a 4th
+  `opts={builtins,master}` param instead of importing LIBRARY_TABS/masterCatalog.
+  orders-logic.js must stay React-free (constants.js only); importing app.jsx would pull
+  the renderer into every logic-test bundle and break test/_load.js isolation. UI passes
+  `{builtins:LIBRARY_TABS, master:masterCatalog}`; tests pass them explicitly.
+- STATIC-REVIEWED (main thread): MOVE branch idx-space consistent with updateItem; merge
+  guards mirror the pure fn + confirm-gated; no A5 inline component (renderCatBtn stays a
+  fn). Pure logic is the tested floor.
+- NOT LIVE-VERIFIED (cannot headlessly): modal open + save/move round-trip, HTML5
+  drag-drop merge, sidebar page rename/delete prompts. Needs Electron live drop (USER).
+- NOT COMMITTED: commit = architect/overseer + human authority. Dirty AMH tree
+  (amh-runner.js, amh-pw-login.js, package*) left untouched — do NOT stage it with this.
+- S3 LIVE-VERIFIED in app by USER 2026-08-06. PASS.
+
+## Progress 2026-08-06 (S5) — right-click menus + persistent empty containers
+
+User request post-S3/S4: right-click context menu on catalogs (Rename/Delete/Set master/
+New page) and pages (Rename/Delete/New section). Decision LOCKED via AskUserQuestion:
+"empty container" (persistent zero-item pages/sections), NOT seed-on-first-item. 2nd
+builder spawn human-granted through the spawn-limiter gate. `npm run verify` GREEN: 34
+pass / 0 fail / 1 skip (msr-extract, pre-existing).
+
+- TWO NEW STORES (settings, mirror librarySubCats): `libraryPages` = `{[catalog]:string[]}`
+  (declared empty pages); `librarySections` = `{[catalog]:{[pageKey]:string[]}}` (pageKey
+  '' = the no-page/L1 view). app.jsx getters+setters ~3977, passed to ServiceLibrary ~6318.
+- orders-logic.js: six pure immutable helpers ~1127-1176 — addPage/removePage/
+  renamePageInStore + addSection/removeSection/renameSectionInStore. Return input ref
+  unchanged on blank/no-op. Logic-tested: test/library-containers.test.js (24 assertions).
+- invoices.jsx: `pages` memo unions libraryPages[tab]; `seedSections` + `grouped` seed
+  empty section buckets so a zero-item section renders its header; empty-state guard
+  (filtered==0 && seedSections==0) so a sections-only page still shows the table. In-file
+  context menu (MenuItem/MenuDivider + viewport-clamp ported from WOContextMenu, capture-
+  phase outside-close ported from detail.jsx). renamePageAt/deletePageAt/deleteTab sync
+  the new stores. mergeCatalogs leaves src store entries orphaned (commented, no cascade).
+- STATIC-REVIEWED (main): union dedup/sort, grouped early-return guard, empty-state guard
+  all correct. Pure helpers are the tested floor.
+- NOT LIVE-VERIFIED: menu open/positioning/outside-close, the prompts, empty page in
+  sidebar + zero-item section header. Needs Electron live drop (USER).
+- NOT COMMITTED.
+
+### BUG (2026-08-06, live-reproduced) — menu items functionless. FIXED + LIVE-VERIFIED 2026-08-07.
+FIX APPLIED (builder spawn, invoices.jsx:167 + :678). npm run verify GREEN: 34 pass /
+0 fail / 1 skip (msr-extract, pre-existing). LIVE-VERIFIED by USER 2026-08-07: menus work,
+service library aesthetically improved. S5 COMPLETE.
+
+Reproduced in the http-server build (Browser pane, Service Items module): right-click a
+catalog opens the menu correctly, but clicking ANY item (Rename / New page / Set as
+master) does nothing. Disambiguated live: "Set as master" (pure state, no modal) also
+no-ops, so the item onClick never fires (not a modal-dismiss race).
+ROOT CAUSE: the outside-close listener in invoices.jsx (~166) is registered CAPTURE-phase
+on document for 'click'. React 18 delegates onClick at the #root container (below
+document). On a menu-item click the capture listener runs FIRST, setCtx(null) unmounts the
+menu, and the item's delegated onClick never dispatches. The item's stopPropagation cannot
+help — capture already ran. (The ✎/× inline affordances work because no menu is open when
+they are clicked, so no close listener is active.)
+FIX (two edits, invoices.jsx, NOT yet applied — coder-role gate + spawn ceiling this
+session):
+  1. close listener: ignore clicks inside the menu so the item handler can run —
+     `const close = (e) => { if (e && e.type === 'click' && menuRef.current &&
+      menuRef.current.contains(e.target)) return; setCtx(null); };`
+  2. menu container div (~678): add `onClick={() => setCtx(null)}` so choosing an item
+     closes the menu AFTER its action runs.
+Verify: rebuild renderer, reopen Service Items, right-click General -> New page here ->
+prompt appears; Set as master -> star moves. Then npm run verify.

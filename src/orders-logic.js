@@ -1107,6 +1107,74 @@ export function renameSubCategory(lib, oldName, newName) {
   return next;
 }
 
+// W6: rename an L2 page within ONE catalog: rewrite item.page old->new for that
+// catalog's items only (mirror of renameSubCategory, scoped to a single key).
+// Order-preserving + immutable; other catalogs keep their array refs. Merge falls
+// out (two page names -> one). Pure; caller persists.
+export function renamePage(lib, catalog, oldPage, newPage) {
+  if (!lib || !catalog || !oldPage || !newPage || oldPage === newPage || !Array.isArray(lib[catalog])) return lib;
+  return { ...lib, [catalog]: lib[catalog].map(it => it && it.page === oldPage ? { ...it, page: newPage } : it) };
+}
+
+// W6: delete an L2 page = NULL the page on its items (non-destructive, mirrors the
+// subcategory policy: items survive, they just lose their page). Scoped to one
+// catalog. Order-preserving + immutable. Pure; caller confirm-gates + persists.
+export function deletePage(lib, catalog, page) {
+  if (!lib || !catalog || !page || !Array.isArray(lib[catalog])) return lib;
+  return { ...lib, [catalog]: lib[catalog].map(it => it && it.page === page ? { ...it, page: null } : it) };
+}
+
+// S5: persistent EMPTY containers. Pages/sections normally derive from items;
+// these two settings stores let an empty page or section persist with zero items
+// ("empty container" model, chosen over seed-on-first-item). All pure/immutable,
+// return the input UNCHANGED on a blank name or no-op (mirrors renamePage policy).
+// libraryPages shape: { [catalog]: string[] } (declared empty page names).
+export function addPage(store, catalog, page) {
+  const name = (page || '').trim();
+  if (!store || !catalog || !name) return store;
+  const arr = store[catalog] || [];
+  if (arr.includes(name)) return store;
+  return { ...store, [catalog]: [...arr, name] };
+}
+export function removePage(store, catalog, page) {
+  const name = (page || '').trim();
+  if (!store || !catalog || !name || !Array.isArray(store[catalog]) || !store[catalog].includes(name)) return store;
+  return { ...store, [catalog]: store[catalog].filter(p => p !== name) };
+}
+export function renamePageInStore(store, catalog, oldName, newName) {
+  const nn = (newName || '').trim();
+  if (!store || !catalog || !oldName || !nn || oldName === nn || !Array.isArray(store[catalog]) || !store[catalog].includes(oldName)) return store;
+  return { ...store, [catalog]: store[catalog].map(p => p === oldName ? nn : p) };
+}
+// librarySections shape: { [catalog]: { [pageKey]: string[] } } where pageKey is
+// the page name, or '' for the no-page (page===null / all) view. pageKey === ''
+// is a valid key, so it is defaulted (`pageKey || ''`) not guarded as falsy.
+export function addSection(store, catalog, pageKey, name) {
+  const nm = (name || '').trim();
+  if (!store || !catalog || !nm) return store;
+  const pk = pageKey || '';
+  const cat = store[catalog] || {};
+  const arr = cat[pk] || [];
+  if (arr.includes(nm)) return store;
+  return { ...store, [catalog]: { ...cat, [pk]: [...arr, nm] } };
+}
+export function removeSection(store, catalog, pageKey, name) {
+  const nm = (name || '').trim();
+  if (!store || !catalog || !nm) return store;
+  const pk = pageKey || '';
+  const cat = store[catalog];
+  if (!cat || !Array.isArray(cat[pk]) || !cat[pk].includes(nm)) return store;
+  return { ...store, [catalog]: { ...cat, [pk]: cat[pk].filter(s => s !== nm) } };
+}
+export function renameSectionInStore(store, catalog, pageKey, oldName, newName) {
+  const nn = (newName || '').trim();
+  if (!store || !catalog || !oldName || !nn || oldName === nn) return store;
+  const pk = pageKey || '';
+  const cat = store[catalog];
+  if (!cat || !Array.isArray(cat[pk]) || !cat[pk].includes(oldName)) return store;
+  return { ...store, [catalog]: { ...cat, [pk]: cat[pk].map(s => s === oldName ? nn : s) } };
+}
+
 // Item 2: rename a CUSTOM catalog = rename the service_library KEY in place
 // (Object.entries preserves order). Collision / missing / built-in guards are the
 // caller's (built-ins are semantic: General fallback, CATALOG_TAX, red-flag).
@@ -1126,6 +1194,29 @@ export function deleteCatalog(lib, name) {
   if (!lib || !name || !(name in lib)) return lib;
   const next = {};
   for (const [cat, arr] of Object.entries(lib)) { if (cat !== name) next[cat] = arr; }
+  return next;
+}
+
+// W3: merge a whole catalog into another as an L2 page. Each lib[src] item moves
+// into lib[dest] with item.page = src; if the item already carries a page, it is
+// nested (`src + ' / ' + page`) so its prior grouping survives. The src key is
+// dropped; moved items append after dest's existing items (both orders preserved).
+// Immutable. Policy guards are caller-supplied so orders-logic stays React-free
+// (no LIBRARY_TABS / masterCatalog import): opts.builtins = pinned catalogs the src
+// may not be, opts.master = the master library the src may not be. Structural guards
+// (src/dest exist, src !== dest) are inline. Returns lib unchanged on any violation.
+export function mergeCatalogAsPage(lib, src, dest, opts = {}) {
+  const builtins = opts.builtins || [];
+  const master = opts.master || null;
+  if (!lib || !src || !dest || src === dest) return lib;
+  if (!Array.isArray(lib[src]) || !Array.isArray(lib[dest])) return lib;
+  if (builtins.includes(src) || src === master) return lib;
+  const moved = lib[src].map(it => it ? { ...it, page: it.page ? src + ' / ' + it.page : src } : it);
+  const next = {};
+  for (const [cat, arr] of Object.entries(lib)) {
+    if (cat === src) continue;
+    next[cat] = cat === dest ? [...arr, ...moved] : arr;
+  }
   return next;
 }
 
