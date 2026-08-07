@@ -41,51 +41,64 @@ async function pollCommand() {
 // off-screen batch capture.)
 const MSR_TAB_MATCH = '*://amherst.my.site.com/*';
 
-// WHICH Amherst tab to scan.
+// WHICH Amherst tab to host the hidden list iframe.
 //
-// This used to be `tabs[0]`: the first match in tab order, with no preference for
-// the one the user is actually looking at. With a single Amherst tab open that is
-// correct by accident. With several it silently scans an arbitrary one, and on
-// 2026-07-22 that meant scanning a stale WORK ORDER DETAIL tab instead of the
-// pending-bid list. A detail page carries 3 /workorder/ anchors of its own, so the
-// scan returned 3 plausible-looking WOs, the tracker diffed them, and the whole
-// thing reported success while never looking at the list the user had open.
+// The 2026-07-22 wrong-tab hazard (scanning a stale WORK ORDER DETAIL tab's own
+// /workorder/ anchors instead of the pending-bid list) is gone: the scan now loads
+// the canonical MSR_ASSESSMENT_URL in a same-origin iframe rather than reading the
+// host tab's DOM, so which page the tab happens to show no longer matters and
+// multi-tab ambiguity is no longer a failure.
 //
-// Preference order: the tab the user is on, then a lone match. Several matches and
-// none of them active is AMBIGUOUS, and ambiguity is reported rather than resolved
-// by guessing, because guessing is what produced a silent wrong answer.
+// Preference order: the tab the user is on, then any match.
 async function pickMsrTab() {
   const active = await chrome.tabs.query({ url: MSR_TAB_MATCH, active: true, currentWindow: true });
   if (active && active[0]) return { tab: active[0], matches: active };
   const all = await chrome.tabs.query({ url: MSR_TAB_MATCH });
   if (!all || !all.length) return { tab: null, matches: [] };
-  if (all.length === 1) return { tab: all[0], matches: all };
-  return { tab: null, matches: all };
+  // Any amherst tab can host the hidden list iframe (the scan loads
+  // MSR_ASSESSMENT_URL itself rather than reading the host tab's own DOM),
+  // so ambiguity no longer matters: pick the first match.
+  return { tab: all[0], matches: all };
 }
 
-async function backgroundFindNew() {
-  const { tab, matches } = await pickMsrTab();
-  if (!tab && !matches.length) {
-    notify('Find new MSR WOs', 'Open an MSR list page (amherst.my.site.com) first.');
-    return;
-  }
-  if (!tab) {
-    notify('Find new MSR WOs',
-      matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.');
-    return;
-  }
-  const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
-  const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
-  // Report WHAT WAS SCANNED, always. The failure above was invisible precisely
-  // because the result never said which page produced it: 3 WOs off the wrong tab
-  // and 3 WOs off the right one are indistinguishable downstream.
-  const source = { url: tab.url || '', title: tab.title || '', tabCount: matches.length };
+// POST scan result to the tracker. `source.error`, when set, tells the app the
+// scan could not run (no/ambiguous tab) so it clears its in-flight banner and
+// shows the reason, instead of the app spinning for 2 min then silently
+// clearing, which read as "nothing happened" (the Chrome notify below is the
+// ONLY prior feedback, and it is invisible when the app has focus).
+async function postFound(items, source) {
   try {
     await fetch(BRIDGE_URL + '/found-wos', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ items, source }), signal: AbortSignal.timeout(3000),
     });
   } catch (_) {}
+}
+
+async function backgroundFindNew() {
+  const { tab, matches } = await pickMsrTab();
+  if (!tab && !matches.length) {
+    const msg = 'Open an MSR list page (amherst.my.site.com) first.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { error: msg, tabCount: 0 });
+    return;
+  }
+  if (!tab) {
+    const msg = matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { error: msg, tabCount: matches.length });
+    return;
+  }
+  console.log('[wo] find-new: dequeued, host tab', tab.id, tab.url);
+  const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
+  if (!r || !r.ok) {
+    const msg = 'MSR page not ready, keep an amherst tab open and loaded, then try again.';
+    notify('Find new MSR WOs', msg);
+    await postFound([], { url: tab.url || '', title: tab.title || '', tabCount: matches.length, error: msg });
+    return;
+  }
+  // Scan runs in the content script; its result arrives later via foundWosResult.
+  console.log('[wo] find-new: scan started, awaiting foundWosResult');
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -177,24 +190,14 @@ async function backgroundStartMsr(one) {
   return { ok: true, started: true };
 }
 
-// ── Message handlers ──────────────────────────────────────────────────────────
 // Ask the APP to capture an AMH work order with its own scraper, so the extension
-// never runs a second, divergent AMH extractor (see main.js /capture-amh).
-//
-// The app ACKS immediately and captures afterwards, so this returns in milliseconds.
-//
-// It used to hold the request open for the whole capture (~180s). That does not work
-// from an MV3 service worker: Chrome terminates idle workers, the pending fetch died
-// with it, sendResponse never fired, and the on-page button hung on
-// "Tracker capturing..." with no error path. Seen on the first real test.
-//
-// The result now lands in the app itself, and a failure is reported there too, so
-// nothing depends on this worker surviving.
-async function captureAmhViaApp(woId) {
+// never runs a second, divergent AMH extractor (see main.js /capture-amh). The app
+// captures via the live-verified GET Order/{orderGuid}; pass orderGuid through.
+async function captureAmhViaApp(woId, orderGuid) {
   try {
     const r = await fetch(BRIDGE_URL + '/capture-amh', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ woId }), signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({ woId, orderGuid }), signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return { ok: false, error: 'tracker returned HTTP ' + r.status };
     return await r.json();
@@ -203,9 +206,10 @@ async function captureAmhViaApp(woId) {
   }
 }
 
+// ── Message handlers ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'captureAmhViaApp') {
-    captureAmhViaApp(msg.woId).then(sendResponse);
+    captureAmhViaApp(msg.woId, msg.orderGuid).then(sendResponse);
     return true;   // async response
   }
 
@@ -311,6 +315,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         result.ok ? `${orders.length} work order(s) sent to the tracker.`
                   : `Import failed: ${result.error || 'tracker not running'}.`);
     })();
+    return false; // no response expected
+  }
+
+  // Result posted back by the content script after the hidden find-new list scan.
+  if (msg.action === 'foundWosResult') {
+    console.log('[wo] find-new: foundWosResult items=' + ((msg.items && msg.items.length) || 0) + ' error=' + (msg.error || ''));
+    postFound(Array.isArray(msg.items) ? msg.items : [], { error: msg.error || '' });
     return false; // no response expected
   }
 

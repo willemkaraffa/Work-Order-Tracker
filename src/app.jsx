@@ -2869,7 +2869,12 @@ function ToastHost({ toasts }) {
 // Generic source-of-truth library. Tabs are SOURCE-scoped (General / AMH), not
 // PM agreements. Persists to storage key 'service_library' independent of wo_data.
 // xlsx seed/import/export delegated to window.library (main process, exceljs).
-export const LIBRARY_TABS = ['General', 'AMH', 'MSR'];
+// AMH/MSR are the only PINNED built-ins (semantic: CATALOG_TAX keyed on the name,
+// resolveBidLine red-flag string compare, scraper import target). General was
+// unpinned so it can be renamed/deleted like any custom catalog and disassembled
+// into a user-defined master library; General still exists as a seeded key and
+// stays the generic cross-catalog fallback until a master-catalog pointer lands.
+export const LIBRARY_TABS = ['AMH', 'MSR'];
 export function emptyLibrary() { return { General: [], AMH: [], MSR: [] }; }
 
 // Invoice tax model (TAX_RATE/money/computeInvoiceTotals) carved out to ./invoices.jsx.
@@ -3969,6 +3974,18 @@ function App() {
   // never written to the xlsx export (exportLibrary whitelists fields).
   const librarySubCats = (settings && Array.isArray(settings.librarySubCats)) ? settings.librarySubCats : [];
   const setLibrarySubCats = React.useCallback((v) => updateSettings({ librarySubCats: v }), [updateSettings]);
+  // S5: persistent EMPTY containers for the Service Library. Pages/sections
+  // normally derive from items; these two stores let a page or section with zero
+  // items persist ("empty container" model). libraryPages: { [catalog]: string[] }.
+  // librarySections: { [catalog]: { [pageKey]: string[] } } (pageKey '' = no-page view).
+  const libraryPages = (settings && settings.libraryPages && typeof settings.libraryPages === 'object') ? settings.libraryPages : {};
+  const setLibraryPages = React.useCallback((v) => updateSettings({ libraryPages: v }), [updateSettings]);
+  const librarySections = (settings && settings.librarySections && typeof settings.librarySections === 'object') ? settings.librarySections : {};
+  const setLibrarySections = React.useCallback((v) => updateSettings({ librarySections: v }), [updateSettings]);
+  // Master-catalog pointer: which catalog is the generic cross-catalog fallback
+  // (the else-bucket for non-AMH/MSR WOs). Defaults to the built-in 'General'.
+  const masterCatalog = (settings && typeof settings.masterCatalog === 'string') ? settings.masterCatalog : 'General';
+  const setMasterCatalog = React.useCallback((v) => updateSettings({ masterCatalog: v }), [updateSettings]);
   // Slice 3 (#8): Tech Job Types. The WO's existing `type` field IS the trade
   // (no separate tradeList/tradeTag — that duplicated settings.types + wo.type +
   // mapTypeColors). techJobTypes is the only new state: keyed by tech NAME, then
@@ -4315,6 +4332,14 @@ function App() {
         // Results arrived: clear the in-flight scan banner (mirror onImport).
         if (msrBannerTimer.current) { clearTimeout(msrBannerTimer.current); msrBannerTimer.current = null; }
         setCaptureStatus(null);
+        // Scan could not run (no/ambiguous MSR tab, or page not ready). Surface the
+        // reason in the app; previously this only fired a Chrome notification the
+        // user never saw, and the app just cleared the banner with no explanation.
+        if (source && source.error) {
+          pushNotif({ kind: 'capture', captureType: 'msr', title: 'MSR scan could not run', sub: String(source.error).slice(0, 120), payload: { items: [], scanned: 0, source } });
+          toast(source.error);
+          return;
+        }
         const arr = Array.isArray(items) ? items : [];
         const normNum = s => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
         // Split known (active) from trashed (deleted). Trashed WOs were
@@ -5105,14 +5130,14 @@ function App() {
       const v = r && r.value;
       if (v && typeof v === 'object') lib = { General: [], AMH: [], MSR: [], ...v };
     } catch { /* keep empty library */ }
-    const tabOf = (pm) => { const u = String(pm || '').toUpperCase(); return u === 'AMH' ? 'AMH' : u === 'MSR' ? 'MSR' : 'General'; };
+    const tabOf = (pm) => { const u = String(pm || '').toUpperCase(); return u === 'AMH' ? 'AMH' : u === 'MSR' ? 'MSR' : masterCatalog; };
     let changed = 0, withInvoice = 0;
     for (const o of orders) {
       if (o.deleted || !o.invoice || !Array.isArray(o.invoice.lineItems) || !o.invoice.lineItems.length) continue;
       withInvoice++;
       const tab = tabOf(o.pm);
       const client = Array.isArray(lib[tab]) ? lib[tab] : [];
-      const gen = tab !== 'General' && Array.isArray(lib.General) ? lib.General : null;
+      const gen = tab !== masterCatalog && Array.isArray(lib[masterCatalog]) ? lib[masterCatalog] : null;
       const { lines, changes } = recomputeInvoice(o.invoice, client, gen, tab);
       if (!changes.length) continue;
       changed++;
@@ -5128,7 +5153,7 @@ function App() {
     if (changed) toast('Refreshed ' + changed + ' of ' + withInvoice + ' saved invoice(s)');
     else if (withInvoice) toast('All ' + withInvoice + ' saved invoice(s) already current');
     else toast('No saved invoices to recompute -- open a WO and Save an invoice first');
-  }, [orders, updateOrder, toast]);
+  }, [orders, updateOrder, toast, masterCatalog]);
 
   // Bill a batch of WOs from a verified remittance: write each reconciled invoice
   // (fill empty OR overwrite existing -- the paid remittance is authoritative) in one
@@ -6293,7 +6318,7 @@ function App() {
           <NavWing />
           <div />
           {currentModule === 'service-items' ? (
-            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} />
+            <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} libraryPages={libraryPages} setLibraryPages={setLibraryPages} librarySections={librarySections} setLibrarySections={setLibrarySections} />
           ) : currentModule === 'maps' ? (
             <MapsModule
               activeOrders={mapOrders}
@@ -6334,7 +6359,7 @@ function App() {
               onRefreshAll={refreshAllInvoices}
             />
           ) : currentModule === 'remittances' ? (
-            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} />
+            <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} masterCatalog={masterCatalog} />
           ) : currentModule === 'itinerary' ? (
             <ItineraryModule
               activeOrders={activeOrders}
@@ -6590,6 +6615,7 @@ function App() {
               onSave={(invoice, errMsg) => saveInvoice(invoiceEditorWO, invoice, errMsg)}
               onClear={() => clearInvoice(invoiceEditorWO)}
               onClose={() => setInvoiceEditorWO(null)}
+              masterCatalog={masterCatalog}
             />
           );
         })()}

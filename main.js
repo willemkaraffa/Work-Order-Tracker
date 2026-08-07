@@ -164,8 +164,12 @@ function startBridgeServer(win) {
           res.writeHead(code, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(obj));
         };
-        let woNum = '';
-        try { woNum = String((JSON.parse(body) || {}).woId || '').trim(); }
+        let woNum = '', orderGuid = '';
+        try {
+          const parsed = JSON.parse(body) || {};
+          woNum = String(parsed.woId || '').trim();
+          orderGuid = String(parsed.orderGuid || '').trim();
+        }
         catch (e) { return send(400, { ok: false, error: 'bad JSON: ' + e.message }); }
         if (!woNum) return send(400, { ok: false, error: 'no woId supplied' });
 
@@ -184,8 +188,12 @@ function startBridgeServer(win) {
         send(200, { ok: true, started: true, woId: woNum });
 
         try {
-          const results = await runAmhCapture([woNum], amhCredential());
-          const one = results[woNum];
+          // Single-WO capture uses the live-verified GET Order/{orderGuid} endpoint:
+          // hand the GUID to scrape_amh as its input token and read the result by that
+          // key. Absent a GUID, fall back to the old WO#-keyed path.
+          const key = orderGuid || woNum;
+          const results = await runAmhCapture([key], amhCredential());
+          const one = results[key];
           if (one && one.ok && one.wo) {
             if (win && !win.isDestroyed()) {
               win.webContents.send('extension-import', [one.wo]);

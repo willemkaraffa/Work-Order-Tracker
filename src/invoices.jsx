@@ -5,10 +5,11 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import {
-  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, HeaderChips, OtherTabMatches, confirmDialog, NamePromptModal,
+  LIBRARY_TABS, emptyLibrary, useServiceLibraryStore, Modal, SimpleListEditor, MenuItem, MenuDivider, HeaderChips, OtherTabMatches, confirmDialog, NamePromptModal,
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
-  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog } from './orders-logic.js';
+  TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog, renamePage, deletePage, mergeCatalogAsPage,
+  addPage, removePage, renamePageInStore, addSection } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
@@ -16,20 +17,26 @@ import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 // Live-verify handle for the divide-out round-trip (console: __invoiceCalc(...)).
 if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals; }
 
-// Slice 2 (#6): Add Service Item modal — replaces the old insert-blank-row
-// behavior. Catalog defaults to the tab the user was viewing; sub-category is
-// internal-only (exportLibrary whitelists fields, so it never reaches xlsx).
-function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, onClose }) {
-  const [name, setName] = React.useState('');
-  const [desc, setDesc] = React.useState('');
-  const [price, setPrice] = React.useState('');
-  const [taxable, setTaxable] = React.useState(true);
+// Slice 2 (#6) + W4: Service Item modal. mode 'add' replaces the old insert-blank-
+// row behavior; mode 'edit' replaces inline cell editing and can MOVE an item to a
+// different catalog and/or page. Catalog defaults to the tab the user was viewing;
+// sub-category is internal-only (exportLibrary whitelists fields, so it never reaches
+// xlsx). onSubmit gets the full field bag; the parent decides add vs patch vs move.
+function ServiceItemModal({ mode = 'add', initial, defaultCatalog, catalogs, subCats, lib, onSubmit, onClose }) {
+  const isEdit = mode === 'edit';
+  const [name, setName] = React.useState(isEdit && initial ? (initial.name || '') : '');
+  const [desc, setDesc] = React.useState(isEdit && initial ? (initial.desc || '') : '');
+  const [price, setPrice] = React.useState(isEdit && initial && initial.price != null ? String(initial.price) : '');
+  // Material/Labor are text: a number OR the 'Included' string sentinel (bundled cost).
+  const [material, setMaterial] = React.useState(isEdit && initial && initial.material != null ? String(initial.material) : '');
+  const [labor, setLabor] = React.useState(isEdit && initial && initial.labor != null ? String(initial.labor) : '');
+  const [taxable, setTaxable] = React.useState(isEdit && initial ? !!initial.taxable : true);
   const [catalog, setCatalog] = React.useState(defaultCatalog || LIBRARY_TABS[0]);
   // subCat '__new' = user is typing a brand-new sub-category in newSub.
-  const [subCat, setSubCat] = React.useState('');
+  const [subCat, setSubCat] = React.useState(isEdit && initial ? (initial.subCategory || '') : '');
   const [newSub, setNewSub] = React.useState('');
   // page '__new' = user is typing a brand-new L2 page in newPage.
-  const [page, setPage] = React.useState('');
+  const [page, setPage] = React.useState(isEdit && initial ? (initial.page || '') : '');
   const [newPage, setNewPage] = React.useState('');
   const inputRef = React.useRef(null);
   // Explicit focus (autoFocus inside a freshly-mounted Modal can be cleared in
@@ -50,9 +57,10 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
     if (!name.trim()) return;
     const sub = subCat === '__new' ? newSub.trim() : subCat;
     const pg = page === '__new' ? newPage.trim() : page;
-    onAdd({
+    onSubmit({
       name: name.trim(), desc: desc.trim(),
       price: price === '' ? 0 : parseFloat(price) || 0,
+      material: material.trim(), labor: labor.trim(),
       // Taxable is per-item for every catalog now: AMH is mostly tax-inclusive
       // (non-taxable) but its service calls ($75 plumb / $90 HVAC) are taxable.
       taxable,
@@ -61,7 +69,7 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
   };
   const onEnter = (e) => { if (e.key === 'Enter') submit(); };
   return (
-    <Modal open onClose={onClose} title="Add service item" width={420}>
+    <Modal open onClose={onClose} title={isEdit ? 'Edit service item' : 'Add service item'} width={420}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Name
           <input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onEnter} style={fld} />
@@ -72,6 +80,14 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
         <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Price
           <input value={price} onChange={(e) => setPrice(e.target.value)} type="number" step="0.01" placeholder="0.00"
             onKeyDown={onEnter} style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Material
+          <input value={material} onChange={(e) => setMaterial(e.target.value)} onKeyDown={onEnter}
+            placeholder="blank, a number, or Included" style={fld} />
+        </label>
+        <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Labor
+          <input value={labor} onChange={(e) => setLabor(e.target.value)} onKeyDown={onEnter}
+            placeholder="blank, a number, or Included" style={fld} />
         </label>
         <label style={{ fontSize: 12, color: 'var(--text-3)' }}>Catalog
           <select value={catalog} onChange={(e) => setCatalog(e.target.value)} style={fld}>
@@ -106,24 +122,62 @@ function AddServiceItemModal({ defaultCatalog, catalogs, subCats, lib, onAdd, on
         </label>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
           <ActionBtn onClick={onClose}>Cancel</ActionBtn>
-          <ActionBtn primary disabled={!name.trim()} onClick={submit}>Add item</ActionBtn>
+          <ActionBtn primary disabled={!name.trim()} onClick={submit}>{isEdit ? 'Save' : 'Add item'}</ActionBtn>
         </div>
       </div>
     </Modal>
   );
 }
 
-export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) {
+export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, masterCatalog, setMasterCatalog, libraryPages, setLibraryPages, librarySections, setLibrarySections }) {
   const [lib, persist] = useServiceLibraryStore();
   const [tab, setTab] = React.useState('General');
   // page = active L2 sub-page filter; null = L1 view (search ALL pages, existing behavior).
   const [page, setPage] = React.useState(null);
   const [q, setQ] = React.useState('');
   const [adding, setAdding] = React.useState(false);
+  const [editing, setEditing] = React.useState(null); // { i, it } -> ServiceItemModal in edit mode
   const [subCatsOpen, setSubCatsOpen] = React.useState(false);
   const [catPrompt, setCatPrompt] = React.useState(null); // NamePromptModal state for "+ New category"
+  // S5: right-click menu on catalog buttons + page entries. { x, y, kind, name, catalog } | null.
+  const [ctx, setCtx] = React.useState(null);
   const searchRef = React.useRef(null);
   useTypeToSearch({ setValue: setQ, inputRef: searchRef });
+
+  // S5: context menu positioning (viewport-clamp ported from WOContextMenu) +
+  // capture-phase outside/Escape close (ported from detail.jsx).
+  const menuRef = React.useRef(null);
+  const [menuPos, setMenuPos] = React.useState({ top: 0, left: 0, ready: false });
+  const openCtx = (e, kind, name, catalog) => {
+    e.preventDefault();
+    setMenuPos({ top: e.clientY, left: e.clientX, ready: false });
+    setCtx({ x: e.clientX, y: e.clientY, kind, name, catalog });
+  };
+  React.useLayoutEffect(() => {
+    if (!ctx || !menuRef.current) return;
+    const pad = 8;
+    const r = menuRef.current.getBoundingClientRect();
+    let top = ctx.y; let left = ctx.x;
+    if (top + r.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - r.height - pad);
+    if (left + r.width > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - r.width - pad);
+    setMenuPos({ top, left, ready: true });
+  }, [ctx]);
+  React.useEffect(() => {
+    if (!ctx) return;
+    const close = (e) => { if (e && e.type === 'click' && menuRef.current && menuRef.current.contains(e.target)) return; setCtx(null); };
+    const onKey = (e) => { if (e.key === 'Escape') setCtx(null); };
+    const id = setTimeout(() => {
+      document.addEventListener('click', close, true);
+      document.addEventListener('contextmenu', close, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener('click', close, true);
+      document.removeEventListener('contextmenu', close, true);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [ctx]);
 
   // L1 category list is data-driven: pinned built-ins first, then any custom keys.
   const allTabs = React.useMemo(() => {
@@ -154,11 +208,14 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
 
   const items = (lib && lib[tab]) || [];
   // Distinct L2 pages under the active category (sidebar sub-entries).
+  // S5: union the derived pages with declared-empty pages (libraryPages[tab]) so an
+  // empty page persists in the sidebar with zero items.
   const pages = React.useMemo(() => {
     const set = new Set();
     for (const it of items) if (it && it.page) set.add(it.page);
+    for (const p of ((libraryPages && libraryPages[tab]) || [])) set.add(p);
     return [...set].sort();
-  }, [items]);
+  }, [items, libraryPages, tab]);
   const filtered = React.useMemo(() => {
     const needle = q.trim().toLowerCase();
     let rows = items.map((it, i) => ({ it, i }));
@@ -174,16 +231,19 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
   // (uncategorized first, then settings order, then unknown alphabetical).
   const showSubCol = (subCats && subCats.length > 0) || items.some(it => it && it.subCategory);
   const showDescCol = items.some(it => it && it.desc && String(it.desc).trim() !== '');
-  const subOptions = React.useMemo(() => {
-    const set = new Set(subCats || []);
-    for (const it of items) if (it && it.subCategory) set.add(it.subCategory);
-    return [...(subCats || []), ...[...set].filter(s => !(subCats || []).includes(s)).sort()];
-  }, [subCats, items]);
-  const colCount = 2 /* Name + Price */ + (showDescCol ? 1 : 0) + 2 /* Material + Labor */ + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
+  const showBreakdown = items.some(it => it && ((it.material != null && it.material !== '') || (it.labor != null && it.labor !== '')));
+  const colCount = 2 /* Name + Price */ + (showDescCol ? 1 : 0) + (showBreakdown ? 2 : 0) + (showSubCol ? 1 : 0) + 1 /* Taxable */ + 1;
+  // S5: declared-empty sections for the active pageKey (page name, or '' for the
+  // all/no-page view). Seeded into grouped so a zero-item section keeps its header.
+  const seedSections = React.useMemo(
+    () => ((librarySections && librarySections[tab]) || {})[page || ''] || [],
+    [librarySections, tab, page]);
   const grouped = React.useMemo(() => {
-    if (!filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
+    if (seedSections.length === 0 && !filtered.some(({ it }) => it && it.subCategory)) return [{ sub: null, rows: filtered }];
     const order = [''].concat(subCats || []);
     const buckets = new Map();
+    // Seed empty buckets FIRST so a declared section with zero items still renders.
+    for (const name of seedSections) if (name && !buckets.has(name)) buckets.set(name, []);
     for (const r of filtered) {
       const key = (r.it && r.it.subCategory) || '';
       if (!buckets.has(key)) buckets.set(key, []);
@@ -192,7 +252,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
     const known = order.filter(k => buckets.has(k));
     const unknown = [...buckets.keys()].filter(k => !order.includes(k)).sort();
     return [...known, ...unknown].map(k => ({ sub: k || null, rows: buckets.get(k) }));
-  }, [filtered, subCats]);
+  }, [filtered, subCats, seedSections]);
 
   const setItems = React.useCallback((nextItems) => {
     persist({ ...(lib || emptyLibrary()), [tab]: nextItems });
@@ -203,11 +263,13 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
   // Slice 2 (#6): "+ Add item" opens a modal instead of inserting a blank row.
   // A sub-category typed fresh in the modal is appended to the settings list
   // so it shows up in every dropdown from then on.
-  const addFromModal = ({ name, desc, price, taxable, catalog, subCategory, page: itemPage }) => {
+  const addFromModal = ({ name, desc, price, material, labor, taxable, catalog, subCategory, page: itemPage }) => {
     // manual:true marks a hand-added item so re-seeding preserves it (core truth #5).
     const item = { name, desc, price, taxable, manual: true };
     if (subCategory) item.subCategory = subCategory;
     if (itemPage) item.page = itemPage; // L2 page
+    if (material) item.material = material;
+    if (labor) item.labor = labor;
     if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
       setSubCats([...(subCats || []), subCategory]);
     }
@@ -215,6 +277,80 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
     setAdding(false);
     if (catalog !== tab) { setTab(catalog); setPage(null); }
     toast('Added to ' + catalog + (subCategory ? ' · ' + subCategory : ''));
+  };
+
+  // W4: save an item edited in ServiceItemModal. Same catalog -> patch in place.
+  // Catalog changed -> MOVE: drop from the origin (current tab) key, prepend to the
+  // target key. material/labor/subCategory/page set to undefined when cleared (JSON
+  // persist drops undefined keys, so the field is removed).
+  const saveFromModal = ({ name, desc, price, material, labor, taxable, catalog, subCategory, page: itemPage }) => {
+    const idx = editing.i;
+    const from = tab;
+    if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
+      setSubCats([...(subCats || []), subCategory]);
+    }
+    const patch = {
+      name, desc, price, taxable, manual: true,
+      subCategory: subCategory || undefined, page: itemPage || undefined,
+      material: material || undefined, labor: labor || undefined,
+    };
+    if (catalog === from) {
+      updateItem(idx, patch);
+    } else {
+      const moved = { ...items[idx], ...patch };
+      persist({
+        ...(lib || emptyLibrary()),
+        [from]: items.filter((_, i) => i !== idx),
+        [catalog]: [moved, ...((lib && lib[catalog]) || [])],
+      });
+      setTab(catalog); setPage(null);
+    }
+    setEditing(null);
+    toast(catalog === from ? 'Saved' : 'Moved to ' + catalog);
+  };
+
+  // W3: drag a custom catalog onto another = nest its items under the target as a
+  // page, then drop the source key. Confirm-gated. Guards mirror mergeCatalogAsPage.
+  const mergeCatalogs = async (src, dest) => {
+    if (!src || src === dest) return;
+    if (LIBRARY_TABS.includes(src)) { toast('"' + src + '" is pinned and cannot be merged', 'err'); return; }
+    if (src === masterCatalog) { toast('The master library cannot be merged away', 'err'); return; }
+    if (!(lib && Array.isArray(lib[dest]))) return;
+    const n = ((lib && lib[src]) || []).length;
+    const msg = 'Merge "' + src + '" into "' + dest + '" as a page? Its ' + n + ' item' + (n === 1 ? '' : 's') +
+      ' move under "' + dest + '" and "' + src + '" is removed.';
+    if (!(await confirmDialog(msg, { confirmLabel: 'Merge' }))) return;
+    persist(mergeCatalogAsPage(lib, src, dest, { builtins: LIBRARY_TABS, master: masterCatalog }));
+    // S5 edge (low priority): src's libraryPages/librarySections entries are left
+    // orphaned here (acceptable this slice; no cascade built).
+    if (tab === src) { setTab(dest); setPage(null); }
+    toast('Merged "' + src + '" into "' + dest + '"');
+  };
+
+  // W6: rename / delete an L2 page. Rename re-keys item.page across the catalog;
+  // delete nulls the page (items survive). Both confirm/prompt at the UI, persist pure.
+  const renamePageAt = (cat, p) => setCatPrompt({
+    title: 'Rename page', placeholder: 'New page name', submitLabel: 'Rename',
+    onSubmit: (raw) => {
+      const nn = raw.trim();
+      if (!nn || nn === p) return;
+      persist(renamePage(lib, cat, p, nn));
+      // S5: also re-key the declared-empty page so an item-less page's rename sticks.
+      if (setLibraryPages) setLibraryPages(renamePageInStore(libraryPages, cat, p, nn));
+      if (page === p) setPage(nn);
+      toast('Renamed page "' + p + '" to "' + nn + '"');
+    },
+  });
+  const deletePageAt = async (cat, p) => {
+    const n = ((lib && lib[cat]) || []).filter(it => it && it.page === p).length;
+    const msg = 'Delete page "' + p + '"? Its ' + n + ' item' + (n === 1 ? '' : 's') +
+      ' stay in "' + cat + '" without a page.';
+    if (!(await confirmDialog(msg, { danger: true, confirmLabel: 'Delete page' }))) return;
+    persist(deletePage(lib, cat, p));
+    // S5: also drop the declared-empty page entry so it does not re-appear.
+    if (setLibraryPages) setLibraryPages(removePage(libraryPages, cat, p));
+    if (page === p) setPage(null);
+    toast('Deleted page "' + p + '"');
   };
 
   // "+ New category" = NEW L1 only (default tax; MSR/AMH/General stay pinned).
@@ -256,9 +392,34 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
       '? This cannot be undone.';
     if (!(await confirmDialog(msg, { danger: true, confirmLabel: 'Delete' }))) return;
     persist(deleteCatalog(lib, t));
+    // S5: drop this catalog's declared empty pages/sections so they don't orphan.
+    if (setLibraryPages && libraryPages[t]) { const { [t]: _drop, ...rest } = libraryPages; setLibraryPages(rest); }
+    if (setLibrarySections && librarySections[t]) { const { [t]: _drop2, ...rest2 } = librarySections; setLibrarySections(rest2); }
     if (tab === t) { setTab(LIBRARY_TABS[0]); setPage(null); }
     toast('Deleted "' + t + '"');
   };
+
+  // S5: "New page here" (catalog menu) = declare an empty page + navigate into it.
+  const newPageHere = (cat) => setCatPrompt({
+    title: 'New page', placeholder: 'Page name', submitLabel: 'Create',
+    onSubmit: (raw) => {
+      const nn = raw.trim();
+      if (!nn) return;
+      if (setLibraryPages) setLibraryPages(addPage(libraryPages, cat, nn));
+      setTab(cat); setPage(nn);
+      toast('Page "' + nn + '" created in ' + cat);
+    },
+  });
+  // S5: "New section here" (page menu) = declare an empty section under that page.
+  const newSectionHere = (cat, pageKey) => setCatPrompt({
+    title: 'New section', placeholder: 'Section name', submitLabel: 'Create',
+    onSubmit: (raw) => {
+      const nn = raw.trim();
+      if (!nn) return;
+      if (setLibrarySections) setLibrarySections(addSection(librarySections, cat, pageKey, nn));
+      toast('Section "' + nn + '" created');
+    },
+  });
 
   const btn = (label, onClick, primary) => (
     <button onClick={onClick} style={{
@@ -280,25 +441,17 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
     return Number.isFinite(n) ? money(n) : String(v);
   };
 
-  const cellInput = (val, onChange, opts = {}) => (
-    <input
-      value={val == null ? '' : val}
-      onChange={(e) => onChange(e.target.value)}
-      type={opts.type || 'text'} step={opts.step}
-      style={{
-        width: '100%', boxSizing: 'border-box', height: 28, padding: '0 8px',
-        border: '1px solid var(--border-1)', borderRadius: 6,
-        background: 'var(--bg-canvas)', color: 'var(--text-1)',
-        fontFamily: 'inherit', fontSize: 13, textAlign: opts.type === 'number' ? 'right' : 'left',
-      }}
-    />
-  );
-
   // Item 8: shared catalog-button renderer (a plain function called as
   // renderCatBtn(t), NOT a <Component/>, so no remount). Used by both groups.
   const renderCatBtn = (t) => (
     <React.Fragment key={t}>
-      <button onClick={() => selectTab(t)} style={{
+      <button onClick={() => selectTab(t)}
+        onContextMenu={(e) => openCtx(e, 'catalog', t, t)}
+        draggable
+        onDragStart={(e) => { e.dataTransfer.setData('text/plain', t); e.dataTransfer.effectAllowed = 'move'; }}
+        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+        onDrop={(e) => { e.preventDefault(); mergeCatalogs(e.dataTransfer.getData('text/plain'), t); }}
+        style={{
         width: '100%', height: 30, padding: '0 10px', borderRadius: 7, cursor: 'pointer',
         border: '1px solid ' + (tab === t ? 'var(--accent)' : 'var(--border-1)'),
         background: tab === t ? 'var(--bg-row-sel)' : 'transparent',
@@ -308,6 +461,19 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
       }}>
         <span>{t}</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {t === masterCatalog ? (
+            <span
+              title="Master library"
+              style={{ color: 'var(--accent)', fontSize: 12 }}
+            >{'★'}</span>
+          ) : setMasterCatalog && (
+            <span
+              role="button"
+              title="Set as master library"
+              onClick={(e) => { e.stopPropagation(); setMasterCatalog(t); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 12 }}
+            >{'☆'}</span>
+          )}
           {!LIBRARY_TABS.includes(t) && (
             <span
               role="button"
@@ -329,13 +495,32 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
       </button>
       {/* L2 page sub-entries under the active category (click = that page). */}
       {tab === t && pages.map(p => (
-        <button key={p} onClick={() => setPage(p)} style={{
+        <button key={p} onClick={() => setPage(p)}
+          onContextMenu={(e) => openCtx(e, 'page', p, t)}
+          style={{
           width: '100%', height: 26, padding: '0 10px', marginLeft: 12, borderRadius: 6, cursor: 'pointer',
           border: '1px solid ' + (page === p ? 'var(--accent)' : 'transparent'),
           background: page === p ? 'var(--bg-row-sel)' : 'transparent',
           color: page === p ? 'var(--text-1)' : 'var(--text-2)', fontFamily: 'inherit', fontSize: 12,
           fontWeight: page === p ? 600 : 400, textAlign: 'left',
-        }}>{p}</button>
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span>{p}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span
+              role="button"
+              title="Rename page"
+              onClick={(e) => { e.stopPropagation(); renamePageAt(t, p); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 11 }}
+            >{'✎'}</span>
+            <span
+              role="button"
+              title="Delete page"
+              onClick={(e) => { e.stopPropagation(); deletePageAt(t, p); }}
+              style={{ color: 'var(--text-3)', cursor: 'pointer', fontSize: 13, lineHeight: 1 }}
+            >{'×'}</span>
+          </span>
+        </button>
       ))}
     </React.Fragment>
   );
@@ -401,7 +586,7 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 18px 18px' }}>
         {lib === null ? (
           <div style={{ padding: 24, color: 'var(--text-3)' }}>Loading...</div>
-        ) : filtered.length === 0 ? (
+        ) : (filtered.length === 0 && seedSections.length === 0) ? (
           <div style={{ padding: 24, color: 'var(--text-3)' }}>
             {items.length === 0 ? `No items in ${tab}. Use "+ Add item", or seed/import from Settings > Service Library.` : 'No matches.'}
           </div>
@@ -417,11 +602,11 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
                 {showDescCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: '16%' }}>Description</th>}
                 <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 96 }}>Price</th>
                 {/* AMH material/labor are internal COST (do NOT sum to price); MSR/General are a sell-side split. */}
-                <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Material (cost)' : 'Material'}</th>
-                <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Labor (cost)' : 'Labor'}</th>
+                {showBreakdown && <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Material (cost)' : 'Material'}</th>}
+                {showBreakdown && <th style={{ textAlign: 'right', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 92 }}>{tab === 'AMH' ? 'Labor (cost)' : 'Labor'}</th>}
                 {showSubCol && <th style={{ textAlign: 'left', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Sub-category</th>}
                 <th style={{ textAlign: 'center', padding: '8px 6px', color: 'var(--text-3)', fontWeight: 600, width: 60 }}>Taxable</th>
-                <th style={{ width: 34 }} />
+                <th style={{ width: 52 }} />
               </tr>
             </thead>
             <tbody>
@@ -434,34 +619,28 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
                   )}
                   {g.rows.map(({ it, i }) => (
                 <tr key={i} style={{ borderTop: '1px solid var(--border-1)' }}>
-                  <td style={{ padding: '4px 6px' }}>{cellInput(it.name, (v) => updateItem(i, { name: v }))}</td>
+                  <td style={{ padding: '6px' }}>{it.name}</td>
                   {showDescCol && (
-                  <td style={{ padding: '4px 6px' }}>{cellInput(it.desc, (v) => updateItem(i, { desc: v }))}</td>
+                  <td style={{ padding: '6px', color: 'var(--text-2)' }}>{it.desc}</td>
                   )}
-                  <td style={{ padding: '4px 6px' }}>{cellInput(it.price, (v) => updateItem(i, { price: v === '' ? 0 : parseFloat(v) || 0 }), { type: 'number', step: '0.01' })}</td>
-                  <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.material)}</td>
-                  <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.labor)}</td>
+                  <td style={{ padding: '6px', textAlign: 'right' }}>{breakCell(it.price)}</td>
+                  {showBreakdown && (<td style={{ padding: '6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.material)}</td>)}
+                  {showBreakdown && (<td style={{ padding: '6px', textAlign: 'right', color: 'var(--text-2)' }}>{breakCell(it.labor)}</td>)}
                   {showSubCol && (
-                  <td style={{ padding: '4px 6px' }}>
-                    <select value={it.subCategory || ''} onChange={(e) => updateItem(i, { subCategory: e.target.value || undefined })} style={{
-                      width: '100%', boxSizing: 'border-box', height: 28, padding: '0 4px',
-                      border: '1px solid var(--border-1)', borderRadius: 6,
-                      background: 'var(--bg-canvas)', color: 'var(--text-1)',
-                      fontFamily: 'inherit', fontSize: 12,
-                    }}>
-                      <option value="">—</option>
-                      {subOptions.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </td>
+                  <td style={{ padding: '6px', color: 'var(--text-2)' }}>{it.subCategory || '—'}</td>
                   )}
+                  <td style={{ padding: '6px', textAlign: 'center' }}>{it.taxable ? '✓' : ''}</td>
                   <td style={{ padding: '4px 6px', textAlign: 'center' }}>
-                    <input type="checkbox" checked={!!it.taxable} onChange={(e) => updateItem(i, { taxable: e.target.checked })} />
-                  </td>
-                  <td style={{ padding: '4px 6px', textAlign: 'center' }}>
-                    <button onClick={() => deleteItem(i)} title="Delete" style={{
-                      border: 'none', background: 'transparent', color: 'var(--text-3)',
-                      cursor: 'pointer', fontSize: 15, lineHeight: 1,
-                    }}>×</button>
+                    <span style={{ display: 'inline-flex', gap: 6 }}>
+                      <button onClick={() => setEditing({ i, it })} title="Edit" style={{
+                        border: 'none', background: 'transparent', color: 'var(--text-3)',
+                        cursor: 'pointer', fontSize: 13, lineHeight: 1,
+                      }}>✎</button>
+                      <button onClick={() => deleteItem(i)} title="Delete" style={{
+                        border: 'none', background: 'transparent', color: 'var(--text-3)',
+                        cursor: 'pointer', fontSize: 15, lineHeight: 1,
+                      }}>×</button>
+                    </span>
                   </td>
                 </tr>
                   ))}
@@ -473,14 +652,52 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog }) 
         </div>
       </div>
       {adding && (
-        <AddServiceItemModal
+        <ServiceItemModal
+          mode="add"
           defaultCatalog={tab}
           catalogs={allTabs}
           subCats={subCats}
           lib={lib}
-          onAdd={addFromModal}
+          onSubmit={addFromModal}
           onClose={() => setAdding(false)}
         />
+      )}
+      {editing && (
+        <ServiceItemModal
+          mode="edit"
+          initial={editing.it}
+          defaultCatalog={tab}
+          catalogs={allTabs}
+          subCats={subCats}
+          lib={lib}
+          onSubmit={saveFromModal}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {ctx && (
+        <div ref={menuRef} onClick={() => setCtx(null)} onContextMenu={(e) => e.preventDefault()} style={{
+          position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 1000,
+          minWidth: 180, background: 'var(--bg-surface)', border: '1px solid var(--border-1)',
+          borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.3)', padding: '4px 0',
+          visibility: menuPos.ready ? 'visible' : 'hidden',
+        }}>
+          {ctx.kind === 'catalog' ? (
+            <React.Fragment>
+              {!LIBRARY_TABS.includes(ctx.name) && <MenuItem onClick={() => renameTab(ctx.name)}>Rename</MenuItem>}
+              {!LIBRARY_TABS.includes(ctx.name) && <MenuItem danger onClick={() => deleteTab(ctx.name)}>Delete</MenuItem>}
+              {ctx.name !== masterCatalog && setMasterCatalog && <MenuItem onClick={() => setMasterCatalog(ctx.name)}>Set as master</MenuItem>}
+              <MenuDivider />
+              <MenuItem onClick={() => newPageHere(ctx.catalog)}>New page here</MenuItem>
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <MenuItem onClick={() => renamePageAt(ctx.catalog, ctx.name)}>Rename</MenuItem>
+              <MenuItem danger onClick={() => deletePageAt(ctx.catalog, ctx.name)}>Delete</MenuItem>
+              <MenuDivider />
+              <MenuItem onClick={() => newSectionHere(ctx.catalog, ctx.name)}>New section here</MenuItem>
+            </React.Fragment>
+          )}
+        </div>
       )}
       <NamePromptModal state={catPrompt} onClose={() => setCatPrompt(null)} />
       {subCatsOpen && (
@@ -594,7 +811,7 @@ function blankLine() {
   return { name: '', desc: '', qty: 1, unitPrice: 0, category: 'labor', taxable: false, agreement: '' };
 }
 const normInvoiceNum = (n) => String(n == null ? '' : n).trim().toLowerCase();
-export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear, onClose }) {
+export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear, onClose, masterCatalog = 'General' }) {
   useModalOpenFlag(true);   // full-screen overlay: silence type-to-search underneath
   const pm = (order && order.pm) || '';
   const pmUpper = String(pm).toUpperCase();
@@ -604,11 +821,11 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     () => new Set((existingNumbers || []).map(normInvoiceNum)),
     [existingNumbers]
   );
-  const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : 'General';
+  const tabName = pmUpper === 'AMH' ? 'AMH' : pmUpper === 'MSR' ? 'MSR' : masterCatalog;
   const catalog = (library && Array.isArray(library[tabName])) ? library[tabName] : [];
-  // Fallback library for the resolveBidLine chain (client -> General -> sentinel).
-  // On a General WO the client catalog IS General, so no separate fallback needed.
-  const generalCatalog = (tabName !== 'General' && library && Array.isArray(library.General)) ? library.General : null;
+  // Fallback library for the resolveBidLine chain (client -> master -> sentinel).
+  // On a master-catalog WO the client catalog IS the master, so no separate fallback needed.
+  const generalCatalog = (tabName !== masterCatalog && library && Array.isArray(library[masterCatalog])) ? library[masterCatalog] : null;
   // Picker list = the WO's PM catalog PLUS General as a cross-category fallback, so an
   // AMH/MSR WO can pick a General item when nothing in the PM library matches (core
   // truth #6). catalogByName maps name -> { it, agreement }: General is inserted first
@@ -619,10 +836,10 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
   );
   const catalogByName = React.useMemo(() => {
     const m = new Map();
-    if (generalCatalog) for (const it of generalCatalog) if (it && it.name) m.set(it.name, { it, agreement: 'General' });
+    if (generalCatalog) for (const it of generalCatalog) if (it && it.name) m.set(it.name, { it, agreement: masterCatalog });
     for (const it of catalog) if (it && it.name) m.set(it.name, { it, agreement: tabName });
     return m;
-  }, [catalog, generalCatalog, tabName]);
+  }, [catalog, generalCatalog, tabName, masterCatalog]);
 
   const existing = order && order.invoice;
   const [number, setNumber] = React.useState((existing && existing.number) || '');
