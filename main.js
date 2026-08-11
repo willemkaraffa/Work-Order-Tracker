@@ -1241,3 +1241,16 @@ ipcMain.handle('capture-all-amh', async () => {
     return { ok: true, results };
   } catch (e) { return { ok: false, error: e.message }; }
 });
+
+// Re-seed the AMH Playwright session: opens a headed Edge window, lets the user
+// log into AMH, and persists the session to userData/amh-pw-state.json. Called by
+// the renderer when a capture rejects with AMH_RELOGIN_REQUIRED (session missing
+// or expired). Returns { ok } / { ok:false, error } so the renderer can retry.
+ipcMain.handle('amh-relogin', async () => {
+  try {
+    const { seed } = require('./amh-pw-login');
+    const statePath = path.join(app.getPath('userData'), 'amh-pw-state.json');
+    await seed(statePath);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+});

@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('scraper', {
   captureWO:     (woData)  => ipcRenderer.invoke('capture-wo', woData),
   captureWOs:    (woDatas) => ipcRenderer.invoke('capture-wos', woDatas),
   captureAllAMH: (woNums)  => ipcRenderer.invoke('capture-all-amh', woNums),
+  relogin:       ()        => ipcRenderer.invoke('amh-relogin'),
 });
 
 // Text lock-out diagnostic bridge: renderer logs suspected-lock state to a file, and

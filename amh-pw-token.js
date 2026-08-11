@@ -6,10 +6,18 @@
 // proven spike (amh-token-test.js); the REST API call itself stays in scrape_amh.py.
 const { chromium } = require('playwright');
 
-const WO_LIST_URL = 'https://www.amh.com/vendor-admin-orders?tabId=AllOpen';
+// The vendor order list lives under /my-amh/. The bare /vendor-admin-orders path
+// bounces to the PUBLIC marketing site and fires NO authed app.amh.com request, so
+// no Bearer surfaces (proven live 2026-08-11). The /my-amh/ prefix is required.
+const WO_LIST_URL = 'https://www.amh.com/my-amh/vendor-admin-orders?tabId=AllOpen';
 
 async function getAmhToken(statePath) {
-  const browser = await chromium.launch({ headless: true, channel: 'msedge' });
+  // Electron injects CHROME_CRASHPAD_PIPE_NAME; it leaks into the child msedge and
+  // crashes it ("Chrome instance exited") while a BrowserWindow is open. Strip it from
+  // a COPY (never mutate the Electron process env) before launching.
+  const launchEnv = { ...process.env };
+  delete launchEnv.CHROME_CRASHPAD_PIPE_NAME;
+  const browser = await chromium.launch({ headless: true, channel: 'msedge', env: launchEnv });
   try {
     const ctx = await browser.newContext({ storageState: statePath });
     const page = await ctx.newPage();
