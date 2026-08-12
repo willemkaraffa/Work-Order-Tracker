@@ -35,22 +35,36 @@ async function getAmhToken(statePath) {
     if (!token) {
       throw new Error('AMH Playwright: no Bearer captured (session expired or AMH blocked headless)');
     }
-    // getAmhToken must return a WORKING token or throw, so amh-runner falls back to Selenium; a stale session yields a capturable-but-dead Bearer otherwise.
+    // getAmhToken must return a WORKING token or throw, so amh-runner can surface
+    // AMH_RELOGIN_REQUIRED; a stale session yields a capturable-but-dead Bearer otherwise.
     // Liveness probe: Reference/User returns 200 for any valid vendor token and
     // 401/403 for a stale one. Do NOT probe Order/Query -- AMH retired it (now 403s
-    // for valid tokens), which was rejecting good tokens and forcing Selenium.
+    // for valid tokens), which was rejecting good tokens and forcing a needless re-login.
     const probeUrl = 'https://app.amh.com/services-api/api/Reference/User';
     const headers = { 'Authorization': token, 'Accept': 'application/json',
       'Origin': 'https://www.amh.com', 'Referer': 'https://www.amh.com/',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
     let resp;
     try { resp = await fetch(probeUrl, { headers }); }
-    catch (e) { throw new Error('AMH Playwright token probe failed (' + e.message + '); fall back to Selenium.'); }
-    if (!resp.ok) throw new Error('AMH Playwright token rejected by API (http=' + resp.status + '); session stale, fall back to Selenium.');
+    catch (e) { throw new Error('AMH Playwright token probe failed (' + e.message + '); re-login required.'); }
+    if (!resp.ok) throw new Error('AMH Playwright token rejected by API (http=' + resp.status + '); session stale, re-login required.');
     return token;
   } finally {
     await browser.close();
   }
+}
+
+// CLI mode: `node amh-pw-token.js <statePath>` prints the Bearer to stdout, or exits
+// non-zero with the reason on stderr. This is how the Electron app uses it -- Electron
+// 28 bundles Node 18, but Playwright needs Node 20+, so it must run in a spawned SYSTEM
+// node process, never required into the Electron (Node 18) process.
+if (require.main === module) {
+  // Exit from the write callback, not right after write(): process.exit() does not
+  // wait for a piped stdout to flush, so exiting inline truncates the token in the
+  // parent. The callback fires once the write has drained to the OS.
+  getAmhToken(process.argv[2])
+    .then(t => { process.stdout.write(t, () => process.exit(0)); })
+    .catch(e => { process.stderr.write(String(e && e.message || e), () => process.exit(1)); });
 }
 
 module.exports = { getAmhToken };

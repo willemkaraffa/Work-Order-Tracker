@@ -7,7 +7,9 @@ const path = require('path');
 const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const { app } = require('electron');
-const { getAmhToken } = require('./amh-pw-token');
+// NOTE: do NOT require('./amh-pw-token') here -- it requires playwright, which needs
+// Node 20+, and Electron 28 bundles Node 18. Loading it in-process crashes the app at
+// boot. It runs as a spawned SYSTEM-node child instead (mintToken below).
 
 // Resolve interpreter + script. Packaged: bundled embeddable Python + script
 // under resources/. Dev: system python + repo script.
@@ -75,6 +77,44 @@ function runAmhCapture(woNumbers) {
   return acquireTokenAndCapture(woNumbers).finally(() => { captureInFlight = false; });
 }
 
+// Mint the Bearer in a SYSTEM-node child (amh-pw-token.js CLI) so playwright never
+// loads in Electron's Node 18. Resolves the token string; rejects on any failure (no
+// session / stale / node-too-old), which the caller maps to AMH_RELOGIN_REQUIRED.
+// Async (spawn, not spawnSync): minting can take tens of seconds and this runs on the
+// main process, so a sync call would freeze the UI/IPC for the whole login. Packaged:
+// the script ships under resourcesPath (asar cannot be executed by system node), same
+// as pythonPaths() resolves scrape_amh.py.
+function mintToken(statePath) {
+  const script = app.isPackaged
+    ? path.join(process.resourcesPath, 'amh-pw-token.js')
+    : path.join(__dirname, 'amh-pw-token.js');
+  const env = { ...process.env };
+  delete env.CHROME_CRASHPAD_PIPE_NAME;
+  return new Promise((resolve, reject) => {
+    let proc;
+    try {
+      proc = spawn('node', [script, statePath], { env, windowsHide: true });
+    } catch (e) { return reject(new Error('token minter failed to start: ' + e.message)); }
+    // Register for before-quit kill: the minter child launches its own Edge, which
+    // would orphan and hold the profile SingletonLock if the app quits mid-mint.
+    activeProc = proc;
+    let out = '', err = '';
+    const timer = setTimeout(() => { try { proc.kill(); } catch (_) {} reject(new Error('token minter timed out')); }, 90000);
+    proc.stdout.on('data', d => { out += d; });
+    proc.stderr.on('data', d => { err += d; });
+    proc.on('error', e => { clearTimeout(timer); if (activeProc === proc) activeProc = null; reject(new Error('token minter failed to start: ' + e.message)); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (activeProc === proc) activeProc = null;
+      const token = out.trim();
+      if (code !== 0 || !token.startsWith('Bearer ')) {
+        return reject(new Error(err.trim() || 'token minter exited ' + code));
+      }
+      resolve(token);
+    });
+  });
+}
+
 // Reliable auth: mint a Bearer from the persisted Playwright session instead of a
 // per-run Selenium/Edge login. On a stale or missing session, reject with a coded
 // AMH_RELOGIN_REQUIRED so the UI can prompt a re-login (the seeder) and retry. We do
@@ -87,7 +127,7 @@ async function acquireTokenAndCapture(woNumbers) {
   }
   let token;
   try {
-    token = await getAmhToken(statePath);   // throws if the session is stale/expired
+    token = await mintToken(statePath);   // spawns system-node playwright; rejects if stale
   } catch (err) {
     throw relogin(err.message);
   }
