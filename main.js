@@ -6,7 +6,7 @@ const { autoUpdater } = require('electron-updater');
 const { runAmhCapture } = require('./amh-runner');
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
-const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
+const { chooseBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -886,9 +886,27 @@ async function readSheetOtherItems(file, sheetName) {
       }
     }
   }
+  // Advisory: the sheet states its OWN bid total on the labeled "BID TOTAL COST" row
+  // (a template formula from labor hours), independent of the free-text lines above.
+  // Prefer the OTHER header's Line Item Price column; else the largest finite cell on
+  // the row. Float-noisy in the template (1342.9999998) -> round to cents. null when
+  // absent. Used only advisory-side; never changes selection/totals.
+  let statedTotal = null;
+  for (let rn = 1; rn <= last; rn++) {
+    const row = ws.getRow(rn);
+    let hit = false;
+    for (let c = 1; c <= 14; c++) { if (cellText(row, c).trim().toUpperCase().includes('BID TOTAL')) { hit = true; break; } }
+    if (!hit) continue;
+    const oc = otherRow ? headerCols(otherRow + 1) : {};
+    let v = oc.line ? num(row, oc.line) : NaN;
+    if (!Number.isFinite(v)) {
+      for (let c = 1; c <= 14; c++) { const n = num(row, c); if (Number.isFinite(n) && (!Number.isFinite(v) || n > v)) v = n; }
+    }
+    if (Number.isFinite(v)) { statedTotal = Math.round(v * 100) / 100; break; }
+  }
   // Fuzzy dedup: the SAME work often appears in both the main table and OTHER with
   // wording/rounding drift; collapse those overlaps (Bug A) before returning.
-  return dedupeLineItems(items);
+  return { items: dedupeLineItems(items), statedTotal };
 }
 
 // All bid/CO .xlsx anywhere under `root` (recursive), skipping temp locks (~$).
@@ -908,33 +926,31 @@ function allBidCoSheets(root) {
 }
 
 // Capture invoice line items for an MSR WO. MSR line items live in the bid xlsx
-// OTHER section, not in order.bidItems (that is AMH API data). Bids are DELTAS, so
-// items are spread across every bid/CO sheet in the WO -- read them ALL and dedup
-// exact (desc+price) repeats (the copied CO duplicates the sheet it came from).
-ipcMain.handle('read-bid-lineitems', async (_e, rec) => {
+// OTHER section, not in order.bidItems (that is AMH API data). A CO fully restates the
+// WO scope, so selectBidItems picks the single newest sheet by default and falls back to
+// the additive bid+CO union only when that matches the paid amount better.
+ipcMain.handle('read-bid-lineitems', async (_e, rec, paid) => {
   try {
     rec = rec || {};
     const r = resolveWoFolder(rec);
     if (r.error) return { ok: false, error: r.error };
     const trade = /hvac|heat|cool|furnace/i.test(String(rec.type || '')) ? 'HVAC' : 'Plumbing';
     const sheetName = BID_CELLS[trade].sheet;
-    // Bug A: read EVERY bid/CO candidate once (rows are self-deduped by
-    // readSheetOtherItems). DROP zero-row sheets so a blank newer revision (empty
-    // 09-07) can neither win nor zero the WO. chooseBidCoFiles then supersedes older
-    // Bids with the newest NON-EMPTY Bid (+ all COs). Finally dedupeLineItems across
-    // the merged rows collapses cross-sheet overlap.
+    // Bug A: read EVERY bid/CO candidate once (rows self-deduped by readSheetOtherItems).
+    // DROP zero-row sheets so a blank revision can neither win nor zero the WO. Then
+    // selectBidItems uses the PAID amount as source of truth: primary = single newest
+    // sheet (a CO fully restates the WO); additive union of bid+CO is the fallback for a
+    // partially-itemized CO. Whichever total is closest to paid wins (primary on ties).
     const candidates = [];
     for (const p of allBidCoSheets(r.folder)) {
-      let rows = [];
-      try { rows = await readSheetOtherItems(p, sheetName); } catch (_) { rows = []; }
+      let rows = [], statedTotal = null;
+      try { const res = await readSheetOtherItems(p, sheetName); rows = (res && res.items) || []; statedTotal = (res && res.statedTotal != null) ? res.statedTotal : null; } catch (_) { rows = []; statedTotal = null; }
       if (!rows.length) continue;
       let mtime = 0; try { const st = fs.statSync(p); mtime = st.birthtimeMs || st.mtimeMs; } catch (_) { /* unreadable -> mtime 0 */ }
-      candidates.push({ name: path.basename(p), mtime, path: p, rows });
+      candidates.push({ name: path.basename(p), mtime, path: p, rows, statedTotal });
     }
-    const merged = [];
-    for (const f of chooseBidCoFiles(candidates)) for (const it of f.rows) merged.push(it);
-    const items = dedupeLineItems(merged);
-    return { ok: true, items, count: items.length };
+    const sel = selectBidItems(candidates, paid);
+    return { ok: true, items: sel.items, count: sel.items.length, statedTotal: sel.statedTotal };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 

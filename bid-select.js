@@ -6,15 +6,35 @@
 // src/orders-logic.js).
 const { matchTokens } = require('./text-normalize');
 
-// Bug A: a WO folder can hold several bid/CO xlsx. A Bid is a FULL statement, so a
-// later Bid SUPERSEDES earlier ones -- summing them double-counts revised lines. A
-// CO (change order) is an additive delta -- keep them all. So: newest Bid (by mtime)
-// + every CO. Zero bids -> all COs; one bid -> that bid (+COs). Input is pre-filtered
-// to bid|CO files: [{name, mtime, ...}] (extra fields like `path` pass through). CO
-// classification wins over Bid (a CO filename can also contain "bid"). Returns the
-// chosen subset of the input objects. Ties on mtime resolve to first-seen (stable
-// given the caller's list order) so the choice is deterministic.
+// Bug A: a WO folder can hold several bid/CO xlsx. Both a Bid and a CO (change order)
+// are FULL restatements of the WO's scope -- the MSR workflow copies the whole bid
+// sheet into a dated subfolder and edits it, so a CO re-lists every base line plus the
+// change (verified: Nightshade WO 03920688 CO restates all 5 base lines and swaps the
+// faucet lines for a diverter, total 1595 -> 1343 = the paid amount). Summing a Bid and
+// its CO therefore double-counts the base and keeps BOTH the superseded and the new
+// lines. So the NEWEST file (by mtime) wins outright, whether Bid or CO -- a CO is just
+// a newer revision. On an mtime tie a CO beats a Bid (the CO is the later intent); a
+// further tie keeps first-seen (stable given caller list order) for determinism. Input
+// is pre-filtered to bid|CO files: [{name, mtime, ...}] (extra fields like `path` pass
+// through). Returns a single-element array (or [] when empty).
 function chooseBidCoFiles(files) {
+  const list = Array.isArray(files) ? files : [];
+  let best = null;  // { f, t, isCo }
+  for (const f of list) {
+    const name = String((f && f.name) || '');
+    const isCo = /\bCO\b/.test(name);
+    if (!isCo && !/bid/i.test(name)) continue;
+    const t = Number(f && f.mtime) || 0;
+    if (!best || t > best.t || (t === best.t && isCo && !best.isCo)) best = { f, t, isCo };
+  }
+  return best ? [best.f] : [];
+}
+
+// Additive fallback (pre-2026-08 model): when a CO was NOT fully itemized it lists only
+// the delta, so the WO's true scope is the newest Bid + EVERY CO (multiple bids are full
+// revisions of one another, so only the newest bid counts). dedupeLineItems (applied by
+// selectBidItems) then collapses the base lines a partial CO shares with the bid.
+function additiveBidCoFiles(files) {
   const list = Array.isArray(files) ? files : [];
   const cos = [];
   let bestBid = null;
@@ -26,6 +46,34 @@ function chooseBidCoFiles(files) {
     if (!bestBid || t > bestBid.t) bestBid = { f, t };
   }
   return bestBid ? [bestBid.f, ...cos] : cos;
+}
+
+// Paid amount is the SOURCE OF TRUTH for which sheets describe the WO. MSR now requires
+// each CO to FULLY restate the WO scope, so the single newest sheet (chooseBidCoFiles) is
+// primary. Legacy/incomplete COs list only the delta, so the additive union
+// (additiveBidCoFiles) is the fallback. Return whichever candidate's deduped total is
+// CLOSEST to the paid amount; the primary (restatement) wins ties AND when neither total
+// matches (it is what SHOULD be correct, so a genuine under/overpay still reconciles
+// against it and flags off). candidates = [{name, mtime, rows:[{desc,unitPrice,qty}]}];
+// paid = remittance amount (<=0 / absent -> primary, e.g. invoice-generation preview).
+// Returns {items, statedTotal}; statedTotal is set ONLY when the single-sheet primary is
+// chosen (a per-sheet bid total is undefined across a multi-sheet additive union).
+function selectBidItems(candidates, paid) {
+  const rowsOf = (files) => (Array.isArray(files) ? files : []).reduce((acc, f) => acc.concat((f && f.rows) || []), []);
+  const sumItems = (arr) => Math.round((Array.isArray(arr) ? arr : []).reduce((s, x) => {
+    const q = Number(x && x.qty) > 0 ? Number(x.qty) : 1;
+    return s + (Number(x && x.unitPrice) || 0) * q;
+  }, 0) * 100) / 100;
+  const primaryFiles = chooseBidCoFiles(candidates);
+  const primary = dedupeLineItems(rowsOf(primaryFiles));
+  const primaryStated = (primaryFiles.length === 1 && Number.isFinite(Number(primaryFiles[0].statedTotal))) ? Number(primaryFiles[0].statedTotal) : null;
+  const paidN = Number(paid);
+  if (!Number.isFinite(paidN) || paidN <= 0) return { items: primary, statedTotal: primaryStated };
+  const additive = dedupeLineItems(rowsOf(additiveBidCoFiles(candidates)));
+  const dp = Math.abs(sumItems(primary) - paidN);
+  const da = Math.abs(sumItems(additive) - paidN);
+  if (da < dp) return { items: additive, statedTotal: null };
+  return { items: primary, statedTotal: primaryStated };
 }
 
 // Bug B: the trade is guessed from rec.type, so a WO whose type misses the HVAC
@@ -119,4 +167,4 @@ function parseOtherCell(text) {
   return out;
 }
 
-module.exports = { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell };
+module.exports = { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell };

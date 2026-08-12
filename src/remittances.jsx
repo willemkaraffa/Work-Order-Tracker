@@ -121,10 +121,12 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const ens = ensured[normWoNum(row.woId)];
           const match = ens ? { order: ens, matchBy: 'woId' } : matchMsrRow(row, orders);
           let items = [];
+          let stated = null;
           if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
             try {
-              const r = await window.woFolder.readBidLineItems(match.order);
+              const r = await window.woFolder.readBidLineItems(match.order, row.amount);
               if (r && r.ok && Array.isArray(r.items)) items = r.items;
+              if (r && Number.isFinite(Number(r.statedTotal))) stated = Number(r.statedTotal);
             } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
           }
           // Resolve each read line against the MSR library so its taxable flag drives the
@@ -133,7 +135,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const resolved = bidItemsToInvoiceLines(
             items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice })),
             msrLib, 'MSR', genLib);
-          return reconcileMsrRow(row, match, resolved);
+          return reconcileMsrRow(row, match, resolved, stated);
         }));
       }
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';

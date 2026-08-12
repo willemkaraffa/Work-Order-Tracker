@@ -2,7 +2,7 @@
 // chooseBidCoFiles (Bug A) + resolveBidSheetName (Bug B): pure main-process helpers,
 // tested by direct require (no electron/fs). Exit 0 pass / 1 fail.
 const assert = require('assert');
-const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('../bid-select.js');
+const { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('../bid-select.js');
 
 const results = [];
 function test(name, fn) {
@@ -13,13 +13,13 @@ function test(name, fn) {
 const names = (arr) => arr.map(f => f.name);
 
 // ---- chooseBidCoFiles (Bug A) ----
-test('two bids + one CO -> newest bid + CO', () => {
+test('newest file wins; CO supersedes bids', () => {
   const out = chooseBidCoFiles([
     { name: '478 Bid 07-07.xlsx', mtime: 100 },
     { name: '478 Bid 09-07.xlsx', mtime: 200 },
     { name: '478 CO 09-20.xlsx', mtime: 300 },
   ]);
-  assert.deepStrictEqual(names(out).sort(), ['478 Bid 09-07.xlsx', '478 CO 09-20.xlsx'].sort());
+  assert.deepStrictEqual(names(out), ['478 CO 09-20.xlsx']);
 });
 
 test('single bid -> itself', () => {
@@ -27,12 +27,12 @@ test('single bid -> itself', () => {
   assert.deepStrictEqual(names(out), ['Bid.xlsx']);
 });
 
-test('only COs -> all COs, no bid', () => {
+test('only COs -> newest CO', () => {
   const out = chooseBidCoFiles([
     { name: 'CO one.xlsx', mtime: 100 },
     { name: 'CO two.xlsx', mtime: 200 },
   ]);
-  assert.deepStrictEqual(names(out).sort(), ['CO one.xlsx', 'CO two.xlsx'].sort());
+  assert.deepStrictEqual(names(out), ['CO two.xlsx']);
 });
 
 test('multiple bids, no CO -> newest only', () => {
@@ -54,6 +54,80 @@ test('equal-mtime tie is deterministic (first-seen bid wins)', () => {
     { name: 'Bid second.xlsx', mtime: 100 },
   ]);
   assert.deepStrictEqual(names(out), ['Bid first.xlsx']);
+});
+
+test('equal-mtime tie: CO beats bid', () => {
+  const out = chooseBidCoFiles([
+    { name: 'X Bid.xlsx', mtime: 100 },
+    { name: 'X CO.xlsx', mtime: 100 },
+  ]);
+  assert.deepStrictEqual(names(out), ['X CO.xlsx']);
+});
+
+// ---- additiveBidCoFiles (legacy partial-CO fallback) ----
+test('additive: newest bid + every CO', () => {
+  const out = additiveBidCoFiles([
+    { name: '478 Bid 07-07.xlsx', mtime: 100 },
+    { name: '478 Bid 09-07.xlsx', mtime: 200 },
+    { name: '478 CO 09-20.xlsx', mtime: 300 },
+  ]);
+  assert.deepStrictEqual(names(out).sort(), ['478 Bid 09-07.xlsx', '478 CO 09-20.xlsx']);
+});
+
+test('additive: only COs -> both COs', () => {
+  const out = additiveBidCoFiles([
+    { name: 'CO one', mtime: 100 },
+    { name: 'CO two', mtime: 200 },
+  ]);
+  assert.deepStrictEqual(names(out).sort(), ['CO one', 'CO two']);
+});
+
+test('additive: empty -> empty', () => {
+  assert.deepStrictEqual(additiveBidCoFiles([]), []);
+});
+
+// ---- selectBidItems (paid amount is source of truth) ----
+const sumOf = (arr) => Math.round(arr.reduce((s, x) => s + x.unitPrice * (x.qty > 0 ? x.qty : 1), 0) * 100) / 100;
+
+test('selectBidItems: full-CO restatement, paid matches CO -> CO alone (1343) + statedTotal', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 1343, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 1343);
+  assert.strictEqual(sumOf(out.items), 1343);
+  assert.strictEqual(out.statedTotal, 1343);
+  assert.ok(out.items.some(i => i.desc === 'C'));
+  assert.ok(!out.items.some(i => i.desc === 'B'));
+});
+
+test('selectBidItems: partial-CO delta, additive union wins (1200, 2 lines) -> statedTotal null', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'Base', unitPrice: 1000, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 200, rows: [{ desc: 'Extra', unitPrice: 200, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 1200);
+  assert.strictEqual(sumOf(out.items), 1200);
+  assert.strictEqual(out.items.length, 2);
+  assert.strictEqual(out.statedTotal, null);
+});
+
+test('selectBidItems: paid absent/0 -> primary (CO alone, 1343) + statedTotal', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 1343, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 0);
+  assert.strictEqual(sumOf(out.items), 1343);
+  assert.strictEqual(out.statedTotal, 1343);
+});
+
+test('selectBidItems: neither total matches -> primary wins (paid 1400 -> 1343)', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  assert.strictEqual(sumOf(selectBidItems(cands, 1400).items), 1343);
 });
 
 // ---- resolveBidSheetName (Bug B) ----

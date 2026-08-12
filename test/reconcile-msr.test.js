@@ -152,7 +152,7 @@ test('reconcileMsrRow: Advantis warranty-free items reconcile to paid 317.50', (
   assert.strictEqual(rep.status, 'match');
 });
 
-test('reconcileMsrRow: Nightshade bid 1595 > paid 1343 stays off (genuine underpay)', () => {
+test('reconcileMsrRow: items 1595 vs paid 1343 -> off (selection handled upstream)', () => {
   const r = row({ woId: '02615338', amount: 1343 });
   const items = [
     { desc: 'Service Call', unitPrice: 85, qty: 1 },
@@ -166,6 +166,22 @@ test('reconcileMsrRow: Nightshade bid 1595 > paid 1343 stays off (genuine underp
   const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), items);
   assert.strictEqual(rep.computed, 1595);
   assert.strictEqual(rep.status, 'off');
+});
+
+test('reconcileMsrRow: statedTotal advisory flag when capture sum != bid total (status unchanged)', () => {
+  const r = row({ woId: '02045937', amount: 85, invoiceNum: 'PI000221373' });
+  const m = matchMsrRow(r, ORDERS);
+  const rep = reconcileMsrRow(r, m, [{ desc: 'Service Call', unitPrice: 85, qty: 1 }], 100);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(rep.flags.some(f => /verify line capture/.test(f)));
+});
+
+test('reconcileMsrRow: statedTotal == computed -> no advisory flag', () => {
+  const r = row({ woId: '02045937', amount: 85, invoiceNum: 'PI000221373' });
+  const m = matchMsrRow(r, ORDERS);
+  const rep = reconcileMsrRow(r, m, [{ desc: 'Service Call', unitPrice: 85, qty: 1 }], 85);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(!rep.flags.some(f => /verify line capture/.test(f)));
 });
 
 console.log('reconcile-msr test');

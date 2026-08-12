@@ -831,7 +831,7 @@ export function matchMsrRow(row, orders) {
 //   off        computed != paid (bid on file incomplete, or a genuine discrepancy)
 //   no-items   matched WO but no bid-sheet items (likely a service-call-only fix)
 //   unmatched  no WO found for this remittance line
-export function reconcileMsrRow(row, match, bidItems) {
+export function reconcileMsrRow(row, match, bidItems, statedTotal) {
   const paid = money(Number(row && row.amount));
   const items = Array.isArray(bidItems) ? bidItems : [];
   // Per-line tax breakdown via the tested money core. `taxable` comes from the caller
@@ -878,6 +878,15 @@ export function reconcileMsrRow(row, match, bidItems) {
   } else {
     status = 'off';
     flags.push('Computed ' + computed.toFixed(2) + ' vs paid ' + paid.toFixed(2) + ' (off ' + money(computed - paid).toFixed(2) + ') -- bid on file may be incomplete.');
+  }
+  // Advisory (non-blocking): the bid sheet states its own BID TOTAL COST (a template
+  // formula from labor hours), independent of the free-text lines we extract. If the
+  // captured lines do not sum to it, a line was likely dropped or mis-split in capture.
+  // Never changes status/total/selection -- just warns. MSR keeps bid price on resolve,
+  // so `computed` (over resolved lines) equals the raw extracted sum.
+  const stated = Number(statedTotal);
+  if (order && lines.length && Number.isFinite(stated) && stated > 0 && Math.abs(computed - stated) >= 0.005) {
+    flags.push('Captured ' + computed.toFixed(2) + ' across ' + lines.length + ' line(s) but bid sheet states ' + stated.toFixed(2) + ' -- verify line capture.');
   }
   if (match && match.matchBy === 'address') {
     flags.push('Matched by ADDRESS, not WO id -- verify this is the right work order.');
