@@ -338,28 +338,50 @@ def fetch_admin_order(token: str, wo_num: str) -> Optional[dict]:
     return None
 
 
-def fetch_open_orders(token: str, page_size: int = 50, max_pages: int = 40) -> list:
-    """All 'AllOpen' vendor orders via the live admin feed, paginated. The old
-    GET Order/Query is retired (403s a VALID token, proven live 2026-08-11); the
-    current list endpoint is POST Order/VendorAdminOrders {type:'AllOpen', paging}
-    (same feed fetch_admin_order already uses for Posted). Loop pageIndex while the
-    response's hasNextPage is true, accumulating envelopes -- this also fixes the
-    ~100-most-recent age-out the GET had. Guards: stop on an empty batch and cap at
-    max_pages so a stuck hasNextPage cannot spin forever."""
-    orders: list = []
+# The open-work tabs of the VendorAdminOrders feed. type:"AllOpen" is ONE tab and DROPS
+# brand-new WOs, which land in SchedulingRequired/ActionRequired/PendingAMHAction (proven
+# live: 2026-08-11 WO 9847293 was in SchedulingRequired only; 2026-08-12 all 6 buckets
+# return real orders and the tabs OVERLAP, so a union needs dedup). Query every open
+# bucket; exclude only "Posted" (history, reached by the targeted fetch_admin_order).
+OPEN_BUCKETS = ["AllOpen", "SchedulingRequired", "Scheduled", "InProgress",
+                "ActionRequired", "PendingAMHAction"]
+
+
+def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> list:
+    """One VendorAdminOrders tab, paginated. Loop pageIndex while hasNextPage is true,
+    accumulating envelopes -- this also fixes the ~100-most-recent age-out the retired
+    GET Order/Query had. Guards: stop on an empty batch and cap at max_pages so a stuck
+    hasNextPage cannot spin forever."""
+    out: list = []
     page = 0
     while page < max_pages:
-        body = {"type": "AllOpen",
+        body = {"type": bucket,
                 "paging": {"pageIndex": page, "pageSize": page_size,
                            "sortBy": "status", "sortAscending": False}}
         resp = api_post("Order/VendorAdminOrders", token, body)
         batch = as_order_list(resp)
-        orders.extend(batch)
+        out.extend(batch)
         has_next = bool(resp.get("hasNextPage")) if isinstance(resp, dict) else False
         if not has_next or not batch:
             break
         page += 1
-    return orders
+    return out
+
+
+def fetch_open_orders(token: str, page_size: int = 50, max_pages: int = 40) -> list:
+    """Every open vendor order via the live admin feed. The old GET Order/Query is
+    retired (403s a VALID token, proven live 2026-08-11); the current list endpoint is
+    POST Order/VendorAdminOrders {type:<tab>, paging}. AllOpen alone misses brand-new WOs,
+    so query the UNION of OPEN_BUCKETS and dedup by base WO number (first bucket wins).
+    A split WO ('9746663-1') folds to its base so it is not double-counted across tabs."""
+    seen: Dict[str, dict] = {}
+    for bucket in OPEN_BUCKETS:
+        for item in _fetch_bucket(token, bucket, page_size, max_pages):
+            o = item.get("order") or item
+            key = base_wo_num(o.get("name"))
+            if key:
+                seen.setdefault(key, item)
+    return list(seen.values())
 
 
 # ── extraction helpers ─────────────────────────────────────────────────────────
