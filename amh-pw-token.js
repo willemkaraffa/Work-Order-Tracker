@@ -1,36 +1,60 @@
 'use strict';
-// Phase 2 AMH auth (Playwright path): headless REAL Edge (channel:'msedge') +
-// a persisted storageState recaptures the AMH Bearer with NO login. AMH blocks
-// generic Chromium/Electron but accepts branded Edge. The token is the
-// `authorization: Bearer ...` header on any app.amh.com request. Ported from the
-// proven spike (amh-token-test.js); the REST API call itself stays in scrape_amh.py.
+// Phase 2 AMH auth (Playwright path): headless REAL Edge (channel:'msedge') on the
+// PERSISTENT profile dir seeded by amh-pw-login.js recaptures the AMH Bearer with NO
+// login. AMH blocks generic Chromium/Electron but accepts branded Edge. The token is
+// the `authorization: Bearer ...` header on any app.amh.com request. The REST API call
+// itself stays in scrape_amh.py.
+//
+// The profile dir replaced the old storageState json: AMH rotates its refresh cookie on
+// every real login, so a frozen snapshot died within about a day. The live Edge profile
+// keeps the rotated cookie, so this keeps minting until the login itself truly expires.
 const { chromium } = require('playwright');
+const path = require('path');
 
 // The vendor order list lives under /my-amh/. The bare /vendor-admin-orders path
 // bounces to the PUBLIC marketing site and fires NO authed app.amh.com request, so
 // no Bearer surfaces (proven live 2026-08-11). The /my-amh/ prefix is required.
 const WO_LIST_URL = 'https://www.amh.com/my-amh/vendor-admin-orders?tabId=AllOpen';
+const MINT_CEILING_MS = 45000;   // whole capture-the-Bearer race; a healthy mint is seconds
 
-async function getAmhToken(statePath) {
+// Same resolution order as amh-pw-login.js so both sides land on ONE profile dir.
+function profileDirFor(arg) {
+  return arg
+    || process.env.AMH_PROFILE_DIR
+    || path.join(process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
+                 'work-order-tracker', 'amh-edge-profile');
+}
+
+async function getAmhToken(profileDirArg) {
+  const profileDir = profileDirFor(profileDirArg);
   // Electron injects CHROME_CRASHPAD_PIPE_NAME; it leaks into the child msedge and
   // crashes it ("Chrome instance exited") while a BrowserWindow is open. Strip it from
   // a COPY (never mutate the Electron process env) before launching.
   const launchEnv = { ...process.env };
   delete launchEnv.CHROME_CRASHPAD_PIPE_NAME;
-  const browser = await chromium.launch({ headless: true, channel: 'msedge', env: launchEnv });
+  const ctx = await chromium.launchPersistentContext(profileDir, {
+    channel: 'msedge', headless: true, env: launchEnv,
+  });
   try {
-    const ctx = await browser.newContext({ storageState: statePath });
-    const page = await ctx.newPage();
+    const page = ctx.pages()[0] || await ctx.newPage();
     let token = null;
+    let onToken;
+    // Race, not a fixed sleep loop: the Bearer usually appears within a second or two of
+    // the SPA booting, and the old `goto + waitForTimeout(5000)` x5 loop paid 5s every
+    // time and up to 25s on a dead session. Resolve the instant the first authed request
+    // is seen; only re-goto if the ceiling has not been hit and nothing arrived.
+    const tokenSeen = new Promise(res => { onToken = res; });
     page.on('request', r => {
       const a = r.headers()['authorization'] || '';
-      if (!token && a.startsWith('Bearer ')) token = a;
+      if (!token && a.startsWith('Bearer ')) { token = a; onToken(a); }
     });
-    // Re-hit the WO list to fire authed API requests (cold-load race, same as
-    // scrape_amh.py). Stop as soon as a Bearer surfaces.
-    for (let i = 0; i < 5 && !token; i++) {
+    const deadline = Date.now() + MINT_CEILING_MS;
+    while (!token && Date.now() < deadline) {
       await page.goto(WO_LIST_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
-      await page.waitForTimeout(5000);
+      const left = Math.max(1000, Math.min(15000, deadline - Date.now()));
+      // .catch: the pending timeout rejects with "Target closed" when the context is
+      // torn down after a win, and an unhandled rejection would kill the CLI exit code.
+      await Promise.race([tokenSeen, page.waitForTimeout(left).catch(() => {})]);
     }
     if (!token) {
       throw new Error('AMH Playwright: no Bearer captured (session expired or AMH blocked headless)');
@@ -50,11 +74,13 @@ async function getAmhToken(statePath) {
     if (!resp.ok) throw new Error('AMH Playwright token rejected by API (http=' + resp.status + '); session stale, re-login required.');
     return token;
   } finally {
-    await browser.close();
+    // Close the context (not a browser: launchPersistentContext owns both) so the
+    // profile's SingletonLock is released for the next mint/capture.
+    await ctx.close();
   }
 }
 
-// CLI mode: `node amh-pw-token.js <statePath>` prints the Bearer to stdout, or exits
+// CLI mode: `node amh-pw-token.js <profileDir>` prints the Bearer to stdout, or exits
 // non-zero with the reason on stderr. This is how the Electron app uses it -- Electron
 // 28 bundles Node 18, but Playwright needs Node 20+, so it must run in a spawned SYSTEM
 // node process, never required into the Electron (Node 18) process.

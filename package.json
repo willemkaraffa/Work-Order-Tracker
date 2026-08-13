@@ -51,8 +51,6 @@
       "main.js",
       "preload.js",
       "amh-runner.js",
-      "amh-pw-token.js",
-      "amh-pw-login.js",
       "library_io.js",
       "index.html",
       "bundle/**",
@@ -60,6 +58,8 @@
     ],
     "extraResources": [
       "scrape_amh.py",
+      "amh-pw-token.js",
+      "amh-pw-login.js",
       {
         "from": "resources/python",
         "to": "python"

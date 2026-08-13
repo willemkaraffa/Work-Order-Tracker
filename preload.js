@@ -107,6 +107,12 @@ contextBridge.exposeInMainWorld('scraper', {
   captureWOs:    (woDatas) => ipcRenderer.invoke('capture-wos', woDatas),
   captureAllAMH: (woNums)  => ipcRenderer.invoke('capture-all-amh', woNums),
   relogin:       ()        => ipcRenderer.invoke('amh-relogin'),
+  // AMH session health, so the UI can show it and force a re-login BEFORE a long job
+  // instead of after it fails. amhSessionStatus() = last known { ok, error, checkedAt }
+  // (the boot preflight can finish before the renderer subscribes); onAmhSession = the
+  // push for every later change. Same bridge object on purpose: no new global.
+  amhSessionStatus: ()   => ipcRenderer.invoke('amh-session-status'),
+  onAmhSession:     (cb) => ipcRenderer.on('amh-session', (_e, s) => cb(s)),
 });
 
 // Text lock-out diagnostic bridge: renderer logs suspected-lock state to a file, and

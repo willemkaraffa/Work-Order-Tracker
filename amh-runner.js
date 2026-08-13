@@ -59,22 +59,36 @@ function killActiveCapture() {
 // early enough to still have a live pid.
 try { app.on('before-quit', killActiveCapture); } catch (_) {}
 
-// Persisted AMH session -> Bearer, saved by amh-pw-login.js (`npm run amh:login`
-// or the in-app re-login). Both sides must agree on this path.
-function statePathFor() {
-  try { return path.join(app.getPath('userData'), 'amh-pw-state.json'); }
-  catch (_) { return path.join(__dirname, 'amh-pw-state.json'); }
+// Persisted AMH session -> Bearer. This is a real Edge USER-DATA-DIR seeded by
+// amh-pw-login.js (`npm run amh:login` or the in-app re-login), not the old frozen
+// storageState json: AMH rotates its refresh cookie on every login, so the snapshot
+// died within a day. Both sides must agree on this path.
+function profileDirFor() {
+  try { return path.join(app.getPath('userData'), 'amh-edge-profile'); }
+  catch (_) { return path.join(__dirname, 'amh-edge-profile'); }
 }
 
-// Run the scraper for an array of WO numbers. Resolves the parsed result map;
+// Edge profile lock. The headless mint and the headed re-login both launch Edge on the
+// SAME user-data-dir; two at once hit the profile SingletonLock and the second dies
+// (GetHandleVerifier). Every profile-touching spawn goes through this one chain.
+let profileChain = Promise.resolve();
+function withProfileLock(fn) {
+  const next = profileChain.then(fn, fn);   // a failed predecessor must not block the queue
+  profileChain = next.catch(() => {});
+  return next;
+}
+
+// Run the scraper for an array of WO numbers. Resolves the parsed result map (with the
+// child's stderr hung off it non-enumerably as __stderr -- see spawnCapture);
 // rejects on spawn / non-zero exit / unparseable output, or with a coded
 // AMH_RELOGIN_REQUIRED error when there is no usable AMH session (see below).
-function runAmhCapture(woNumbers) {
+// token: the caller's cached Bearer (main.js ensureToken). Omitted -> mint one here.
+function runAmhCapture(woNumbers, token) {
   if (captureInFlight) {
     return Promise.reject(new Error('An AMH capture is already running; wait for it to finish.'));
   }
   captureInFlight = true;
-  return acquireTokenAndCapture(woNumbers).finally(() => { captureInFlight = false; });
+  return acquireTokenAndCapture(woNumbers, token).finally(() => { captureInFlight = false; });
 }
 
 // Mint the Bearer in a SYSTEM-node child (amh-pw-token.js CLI) so playwright never
@@ -84,7 +98,7 @@ function runAmhCapture(woNumbers) {
 // main process, so a sync call would freeze the UI/IPC for the whole login. Packaged:
 // the script ships under resourcesPath (asar cannot be executed by system node), same
 // as pythonPaths() resolves scrape_amh.py.
-function mintToken(statePath) {
+function mintToken(profileDir) {
   const script = app.isPackaged
     ? path.join(process.resourcesPath, 'amh-pw-token.js')
     : path.join(__dirname, 'amh-pw-token.js');
@@ -93,7 +107,7 @@ function mintToken(statePath) {
   return new Promise((resolve, reject) => {
     let proc;
     try {
-      proc = spawn('node', [script, statePath], { env, windowsHide: true });
+      proc = spawn('node', [script, profileDir], { env, windowsHide: true });
     } catch (e) { return reject(new Error('token minter failed to start: ' + e.message)); }
     // Register for before-quit kill: the minter child launches its own Edge, which
     // would orphan and hold the profile SingletonLock if the app quits mid-mint.
@@ -115,27 +129,41 @@ function mintToken(statePath) {
   });
 }
 
-// Reliable auth: mint a Bearer from the persisted Playwright session instead of a
-// per-run Selenium/Edge login. On a stale or missing session, reject with a coded
+// Reliable auth: mint a Bearer from the persisted Edge profile instead of a per-run
+// Selenium/Edge login. On a stale or missing session, reject with a coded
 // AMH_RELOGIN_REQUIRED so the UI can prompt a re-login (the seeder) and retry. We do
 // NOT fall back to Selenium (user decision 2026-08-11: it breaks too often).
-async function acquireTokenAndCapture(woNumbers) {
-  const statePath = statePathFor();
-  const relogin = (msg) => { const e = new Error('AMH_RELOGIN_REQUIRED: ' + msg); e.code = 'AMH_RELOGIN_REQUIRED'; return e; };
-  if (!fs.existsSync(statePath)) {
-    throw relogin('no saved AMH session. Log in to AMH first.');
+const reloginError = (msg) => { const e = new Error('AMH_RELOGIN_REQUIRED: ' + msg); e.code = 'AMH_RELOGIN_REQUIRED'; return e; };
+
+// Mint one Bearer, serialized on the Edge profile. Exported so main.js can mint once
+// and cache the token instead of paying an Edge launch per capture.
+async function acquireToken() {
+  const profileDir = profileDirFor();
+  if (!fs.existsSync(profileDir)) {
+    throw reloginError('no saved AMH session. Log in to AMH first.');
   }
-  let token;
   try {
-    token = await mintToken(statePath);   // spawns system-node playwright; rejects if stale
+    return await withProfileLock(() => mintToken(profileDir));   // system-node playwright; rejects if stale
   } catch (err) {
-    throw relogin(err.message);
+    throw reloginError(err.message);
   }
-  return spawnCapture(woNumbers, token);
+}
+
+async function acquireTokenAndCapture(woNumbers, token) {
+  const bearer = token || await acquireToken();
+  return spawnCapture(woNumbers, bearer);
 }
 
 // Spawn scrape_amh.py with the Bearer in AMH_TOKEN. scrape_amh reads AMH_TOKEN and
 // skips its Selenium login entirely, so no Edge profile / credentials are involved.
+//
+// The resolved map carries the child's stderr as a NON-ENUMERABLE `__stderr` (see
+// STDERR_KEY): scrape_amh catches its API errors PER WO, prints them to stderr and still
+// exits 0, so a Bearer that dies mid-run looks like a normal success with not-ok entries
+// and main.js could never tell it apart from "WO not found". stderr is the only evidence.
+// Non-enumerable so every existing consumer (results[woNum], Object.entries, JSON/IPC
+// structured clone) sees exactly the WO keys it saw before. Do not delete as noise.
+const STDERR_KEY = '__stderr';
 function spawnCapture(woNumbers, token) {
   return new Promise((resolve, reject) => {
     const { python, script } = pythonPaths();
@@ -157,7 +185,13 @@ function spawnCapture(woNumbers, token) {
     proc.on('close', code => {
       activeProc = null;
       if (code !== 0) return reject(new Error(`Python exited ${code}: ${err.slice(-300)}`));
-      try { resolve(JSON.parse(out)); }
+      try {
+        const map = JSON.parse(out);
+        if (map && typeof map === 'object') {
+          Object.defineProperty(map, STDERR_KEY, { value: err, enumerable: false });
+        }
+        resolve(map);
+      }
       catch (e) { reject(new Error('Could not parse Python output: ' + out.slice(0, 200))); }
     });
     // Python may exit (import error) before reading stdin; the 'close' handler
@@ -168,4 +202,4 @@ function spawnCapture(woNumbers, token) {
   });
 }
 
-module.exports = { runAmhCapture };
+module.exports = { runAmhCapture, acquireToken, withProfileLock, profileDirFor, STDERR_KEY };

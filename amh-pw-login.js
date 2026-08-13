@@ -1,34 +1,35 @@
 'use strict';
 // AMH session seeder. Opens REAL Edge (channel:'msedge' -- AMH blocks generic
-// Chromium/Electron) headed, lets the human log into AMH, then saves the Playwright
-// storageState (cookies + tokens) so getAmhToken (amh-pw-token.js) can later mint a
-// Bearer headlessly with NO login. Run standalone via `npm run amh:login`, or spawned
-// by the app when a capture reports the session is stale/missing.
+// Chromium/Electron) headed on a PERSISTENT profile dir, and lets the human log into
+// AMH. Nothing is exported afterwards: the profile dir IS the session, so the later
+// headless mint (amh-pw-token.js) reuses the same dir and gets a Bearer with NO login.
 //
-// AMH sessions expire (~1hr), so re-running this is expected and is the whole point of
-// the "prompt re-login" design -- it replaces the fragile per-run Selenium login.
+// WHY a persistent profile and not storageState: AMH rotates the at-ah4r_refresh_token
+// cookie on every real login, so a frozen storageState snapshot went stale within about
+// a day and the mint then loaded the PUBLIC marketing page with zero authed requests
+// (proven live 2026-08-13). A live Edge profile keeps the rotated cookie itself.
 //
-// State path: 1st CLI arg, else AMH_STATE_PATH env, else %APPDATA%/work-order-tracker/
-// amh-pw-state.json (the app passes its own userData path so both sides agree).
+// Profile dir: 1st CLI arg, else AMH_PROFILE_DIR env, else %APPDATA%/work-order-tracker/
+// amh-edge-profile (the app passes its own userData path so both sides agree).
 const { chromium } = require('playwright');
 const path = require('path');
-const fs = require('fs');
 
 const LOGIN_URL = 'https://www.amh.com/let-yourself-in';   // vendor login entry
-const STATE_PATH = process.argv[2]
-  || process.env.AMH_STATE_PATH
+const PROFILE_DIR = process.argv[2]
+  || process.env.AMH_PROFILE_DIR
   || path.join(process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
-               'work-order-tracker', 'amh-pw-state.json');
+               'work-order-tracker', 'amh-edge-profile');
 
-async function seed(statePath) {
+async function seed(profileDir) {
   // Strip Electron's CHROME_CRASHPAD_PIPE_NAME from a COPY so it does not leak into the
   // child msedge and crash it (only bites when spawned under a running app).
   const launchEnv = { ...process.env };
   delete launchEnv.CHROME_CRASHPAD_PIPE_NAME;
-  const browser = await chromium.launch({ headless: false, channel: 'msedge', env: launchEnv });
+  const ctx = await chromium.launchPersistentContext(profileDir, {
+    channel: 'msedge', headless: false, env: launchEnv,
+  });
   try {
-    const ctx = await browser.newContext();
-    const page = await ctx.newPage();
+    const page = ctx.pages()[0] || await ctx.newPage();
     let bearer = null;
     page.on('request', r => {
       const a = r.headers()['authorization'] || '';
@@ -42,17 +43,17 @@ async function seed(statePath) {
     for (let i = 0; i < 48 && !bearer; i++) await page.waitForTimeout(5000);
     if (!bearer) throw new Error('no sign-in detected within the timeout (no Bearer seen)');
 
-    fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    await ctx.storageState({ path: statePath });
-    console.error('[amh:login] session saved -> ' + statePath);
+    console.error('[amh:login] signed in; profile persisted -> ' + profileDir);
     return true;
   } finally {
-    await browser.close();
+    // Closing the context flushes the profile's cookie jar to disk -- skip it and the
+    // next headless mint reads a half-written profile.
+    await ctx.close();
   }
 }
 
 if (require.main === module) {
-  seed(STATE_PATH)
+  seed(PROFILE_DIR)
     .then(() => process.exit(0))
     .catch(e => { console.error('[amh:login] FAILED: ' + e.message); process.exit(1); });
 }
