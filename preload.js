@@ -83,7 +83,7 @@ contextBridge.exposeInMainWorld('woFolder', {
   // create = ensure-then-open (creates the tree + MSR bid sheet if missing, then opens).
   create:    (record) => ipcRenderer.invoke('wo-create-folder', record),
   subfolder: (record) => ipcRenderer.invoke('wo-create-subfolder', record),
-  readBidLineItems: (record) => ipcRenderer.invoke('read-bid-lineitems', record),
+  readBidLineItems: (record, paid) => ipcRenderer.invoke('read-bid-lineitems', record, paid),
 });
 
 // Remittance bridge — parse an MSR "Vendor ACH Payment Detail" PDF into per-WO
@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('scraper', {
   captureWO:     (woData)  => ipcRenderer.invoke('capture-wo', woData),
   captureWOs:    (woDatas) => ipcRenderer.invoke('capture-wos', woDatas),
   captureAllAMH: (woNums)  => ipcRenderer.invoke('capture-all-amh', woNums),
+  relogin:       ()        => ipcRenderer.invoke('amh-relogin'),
 });
 
 // Text lock-out diagnostic bridge: renderer logs suspected-lock state to a file, and

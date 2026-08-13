@@ -36,27 +36,45 @@ def looks_like_msr(text):
 
 
 def parse_text(text):
-    # `Total For <propCode> <amount>` terminates each WO block unambiguously. Slice
-    # the text at those boundaries so every field is extracted from its OWN block
-    # (a whole-text DOTALL search balloons the address across blocks). One Total For,
-    # one Invoice Notes, one PI# per block -> naturally 1:1.
+    # One property block ('Total For <prop> <subtotal>') can hold SEVERAL invoice lines --
+    # e.g. a charge and a credit that net to the subtotal. The old code emitted ONE row per
+    # property, using the SUBTOTAL as the amount and the FIRST Invoice Notes/PI, which
+    # silently DROPPED every extra line: a -225.00 credit on WO 03381381 vanished and
+    # WO 03913657 was reported as 5.68 (the net) instead of its own 230.68. Emit one row per
+    # invoice line -- "<propCode> <amount> <date> PI<num>" + its own "Invoice Notes : <woId>"
+    # -- sign preserved. Total For is now only a per-property cross-check. Unknown layouts
+    # (no per-line match) fall back to the old whole-block single row so older statements
+    # still parse.
     rows = []
     prev_end = 0
-    for m in re.finditer(r'Total For\s+(\S+)\s+([\d,]+\.\d{2})', text):
+    for m in re.finditer(r'Total For\s+(\S+)\s+(-?[\d,]+\.\d{2})', text):
         block = text[prev_end:m.start()]
         prev_end = m.end()
-        prop_code, amount = m.group(1), m.group(2)
-        note = re.search(r'Invoice Notes\s*:\s*(\d+)', block)
-        pi = re.search(r'(PI\d+)', block)
-        rows.append({
-            'woId': note.group(1) if note else '',
-            'amount': float(amount.replace(',', '')),
-            'invoiceNum': pi.group(1) if pi else '',
-            'propCode': prop_code,
-            'addressRaw': _address_in_block(block),
-        })
+        prop_code = m.group(1)
+        addr = _address_in_block(block)
+        invoices = re.findall(r'(-?[\d,]+\.\d{2})\s+\d{2}/\d{2}/\d{4}\s+(PI\d+)', block)
+        notes = re.findall(r'Invoice Notes\s*:\s*(\d+)', block)
+        if not invoices:
+            pi = re.search(r'(PI\d+)', block)
+            rows.append({
+                'woId': notes[0] if notes else '',
+                'amount': float(m.group(2).replace(',', '')),
+                'invoiceNum': pi.group(1) if pi else '',
+                'propCode': prop_code,
+                'addressRaw': addr,
+            })
+            continue
+        for i, (amount, pi) in enumerate(invoices):
+            wo = notes[i] if i < len(notes) else (notes[0] if notes else '')
+            rows.append({
+                'woId': wo,
+                'amount': float(amount.replace(',', '')),
+                'invoiceNum': pi,
+                'propCode': prop_code,
+                'addressRaw': addr,
+            })
 
-    stmt = re.search(r'Statement Total\s+([\d,]+\.\d{2})', text)
+    stmt = re.search(r'Statement Total\s+(-?[\d,]+\.\d{2})', text)
     statement_total = float(stmt.group(1).replace(',', '')) if stmt else None
     return rows, statement_total
 

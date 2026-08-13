@@ -139,6 +139,51 @@ test('MSR non-taxable line -> tax 0, pre == post', () => {
   assert.strictEqual(rep.postTax, 145);
 });
 
+test('reconcileMsrRow: Advantis warranty-free items reconcile to paid 317.50', () => {
+  const r = row({ woId: '02615338', amount: 317.5 });
+  const items = [
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+    { desc: 'Clean Condenser Coil', unitPrice: 150, qty: 1 },
+    { desc: 'Material - 1.25lbs R410A', unitPrice: 62.5, qty: 1 },
+    { desc: 'Replaced return air filter', unitPrice: 20, qty: 1 },
+  ];
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), items);
+  assert.strictEqual(rep.computed, 317.5);
+  assert.strictEqual(rep.status, 'match');
+});
+
+test('reconcileMsrRow: items 1595 vs paid 1343 -> off (selection handled upstream)', () => {
+  const r = row({ woId: '02615338', amount: 1343 });
+  const items = [
+    { desc: 'Service Call', unitPrice: 85, qty: 1 },
+    { desc: 'Labor install WH', unitPrice: 400, qty: 1 },
+    { desc: 'Material WH', unitPrice: 700, qty: 1 },
+    { desc: 'Labor expansion tank', unitPrice: 75, qty: 1 },
+    { desc: 'Material expansion tank', unitPrice: 35, qty: 1 },
+    { desc: 'Labor faucet', unitPrice: 150, qty: 1 },
+    { desc: 'Material faucet', unitPrice: 150, qty: 1 },
+  ];
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), items);
+  assert.strictEqual(rep.computed, 1595);
+  assert.strictEqual(rep.status, 'off');
+});
+
+test('reconcileMsrRow: statedTotal advisory flag when capture sum != bid total (status unchanged)', () => {
+  const r = row({ woId: '02045937', amount: 85, invoiceNum: 'PI000221373' });
+  const m = matchMsrRow(r, ORDERS);
+  const rep = reconcileMsrRow(r, m, [{ desc: 'Service Call', unitPrice: 85, qty: 1 }], 100);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(rep.flags.some(f => /verify line capture/.test(f)));
+});
+
+test('reconcileMsrRow: statedTotal == computed -> no advisory flag', () => {
+  const r = row({ woId: '02045937', amount: 85, invoiceNum: 'PI000221373' });
+  const m = matchMsrRow(r, ORDERS);
+  const rep = reconcileMsrRow(r, m, [{ desc: 'Service Call', unitPrice: 85, qty: 1 }], 85);
+  assert.strictEqual(rep.status, 'match');
+  assert.ok(!rep.flags.some(f => /verify line capture/.test(f)));
+});
+
 console.log('reconcile-msr test');
 console.log('==================');
 let pass = 0, fail = 0;

@@ -13,8 +13,8 @@
   "roles": {
     "overseer": {
       "may": ["dispatch subagents", "ask the human", "run architect/reviewer/verify", "read", "write docs and plans"],
-      "mayNotWrite": ["src/**", "extension/**", "main.js", "preload.js", "**/*.py", "scripts/**", "test/**", ".claude/hooks/**"]
+      "mayNotWrite": ["**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.py", "src/**", "extension/**", "scripts/**", "test/**", ".claude/hooks/**", "main.js", "preload.js"]
     },
-    "locked": [".claude/settings.json", "overseer.json", ".githooks/**", ".claude/hooks/coder-role-gate.js", ".claude/hooks/role-lock.js", ".claude/hooks/role-lock-check.js", ".claude/hooks/commit-authority-gate.js", ".claude/hooks/spawn-limiter.js"]
+    "locked": [".claude/settings.json", "overseer.json", ".githooks/**", ".claude/hooks/coder-role-gate.js", ".claude/hooks/role-lock.js", ".claude/hooks/role-lock-check.js", ".claude/hooks/commit-authority-gate.js", ".claude/hooks/spawn-limiter.js", ".plan.json", ".review-findings.json"]
   }
 }

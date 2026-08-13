@@ -338,6 +338,52 @@ def fetch_admin_order(token: str, wo_num: str) -> Optional[dict]:
     return None
 
 
+# The open-work tabs of the VendorAdminOrders feed. type:"AllOpen" is ONE tab and DROPS
+# brand-new WOs, which land in SchedulingRequired/ActionRequired/PendingAMHAction (proven
+# live: 2026-08-11 WO 9847293 was in SchedulingRequired only; 2026-08-12 all 6 buckets
+# return real orders and the tabs OVERLAP, so a union needs dedup). Query every open
+# bucket; exclude only "Posted" (history, reached by the targeted fetch_admin_order).
+OPEN_BUCKETS = ["AllOpen", "SchedulingRequired", "Scheduled", "InProgress",
+                "ActionRequired", "PendingAMHAction"]
+
+
+def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> list:
+    """One VendorAdminOrders tab, paginated. Loop pageIndex while hasNextPage is true,
+    accumulating envelopes -- this also fixes the ~100-most-recent age-out the retired
+    GET Order/Query had. Guards: stop on an empty batch and cap at max_pages so a stuck
+    hasNextPage cannot spin forever."""
+    out: list = []
+    page = 0
+    while page < max_pages:
+        body = {"type": bucket,
+                "paging": {"pageIndex": page, "pageSize": page_size,
+                           "sortBy": "status", "sortAscending": False}}
+        resp = api_post("Order/VendorAdminOrders", token, body)
+        batch = as_order_list(resp)
+        out.extend(batch)
+        has_next = bool(resp.get("hasNextPage")) if isinstance(resp, dict) else False
+        if not has_next or not batch:
+            break
+        page += 1
+    return out
+
+
+def fetch_open_orders(token: str, page_size: int = 50, max_pages: int = 40) -> list:
+    """Every open vendor order via the live admin feed. The old GET Order/Query is
+    retired (403s a VALID token, proven live 2026-08-11); the current list endpoint is
+    POST Order/VendorAdminOrders {type:<tab>, paging}. AllOpen alone misses brand-new WOs,
+    so query the UNION of OPEN_BUCKETS and dedup by base WO number (first bucket wins).
+    A split WO ('9746663-1') folds to its base so it is not double-counted across tabs."""
+    seen: Dict[str, dict] = {}
+    for bucket in OPEN_BUCKETS:
+        for item in _fetch_bucket(token, bucket, page_size, max_pages):
+            o = item.get("order") or item
+            key = base_wo_num(o.get("name"))
+            if key:
+                seen.setdefault(key, item)
+    return list(seen.values())
+
+
 # ── extraction helpers ─────────────────────────────────────────────────────────
 
 def normalize_text(value: object) -> str:
@@ -549,8 +595,8 @@ def main():
     all_open = ALL_OPEN_SENTINEL in wo_numbers
 
     # Single-WO capture passes an order GUID (live-verified GET Order/{guid}). WO-number
-    # inputs still go through Order/Query. Partition so a pure-GUID capture never touches
-    # Order/Query, which now 403s and would raise, killing the capture.
+    # inputs go through the open-orders feed (VendorAdminOrders). Partition so a pure-GUID
+    # capture never touches the bulk feed -- it needs only the GUID endpoint.
     guid_inputs = [w for w in wo_numbers if is_guid(w)]
     non_guid_inputs = [w for w in wo_numbers if w != ALL_OPEN_SENTINEL and not is_guid(w)]
 
@@ -572,17 +618,16 @@ def main():
 
     order_map: Dict[str, dict] = {}
     if all_open or non_guid_inputs:
-        print("[API] Fetching Order/Query...", file=sys.stderr)
-        orders = as_order_list(api_get("Order/Query", token, {"today": today_api_value(), "loadFiles": "false"}))
-        print(f"[API] Order/Query: {len(orders)} order(s).", file=sys.stderr)
+        print("[API] Fetching open orders (VendorAdminOrders, paginated)...", file=sys.stderr)
+        orders = fetch_open_orders(token)
+        print(f"[API] VendorAdminOrders AllOpen: {len(orders)} order(s).", file=sys.stderr)
         index_orders(orders, order_map)
     else:
-        print("[API] Pure-GUID capture; skipping Order/Query.", file=sys.stderr)
+        print("[API] Pure-GUID capture; skipping open-order fetch.", file=sys.stderr)
 
-    # Old paid WOs age out of Order/Query (~100 most-recent only). Targeted lookups below
-    # fall back to fetch_admin_order (VendorAdminOrders WO-number search) to reach them.
-    # The all-open bulk path stays on Order/Query so it isn't flooded with 300+ historical
-    # Posted/Canceled WOs.
+    # The open feed lists active WOs only, so old paid/Posted WOs are absent. Targeted
+    # lookups below fall back to fetch_admin_order (VendorAdminOrders Posted search) to
+    # reach an aged-out/Posted WO by number.
 
     results = {}
     if all_open:

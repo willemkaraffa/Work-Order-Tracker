@@ -878,6 +878,14 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
       const asBid = res.items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice }));
       const built = bidItemsToInvoiceLines(asBid, catalog, tabName, generalCatalog);
       if (built.length) setLines(built.map(li => ({ ...blankLine(), ...li })));
+      // Advisory (capture-short): the bid sheet states its own BID TOTAL COST. If the
+      // extracted lines do not sum to it, a line was likely dropped/mis-split in capture.
+      // Non-blocking: informational banner only, never blocks saving.
+      const stated = Number(res.statedTotal);
+      if (Number.isFinite(stated) && stated > 0) {
+        const captured = Math.round(res.items.reduce((s, it) => s + (Number(it.unitPrice) || 0) * (Number(it.qty) > 0 ? Number(it.qty) : 1), 0) * 100) / 100;
+        if (Math.abs(captured - stated) >= 0.005) setCaptureMsg('Captured ' + captured.toFixed(2) + ' across ' + res.items.length + ' line(s) but the bid sheet states ' + stated.toFixed(2) + ' - verify line capture.');
+      }
     }).catch(() => {});
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -894,6 +902,7 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
   // to their now-matching canonical name + re-derive taxable, flag price drift, keep
   // manual (edited) lines + the bid price. In-editor (not saved until Save invoice).
   const [recomputeMsg, setRecomputeMsg] = React.useState(null);
+  const [captureMsg, setCaptureMsg] = React.useState(null);
   const recompute = () => {
     const { lines: next, changes } = recomputeInvoice({ lineItems: lines }, catalog, generalCatalog, tabName);
     setLines(next.map(li => ({ ...blankLine(), ...li })));
@@ -1033,6 +1042,16 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
             background: 'color-mix(in srgb, var(--flag-emergency) 10%, transparent)' }}>
             <span style={{ fontSize: 14 }}>{'▲'}</span>
             No service-call / diagnostic fee on this invoice - add one if the visit had a diagnostic.
+          </div>
+        )}
+
+        {captureMsg && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
+            padding: '9px 12px', borderRadius: 8, fontSize: 13,
+            border: '1px solid var(--p-await)', color: 'var(--p-await)',
+            background: 'color-mix(in srgb, var(--p-await) 10%, transparent)' }}>
+            <span style={{ fontSize: 14 }}>{'▲'}</span>
+            {captureMsg}
           </div>
         )}
 

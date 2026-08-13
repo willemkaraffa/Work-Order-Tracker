@@ -2,7 +2,7 @@
 // chooseBidCoFiles (Bug A) + resolveBidSheetName (Bug B): pure main-process helpers,
 // tested by direct require (no electron/fs). Exit 0 pass / 1 fail.
 const assert = require('assert');
-const { chooseBidCoFiles, resolveBidSheetName, dedupeLineItems } = require('../bid-select.js');
+const { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('../bid-select.js');
 
 const results = [];
 function test(name, fn) {
@@ -13,13 +13,13 @@ function test(name, fn) {
 const names = (arr) => arr.map(f => f.name);
 
 // ---- chooseBidCoFiles (Bug A) ----
-test('two bids + one CO -> newest bid + CO', () => {
+test('newest file wins; CO supersedes bids', () => {
   const out = chooseBidCoFiles([
     { name: '478 Bid 07-07.xlsx', mtime: 100 },
     { name: '478 Bid 09-07.xlsx', mtime: 200 },
     { name: '478 CO 09-20.xlsx', mtime: 300 },
   ]);
-  assert.deepStrictEqual(names(out).sort(), ['478 Bid 09-07.xlsx', '478 CO 09-20.xlsx'].sort());
+  assert.deepStrictEqual(names(out), ['478 CO 09-20.xlsx']);
 });
 
 test('single bid -> itself', () => {
@@ -27,12 +27,12 @@ test('single bid -> itself', () => {
   assert.deepStrictEqual(names(out), ['Bid.xlsx']);
 });
 
-test('only COs -> all COs, no bid', () => {
+test('only COs -> newest CO', () => {
   const out = chooseBidCoFiles([
     { name: 'CO one.xlsx', mtime: 100 },
     { name: 'CO two.xlsx', mtime: 200 },
   ]);
-  assert.deepStrictEqual(names(out).sort(), ['CO one.xlsx', 'CO two.xlsx'].sort());
+  assert.deepStrictEqual(names(out), ['CO two.xlsx']);
 });
 
 test('multiple bids, no CO -> newest only', () => {
@@ -54,6 +54,80 @@ test('equal-mtime tie is deterministic (first-seen bid wins)', () => {
     { name: 'Bid second.xlsx', mtime: 100 },
   ]);
   assert.deepStrictEqual(names(out), ['Bid first.xlsx']);
+});
+
+test('equal-mtime tie: CO beats bid', () => {
+  const out = chooseBidCoFiles([
+    { name: 'X Bid.xlsx', mtime: 100 },
+    { name: 'X CO.xlsx', mtime: 100 },
+  ]);
+  assert.deepStrictEqual(names(out), ['X CO.xlsx']);
+});
+
+// ---- additiveBidCoFiles (legacy partial-CO fallback) ----
+test('additive: newest bid + every CO', () => {
+  const out = additiveBidCoFiles([
+    { name: '478 Bid 07-07.xlsx', mtime: 100 },
+    { name: '478 Bid 09-07.xlsx', mtime: 200 },
+    { name: '478 CO 09-20.xlsx', mtime: 300 },
+  ]);
+  assert.deepStrictEqual(names(out).sort(), ['478 Bid 09-07.xlsx', '478 CO 09-20.xlsx']);
+});
+
+test('additive: only COs -> both COs', () => {
+  const out = additiveBidCoFiles([
+    { name: 'CO one', mtime: 100 },
+    { name: 'CO two', mtime: 200 },
+  ]);
+  assert.deepStrictEqual(names(out).sort(), ['CO one', 'CO two']);
+});
+
+test('additive: empty -> empty', () => {
+  assert.deepStrictEqual(additiveBidCoFiles([]), []);
+});
+
+// ---- selectBidItems (paid amount is source of truth) ----
+const sumOf = (arr) => Math.round(arr.reduce((s, x) => s + x.unitPrice * (x.qty > 0 ? x.qty : 1), 0) * 100) / 100;
+
+test('selectBidItems: full-CO restatement, paid matches CO -> CO alone (1343) + statedTotal', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 1343, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 1343);
+  assert.strictEqual(sumOf(out.items), 1343);
+  assert.strictEqual(out.statedTotal, 1343);
+  assert.ok(out.items.some(i => i.desc === 'C'));
+  assert.ok(!out.items.some(i => i.desc === 'B'));
+});
+
+test('selectBidItems: partial-CO delta, additive union wins (1200, 2 lines) -> statedTotal null', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'Base', unitPrice: 1000, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 200, rows: [{ desc: 'Extra', unitPrice: 200, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 1200);
+  assert.strictEqual(sumOf(out.items), 1200);
+  assert.strictEqual(out.items.length, 2);
+  assert.strictEqual(out.statedTotal, null);
+});
+
+test('selectBidItems: paid absent/0 -> primary (CO alone, 1343) + statedTotal', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, statedTotal: 1343, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  const out = selectBidItems(cands, 0);
+  assert.strictEqual(sumOf(out.items), 1343);
+  assert.strictEqual(out.statedTotal, 1343);
+});
+
+test('selectBidItems: neither total matches -> primary wins (paid 1400 -> 1343)', () => {
+  const cands = [
+    { name: 'Bid.xlsx', mtime: 100, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'B', unitPrice: 595, qty: 1 }] },
+    { name: 'CO.xlsx', mtime: 200, rows: [{ desc: 'A', unitPrice: 1000, qty: 1 }, { desc: 'C', unitPrice: 343, qty: 1 }] },
+  ];
+  assert.strictEqual(sumOf(selectBidItems(cands, 1400).items), 1343);
 });
 
 // ---- resolveBidSheetName (Bug B) ----
@@ -161,6 +235,47 @@ test('lone canonical Service Call survives (diagnostic-only, OTHER blank)', () =
 
 test('empty input -> []', () => {
   assert.deepStrictEqual(dedupeLineItems([]), []);
+});
+
+// ---- parseOtherCell (Bug 1: OTHER free-text, drop struck-negative + warranty) ----
+const otherSum = (arr) => Math.round(arr.reduce((a, x) => a + x.unitPrice, 0) * 100) / 100;
+
+test('Advantis: warranty line dropped, kept items sum to rollup 317.50', () => {
+  const cell = '$85 Service Call\n$150 Clean Condenser Coil\n$124.58 Capacitor replacement - Warranty\n$62.5 Material - 1.25lbs R410A\n$20 Replaced return air filter';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 4);
+  assert.strictEqual(otherSum(out), 317.5);
+  assert.ok(!out.some(i => /warranty/i.test(i.desc)));
+});
+
+test('Dell Meadows: negative struck lines dropped, kept sum to 230.66', () => {
+  const cell = '$85 Service Call\n-$800 for no compressor install\n-$300 no R32 charge\n-$124.58 no capacitor replacement\n$125.66 condenser contactor replacement\n$20 filter replacement';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 3);
+  assert.strictEqual(otherSum(out), 230.66);
+});
+
+test('Nightshade: all-positive lines kept, sum to 1595', () => {
+  const cell = '$85 Service Call\n$400 Labor to install new 50 gallon electric water heater\n$700 Material - new 50 gallon electric water heater\n$75 Labor to install new 2gallon expansion tank\n$35 Material - new 2 gallon expansion tank\n$150 Labor to replace kitchen faucet with new chrome gooseneck on granite countertop\n$150 Material - new chrome gooseneck kitchen faucet';
+  const out = parseOtherCell(cell);
+  assert.strictEqual(out.length, 7);
+  assert.strictEqual(otherSum(out), 1595);
+});
+
+test('negative "-$800" is dropped, never read as +800', () => {
+  assert.strictEqual(parseOtherCell('-$800 for no compressor install').length, 0);
+});
+
+test('multiple "$amount desc" on one line both parse', () => {
+  const out = parseOtherCell('$20 Labor/$20Material to replace filters');
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0].unitPrice, 20);
+  assert.strictEqual(out[1].unitPrice, 20);
+});
+
+test('blank cell -> []', () => {
+  assert.deepStrictEqual(parseOtherCell(''), []);
+  assert.deepStrictEqual(parseOtherCell('\n  \n'), []);
 });
 
 console.log('bid-select test');

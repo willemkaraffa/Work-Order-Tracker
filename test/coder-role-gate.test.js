@@ -114,8 +114,12 @@ t('docs are still the overseer\'s', () => {
   assert.strictEqual(overseer('roadmap-handoffs/x.md').status, 0);
 });
 
-t('testing/x.js is not test/**', () => {
-  assert.strictEqual(overseer('testing/x.js').status, 0);
+t('test/** does not over-match testing/ (non-code path)', () => {
+  assert.strictEqual(overseer('testing/x.md').status, 0);
+});
+
+t('any .js is code under default-deny, incl testing/', () => {
+  assert.strictEqual(overseer('testing/x.js').status, 2);
 });
 
 t('a nested python file matches **/*.py', () => {

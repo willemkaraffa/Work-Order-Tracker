@@ -6,6 +6,7 @@
   "scripts": {
     "build:renderer": "esbuild src/app.jsx --bundle --outfile=bundle/app.js --format=iife --jsx=automatic --target=chrome120 --loader:.jsx=jsx",
     "watch:renderer": "npm run build:renderer -- --watch",
+    "amh:login": "node amh-pw-login.js",
     "test": "node test/run.js",
     "test:logic": "node test/run.js --logic",
     "lint": "eslint \"src/**/*.{js,jsx}\" \"test/**/*.js\" \"extension/**/*.js\"",
@@ -50,6 +51,8 @@
       "main.js",
       "preload.js",
       "amh-runner.js",
+      "amh-pw-token.js",
+      "amh-pw-login.js",
       "library_io.js",
       "index.html",
       "bundle/**",
@@ -72,6 +75,7 @@
     "electron-updater": "^6.1.7",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
+    "playwright": "^1.62.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

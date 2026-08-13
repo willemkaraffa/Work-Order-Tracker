@@ -5551,6 +5551,26 @@ function App() {
     return Array.isArray(res.warnings) ? res.warnings : [];
   }, [updateOrder]);
 
+  // AMH sessions expire; runAmhCapture then surfaces an error message starting
+  // "AMH_RELOGIN_REQUIRED" (Electron drops custom Error props across ipc, so we
+  // key on the message substring, not a code). Prompt a headed re-login (seed
+  // window via window.scraper.relogin) and tell the caller what to do: 'retry'
+  // (login OK -> re-run the SAME capture ONCE), 'stop' (a relogin case the user
+  // declined or login failed -- UI already shown, don't toast the raw error), or
+  // 'other' (not a relogin error -- caller handles it normally).
+  const amhRelogin = React.useCallback(async (errText) => {
+    if (!String(errText || '').includes('AMH_RELOGIN_REQUIRED')) return 'other';
+    if (!(window.scraper && window.scraper.relogin)) return 'other';
+    const ok = await confirmDialog(
+      'Your AMH session has expired. Log in to AMH to continue capturing work orders.',
+      { title: 'AMH login required', confirmLabel: 'Log in to AMH' });
+    if (!ok) return 'stop';
+    const r = await window.scraper.relogin();
+    if (r && r.ok) return 'retry';
+    toast('AMH login failed: ' + ((r && r.error) || 'unknown error'));
+    return 'stop';
+  }, [toast]);
+
   // In-app portal capture: runs scrape_amh.py (headless Edge token+API) for
   // THIS record and merges the scraped fields in place. Re-capture updates,
   // never spawning a duplicate. Returns a promise so callers can show progress.
@@ -5568,31 +5588,36 @@ function App() {
     if (pm !== 'AMH') { toast('In-app capture supports AMH work orders only'); return Promise.resolve(); }
     if (!window.scraper || !window.scraper.captureWO) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
     setCaptureStatus({ label: 'Capturing ' + id + ' from ' + pm + '…' });
-    return window.scraper.captureWO(src).then(res => {
-      if (!res || !res.ok) { toast('Capture failed: ' + ((res && res.error) || 'unknown error')); return; }
-      const warnings = applyCapture(id, res) || [];
-      if (warnings.length) {
-        toast('Captured ' + id + ' (warnings: ' + warnings.join(' / ') + ')', 'warn');
-      } else {
-        toast('Captured ' + id);
+    const run = async (retried) => {
+      let res;
+      try { res = await window.scraper.captureWO(src); }
+      catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+      if (!res || !res.ok) {
+        const err = (res && res.error) || 'unknown error';
+        if (!retried) { const act = await amhRelogin(err); if (act === 'retry') return run(true); if (act === 'stop') return; }
+        toast('Capture failed: ' + err); return;
       }
-    }).catch(e => toast('Capture error: ' + e.message))
-      .finally(() => setCaptureStatus(null));
-  }, [orders, applyCapture, toast]);
+      const warnings = applyCapture(id, res) || [];
+      if (warnings.length) toast('Captured ' + id + ' (warnings: ' + warnings.join(' / ') + ')', 'warn');
+      else toast('Captured ' + id);
+    };
+    return run(false).finally(() => setCaptureStatus(null));
+  }, [orders, applyCapture, toast, amhRelogin]);
 
   // On-demand single-WO AMH re-fetch for the remittance report: re-capture THIS WO
   // (proven captureWO path) so its bidItems carry per-line vendorTax, merge in place
   // (applyCapture), and RETURN the raw result so the caller can re-reconcile that
   // block immediately with the fresh data (no wait for state to settle). Aged-out
   // WOs (outside the 100-order API window) come back not-ok -> caller surfaces it.
-  const captureAmhItems = React.useCallback((order) => {
-    if (!order) return Promise.resolve({ ok: false, error: 'no order' });
-    if (!window.scraper || !window.scraper.captureWO) return Promise.resolve({ ok: false, error: 'Capture is only available in the desktop app' });
-    return window.scraper.captureWO(order).then(res => {
-      if (res && res.ok) applyCapture(order.id, res);
-      return res;
-    }).catch(e => ({ ok: false, error: e.message }));
-  }, [applyCapture]);
+  const captureAmhItems = React.useCallback(async (order) => {
+    if (!order) return { ok: false, error: 'no order' };
+    if (!window.scraper || !window.scraper.captureWO) return { ok: false, error: 'Capture is only available in the desktop app' };
+    const attempt = async () => { try { return await window.scraper.captureWO(order); } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; } };
+    let res = await attempt();
+    if ((!res || !res.ok) && (await amhRelogin(res && res.error)) === 'retry') res = await attempt();
+    if (res && res.ok) applyCapture(order.id, res);
+    return res;
+  }, [applyCapture, amhRelogin]);
 
   // Batch AMH re-fetch for the remittance report: re-capture a SET of WOs in ONE
   // Edge login (vs one login per WO). Merges each in place (applyCapture) and returns
@@ -5604,9 +5629,12 @@ function App() {
     if (!list.length) return { ok: false, error: 'No AMH work orders to fetch' };
     const numOf = o => String(o.woId || o.id || '').replace(/^WO-/i, '').trim();
     const byNum = new Map(list.map(o => [numOf(o), o.id]));
+    const attempt = () => window.scraper.captureWOs(list.map(o => ({ id: o.id, woId: o.woId, pm: o.pm })));
     let resp;
-    try { resp = await window.scraper.captureWOs(list.map(o => ({ id: o.id, woId: o.woId, pm: o.pm }))); }
-    catch (e) { return { ok: false, error: e.message }; }
+    try { resp = await attempt(); } catch (e) { resp = { ok: false, error: e.message }; }
+    if ((!resp || !resp.ok) && (await amhRelogin(resp && resp.error)) === 'retry') {
+      try { resp = await attempt(); } catch (e) { resp = { ok: false, error: e.message }; }
+    }
     if (!resp || !resp.ok) return resp || { ok: false, error: 'batch fetch failed' };
     const woById = {};   // keyed by order.id so the caller re-reconciles by block.orderId
     for (const [num, res] of Object.entries(resp.results || {})) {
@@ -5614,7 +5642,7 @@ function App() {
       if (res && res.ok && byNum.has(key)) { const id = byNum.get(key); applyCapture(id, res); woById[id] = res.wo; }
     }
     return { ok: true, results: resp.results, woById };
-  }, [applyCapture]);
+  }, [applyCapture, amhRelogin]);
 
   // Remittance import driver: the remittance is the source of truth, so fetch EVERY paid WO
   // fresh from the portal by its remittance WO number (one Edge login). Known WOs are updated
@@ -5625,9 +5653,12 @@ function App() {
     if (!window.scraper || !window.scraper.captureWOs) return { ok: false, error: 'Capture is only available in the desktop app' };
     const nums = [...new Set((woNumbers || []).map(n => normWoNum(n)).filter(Boolean))];
     if (!nums.length) return { ok: false, error: 'No AMH work orders in this remittance' };
+    const attempt = () => window.scraper.captureWOs(nums.map(n => ({ woId: n, pm: 'AMH' })));
     let resp;
-    try { resp = await window.scraper.captureWOs(nums.map(n => ({ woId: n, pm: 'AMH' }))); }
-    catch (e) { return { ok: false, error: e.message }; }
+    try { resp = await attempt(); } catch (e) { resp = { ok: false, error: e.message }; }
+    if ((!resp || !resp.ok) && (await amhRelogin(resp && resp.error)) === 'retry') {
+      try { resp = await attempt(); } catch (e) { resp = { ok: false, error: e.message }; }
+    }
     if (!resp || !resp.ok) return resp || { ok: false, error: 'fetch failed' };
 
     const existing = new Map();          // base WO# -> existing order id
@@ -5661,7 +5692,7 @@ function App() {
       }
     }
     return { ok: true, byNum };
-  }, [orders, applyCapture, upsertOrders]);
+  }, [orders, applyCapture, upsertOrders, amhRelogin]);
 
   // MSR remittance parity: MSR has no in-app portal API (the extension owns metadata) and
   // its line items live in the WO-folder bid sheet. So the remittance's official contribution
@@ -5736,8 +5767,7 @@ function App() {
       else existing.set(n, o.id);
     }
     setCaptureStatus({ label: 'Capturing all open AMH work orders…' });
-    return window.scraper.captureAllAMH().then(resp => {
-      if (!resp || !resp.ok) { toast('Batch capture failed: ' + ((resp && resp.error) || 'unknown error')); return; }
+    const applyResp = (resp) => {
       let updated = 0, warned = 0, fail = 0, trashedSkipped = 0;
       const newIncoming = [];
       const updatedBatch = [];          // existing WOs refreshed (for the modal)
@@ -5799,9 +5829,18 @@ function App() {
         + (warned ? (', ' + warned + ' with warnings') : '')
         + (trashedSkipped ? (', ' + trashedSkipped + ' cancelled skipped') : '')
         + (fail ? (', ' + fail + ' failed') : ''));
-    }).catch(e => toast('Batch capture error: ' + e.message))
+    };
+    const run = (retried) => window.scraper.captureAllAMH().then(async resp => {
+      if (!resp || !resp.ok) {
+        const err = (resp && resp.error) || 'unknown error';
+        if (!retried) { const act = await amhRelogin(err); if (act === 'retry') return run(true); if (act === 'stop') return; }
+        toast('Batch capture failed: ' + err); return;
+      }
+      applyResp(resp);
+    });
+    return run(false).catch(e => toast('Batch capture error: ' + e.message))
       .finally(() => setCaptureStatus(null));
-  }, [orders, applyCapture, upsertOrders, toast]);
+  }, [orders, applyCapture, upsertOrders, toast, amhRelogin]);
 
   // Find new MSR WOs: MSR batch capture was dropped (Salesforce lazy-render made
   // off-screen scraping unreliable). Instead, ask the extension to scan the open
