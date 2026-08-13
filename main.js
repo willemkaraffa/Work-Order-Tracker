@@ -2,8 +2,9 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, globalShor
 const path   = require('path');
 const fs     = require('fs');
 const http   = require('http');
+const { spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
-const { runAmhCapture } = require('./amh-runner');
+const { runAmhCapture, acquireToken, withProfileLock, profileDirFor, STDERR_KEY } = require('./amh-runner');
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
 const { chooseBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
@@ -192,7 +193,7 @@ function startBridgeServer(win) {
           // hand the GUID to scrape_amh as its input token and read the result by that
           // key. Absent a GUID, fall back to the old WO#-keyed path.
           const key = orderGuid || woNum;
-          const results = await runAmhCapture([key], amhCredential());
+          const results = await captureWithToken([key]);
           const one = results[key];
           if (one && one.ok && one.wo) {
             if (win && !win.isDestroyed()) {
@@ -472,6 +473,11 @@ app.whenReady().then(() => {
   registerGlobalHotkey(currentHotkey);
   ensureTray();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) mainWin = createWindow(); });
+  // AMH session preflight: mint a Bearer in the background so the renderer knows the
+  // session is dead BEFORE the user starts a capture or a remittance fetch. Fire and
+  // forget -- ensureToken pushes the result on 'amh-session' either way, and a throw
+  // here must never reach boot (the app is fully usable with no AMH session).
+  ensureToken().catch(() => {});
 });
 
 app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch(e) {} destroyTray(); });
@@ -1199,17 +1205,73 @@ ipcMain.handle('creds-clear', (_e, pm) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// ── IPC: Capture WO (headless Edge token+API via scrape_amh.py) ───────────────
-function amhCredential() {
+// ── AMH auth: mint ONE Bearer and cache it ────────────────────────────────────
+// Every mint spawns a whole headless Edge on the persisted profile (seconds), so a
+// mint-per-capture made the app feel dead. Mint once, reuse until the TTL, and drop the
+// cache the moment a mint fails or a capture comes back unauthorized.
+const AMH_TOKEN_TTL_MS = 30 * 60 * 1000;
+let amhToken = null;          // { token, mintedAt }
+let amhMintInFlight = null;   // ONE shared mint promise: two callers must never launch
+                              // two Edge on the same user-data-dir (SingletonLock).
+let amhSession = { ok: null, error: null, checkedAt: 0 };   // last known session health
+
+function setAmhSession(next) {
+  amhSession = { ...next, checkedAt: Date.now() };
   try {
-    if (!safeStorage.isEncryptionAvailable()) return null;
-    const store = readStore();
-    const enc = store[CRED_PREFIX + 'AMH'];
-    if (!enc) return null;
-    return JSON.parse(safeStorage.decryptString(Buffer.from(enc, 'base64')));
-  } catch (e) { return null; }
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('amh-session', amhSession);
+  } catch (_) { /* window gone; the renderer re-reads via amh-session-status on mount */ }
 }
 
+function ensureToken() {
+  if (amhToken && (Date.now() - amhToken.mintedAt) < AMH_TOKEN_TTL_MS) return Promise.resolve(amhToken.token);
+  if (amhMintInFlight) return amhMintInFlight;
+  amhMintInFlight = acquireToken()
+    .then(t => { amhToken = { token: t, mintedAt: Date.now() }; setAmhSession({ ok: true, error: null }); return t; })
+    .catch(e => { amhToken = null; setAmhSession({ ok: false, error: e.message }); throw e; })
+    .finally(() => { amhMintInFlight = null; });
+  return amhMintInFlight;
+}
+
+// Single entry point for every AMH capture: consume the cached Bearer, and if the
+// scraper reports an auth rejection (the cached token died before its TTL), drop the
+// cache and re-mint ONCE. Anything else propagates untouched, including the coded
+// AMH_RELOGIN_REQUIRED the renderer keys on.
+//
+// TWO auth signals, not one. A hard failure exits non-zero and rejects (the message
+// path). But scrape_amh.py catches its API errors PER WO, prints them to stderr and
+// still exits 0, so a token that dies mid-run RESOLVES with not-ok entries and no
+// rejection at all -- the message-only check never fired for the common case. The
+// runner keeps that stderr on the success path (amh-runner STDERR_KEY) so it can be
+// read here.
+const AMH_AUTH_RE = /\b(401|403|[Uu]nauthorized|[Ff]orbidden)\b/;
+
+// Drop the dead Bearer, mint a fresh one and re-run the capture. Exactly once per
+// captureWithToken call: the retry's own result is returned as-is, never re-checked.
+async function remintAndCapture(woNumbers, why) {
+  amhToken = null;
+  setAmhSession({ ok: false, error: why });
+  return runAmhCapture(woNumbers, await ensureToken());   // ensureToken pushes the refreshed ok:true
+}
+
+async function captureWithToken(woNumbers) {
+  const token = await ensureToken();
+  let results;
+  try {
+    results = await runAmhCapture(woNumbers, token);
+  } catch (e) {
+    const msg = String((e && e.message) || '');
+    if (!AMH_AUTH_RE.test(msg)) throw e;
+    return remintAndCapture(woNumbers, msg);
+  }
+  const stderr = String((results && results[STDERR_KEY]) || '');
+  if (AMH_AUTH_RE.test(stderr)) return remintAndCapture(woNumbers, stderr.slice(-300));
+  return results;
+}
+
+// ── IPC: Capture WO (headless Edge token+API via scrape_amh.py) ───────────────
+// (amhCredential is gone: scrape_amh.py has taken a Bearer via AMH_TOKEN since the
+// Playwright auth landed, so the decrypted AMH username/password was already being
+// passed into an argument nobody read. Credentials stay in the store for the UI.)
 function woNumberOf(woData) {
   return String((woData && (woData.woId || woData.id)) || '').replace(/^WO-/i, '').trim();
 }
@@ -1222,7 +1284,7 @@ ipcMain.handle('capture-wo', async (_e, woData) => {
   const woNum = woNumberOf(woData);
   if (!woNum) return { ok: false, error: 'WO has no number to locate it on AMH.' };
   try {
-    const results = await runAmhCapture([woNum], amhCredential());
+    const results = await captureWithToken([woNum]);
     return results[woNum] || { ok: false, error: `WO ${woNum} not returned by AMH scraper.` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
@@ -1236,7 +1298,7 @@ ipcMain.handle('capture-wos', async (_e, woDatas) => {
     .map(woNumberOf).filter(Boolean);
   if (!nums.length) return { ok: false, error: 'No AMH work orders to fetch.' };
   try {
-    const results = await runAmhCapture(nums, amhCredential());
+    const results = await captureWithToken(nums);
     return { ok: true, results };
   } catch (e) { return { ok: false, error: e.message }; }
 });
@@ -1253,20 +1315,55 @@ ipcMain.handle('queue-ext-command', (_e, action, payload) => {
 // (updates known WOs, imports new ones). Returns { ok, results }.
 ipcMain.handle('capture-all-amh', async () => {
   try {
-    const results = await runAmhCapture(['__ALL_OPEN__'], amhCredential());
+    const results = await captureWithToken(['__ALL_OPEN__']);
     return { ok: true, results };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
-// Re-seed the AMH Playwright session: opens a headed Edge window, lets the user
-// log into AMH, and persists the session to userData/amh-pw-state.json. Called by
-// the renderer when a capture rejects with AMH_RELOGIN_REQUIRED (session missing
-// or expired). Returns { ok } / { ok:false, error } so the renderer can retry.
+// Re-seed the AMH session: opens a headed Edge window on the persistent profile dir
+// and lets the user log into AMH. Called by the renderer when a capture rejects with
+// AMH_RELOGIN_REQUIRED (session missing or expired), or up-front when the preflight
+// reports the session is dead. Returns { ok } / { ok:false, error } so it can retry.
+//
+// SPAWNED as a system-node child, never require()d: amh-pw-login pulls in playwright,
+// which declares engines node>=20, and Electron 28 ships Node 18 -- requiring it here
+// crashed the app (same trap amh-runner's mintToken documents). Async spawn, not
+// spawnSync: the login window is open for minutes and the main process must stay live
+// to serve IPC. Serialized on the Edge profile lock so it can never race a mint.
+const AMH_LOGIN_CEILING_MS = 5 * 60 * 1000;   // above amh-pw-login's own 4-minute wait
+
+function spawnRelogin() {
+  const script = app.isPackaged
+    ? path.join(process.resourcesPath, 'amh-pw-login.js')
+    : path.join(__dirname, 'amh-pw-login.js');
+  const env = { ...process.env };
+  delete env.CHROME_CRASHPAD_PIPE_NAME;   // leaks into the child msedge and crashes it
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn('node', [script, profileDirFor()], { env, windowsHide: true });
+    } catch (e) { return resolve({ ok: false, error: 'AMH login failed to start: ' + e.message }); }
+    let err = '';
+    const timer = setTimeout(() => { try { proc.kill(); } catch (_) {} }, AMH_LOGIN_CEILING_MS);
+    proc.stderr.on('data', d => { err += d; });
+    proc.on('error', e => { clearTimeout(timer); resolve({ ok: false, error: 'AMH login failed to start: ' + e.message }); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ ok: true });
+      resolve({ ok: false, error: err.trim().slice(-300) || ('AMH login exited ' + code) });
+    });
+  });
+}
+
 ipcMain.handle('amh-relogin', async () => {
-  try {
-    const { seed } = require('./amh-pw-login');
-    const statePath = path.join(app.getPath('userData'), 'amh-pw-state.json');
-    await seed(statePath);
-    return { ok: true };
-  } catch (e) { return { ok: false, error: e.message }; }
+  const r = await withProfileLock(spawnRelogin);
+  // A fresh login invalidates whatever Bearer was cached (new session, new token) and
+  // the next capture must re-mint from the re-seeded profile.
+  amhToken = null;
+  setAmhSession(r.ok ? { ok: true, error: null } : { ok: false, error: r.error });
+  return r;
 });
+
+// Renderer pulls the last known AMH session health on mount (the boot preflight push
+// can land before the renderer subscribes), and subscribes for later changes.
+ipcMain.handle('amh-session-status', () => amhSession);

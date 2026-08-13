@@ -2706,6 +2706,35 @@ function CaptureButton({ busy, onClick, title, children }) {
   );
 }
 
+// AMH session indicator. session = { ok, error } pushed by main (boot preflight + every
+// mint/relogin). Unknown (null, e.g. the browser preview) shows nothing. A dead session
+// is the only actionable state, so it renders as a button that runs the SAME relogin
+// flow the captures use. Hoisted, not inline (rule A5).
+function AmhSessionChip({ session, onLogin }) {
+  if (!session || session.ok === null || session.ok === undefined) return null;
+  const dead = session.ok === false;
+  const base = {
+    height: 26, padding: '0 10px', borderRadius: 999, display: 'inline-flex',
+    alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600, lineHeight: 1,
+    fontFamily: 'inherit', border: '1px solid var(--border-1)', background: 'transparent',
+  };
+  const dot = (color) => <span style={{ width: 7, height: 7, borderRadius: '50%', background: color }} />;
+  if (!dead) {
+    return (
+      <span style={{ ...base, color: 'var(--text-2)', opacity: 0.8 }}
+            title="AMH session is live; captures will run without a login">
+        {dot('#4caf50')}AMH
+      </span>
+    );
+  }
+  return (
+    <button onClick={onLogin} style={{ ...base, color: 'var(--text-1)', cursor: 'pointer' }}
+            title={'AMH session is dead: ' + (session.error || 'unknown') + '. Click to log in.'}>
+      {dot('#e0a030')}AMH login
+    </button>
+  );
+}
+
 function CaptureBanner({ status }) {
   if (!status) return null;
   const { label, done, total } = status;
@@ -4219,6 +4248,10 @@ function App() {
   // Update banner state
   const [updateState, setUpdateState] = React.useState(null);
   const [captureStatus, setCaptureStatus] = React.useState(null);
+  // AMH session health, pushed by main (boot preflight + every mint/relogin outcome):
+  // null = unknown / not the desktop app, { ok:true } = a Bearer minted, { ok:false,
+  // error } = dead session. Real state, not derived: the renderer cannot compute it.
+  const [amhSession, setAmhSession] = React.useState(null);
   const msrBannerTimer = React.useRef(null);
   // New MSR WO numbers found on a portal list page but not yet in the tracker.
   const [newMsrWos, setNewMsrWos] = React.useState(null);
@@ -4394,6 +4427,18 @@ function App() {
         });
       });
     }
+  }, []);
+
+  // AMH session: read the last known status once (the boot preflight in main can finish
+  // before this mount, so the push alone would be missed) and subscribe for changes.
+  // `live` guards the async read against an unmount; the push subscription has no
+  // remover on the bridge, and App mounts once, so there is nothing else to clean up.
+  React.useEffect(() => {
+    if (!(window.scraper && window.scraper.amhSessionStatus)) return;
+    let live = true;
+    window.scraper.amhSessionStatus().then(s => { if (live) setAmhSession(s || null); }).catch(() => {});
+    if (window.scraper.onAmhSession) window.scraper.onAmhSession(s => { if (live) setAmhSession(s || null); });
+    return () => { live = false; };
   }, []);
 
   const checkForUpdates = React.useCallback(async () => {
@@ -5571,6 +5616,15 @@ function App() {
     return 'stop';
   }, [toast]);
 
+  // Pre-job session check. Main already knows the session is dead (boot preflight or a
+  // previous failure), so ask for the login BEFORE a long capture/remittance job rather
+  // than letting the user hit it mid-task. Reuses amhRelogin -- no second login path --
+  // by handing it the coded message that flow keys on. true = go ahead.
+  const ensureAmhSession = React.useCallback(async () => {
+    if (!amhSession || amhSession.ok !== false) return true;
+    return (await amhRelogin('AMH_RELOGIN_REQUIRED: ' + (amhSession.error || 'session expired'))) === 'retry';
+  }, [amhSession, amhRelogin]);
+
   // In-app portal capture: runs scrape_amh.py (headless Edge token+API) for
   // THIS record and merges the scraped fields in place. Re-capture updates,
   // never spawning a duplicate. Returns a promise so callers can show progress.
@@ -5587,7 +5641,6 @@ function App() {
     }
     if (pm !== 'AMH') { toast('In-app capture supports AMH work orders only'); return Promise.resolve(); }
     if (!window.scraper || !window.scraper.captureWO) { toast('Capture is only available in the desktop app'); return Promise.resolve(); }
-    setCaptureStatus({ label: 'Capturing ' + id + ' from ' + pm + '…' });
     const run = async (retried) => {
       let res;
       try { res = await window.scraper.captureWO(src); }
@@ -5601,8 +5654,12 @@ function App() {
       if (warnings.length) toast('Captured ' + id + ' (warnings: ' + warnings.join(' / ') + ')', 'warn');
       else toast('Captured ' + id);
     };
-    return run(false).finally(() => setCaptureStatus(null));
-  }, [orders, applyCapture, toast, amhRelogin]);
+    return (async () => {
+      if (!(await ensureAmhSession())) return;
+      setCaptureStatus({ label: 'Capturing ' + id + ' from ' + pm + '…' });
+      try { await run(false); } finally { setCaptureStatus(null); }
+    })();
+  }, [orders, applyCapture, toast, amhRelogin, ensureAmhSession]);
 
   // On-demand single-WO AMH re-fetch for the remittance report: re-capture THIS WO
   // (proven captureWO path) so its bidItems carry per-line vendorTax, merge in place
@@ -5612,12 +5669,13 @@ function App() {
   const captureAmhItems = React.useCallback(async (order) => {
     if (!order) return { ok: false, error: 'no order' };
     if (!window.scraper || !window.scraper.captureWO) return { ok: false, error: 'Capture is only available in the desktop app' };
+    if (!(await ensureAmhSession())) return { ok: false, error: 'AMH login required' };
     const attempt = async () => { try { return await window.scraper.captureWO(order); } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; } };
     let res = await attempt();
     if ((!res || !res.ok) && (await amhRelogin(res && res.error)) === 'retry') res = await attempt();
     if (res && res.ok) applyCapture(order.id, res);
     return res;
-  }, [applyCapture, amhRelogin]);
+  }, [applyCapture, amhRelogin, ensureAmhSession]);
 
   // Batch AMH re-fetch for the remittance report: re-capture a SET of WOs in ONE
   // Edge login (vs one login per WO). Merges each in place (applyCapture) and returns
@@ -5627,6 +5685,7 @@ function App() {
     if (!window.scraper || !window.scraper.captureWOs) return { ok: false, error: 'Capture is only available in the desktop app' };
     const list = (Array.isArray(orderList) ? orderList : []).filter(Boolean);
     if (!list.length) return { ok: false, error: 'No AMH work orders to fetch' };
+    if (!(await ensureAmhSession())) return { ok: false, error: 'AMH login required' };
     const numOf = o => String(o.woId || o.id || '').replace(/^WO-/i, '').trim();
     const byNum = new Map(list.map(o => [numOf(o), o.id]));
     const attempt = () => window.scraper.captureWOs(list.map(o => ({ id: o.id, woId: o.woId, pm: o.pm })));
@@ -5642,7 +5701,7 @@ function App() {
       if (res && res.ok && byNum.has(key)) { const id = byNum.get(key); applyCapture(id, res); woById[id] = res.wo; }
     }
     return { ok: true, results: resp.results, woById };
-  }, [applyCapture, amhRelogin]);
+  }, [applyCapture, amhRelogin, ensureAmhSession]);
 
   // Remittance import driver: the remittance is the source of truth, so fetch EVERY paid WO
   // fresh from the portal by its remittance WO number (one Edge login). Known WOs are updated
@@ -5653,6 +5712,7 @@ function App() {
     if (!window.scraper || !window.scraper.captureWOs) return { ok: false, error: 'Capture is only available in the desktop app' };
     const nums = [...new Set((woNumbers || []).map(n => normWoNum(n)).filter(Boolean))];
     if (!nums.length) return { ok: false, error: 'No AMH work orders in this remittance' };
+    if (!(await ensureAmhSession())) return { ok: false, error: 'AMH login required' };
     const attempt = () => window.scraper.captureWOs(nums.map(n => ({ woId: n, pm: 'AMH' })));
     let resp;
     try { resp = await attempt(); } catch (e) { resp = { ok: false, error: e.message }; }
@@ -5692,7 +5752,7 @@ function App() {
       }
     }
     return { ok: true, byNum };
-  }, [orders, applyCapture, upsertOrders, amhRelogin]);
+  }, [orders, applyCapture, upsertOrders, amhRelogin, ensureAmhSession]);
 
   // MSR remittance parity: MSR has no in-app portal API (the extension owns metadata) and
   // its line items live in the WO-folder bid sheet. So the remittance's official contribution
@@ -5766,7 +5826,6 @@ function App() {
       if (o.deleted) trashed.add(n);
       else existing.set(n, o.id);
     }
-    setCaptureStatus({ label: 'Capturing all open AMH work orders…' });
     const applyResp = (resp) => {
       let updated = 0, warned = 0, fail = 0, trashedSkipped = 0;
       const newIncoming = [];
@@ -5838,9 +5897,14 @@ function App() {
       }
       applyResp(resp);
     });
-    return run(false).catch(e => toast('Batch capture error: ' + e.message))
-      .finally(() => setCaptureStatus(null));
-  }, [orders, applyCapture, upsertOrders, toast, amhRelogin]);
+    return (async () => {
+      if (!(await ensureAmhSession())) return;
+      setCaptureStatus({ label: 'Capturing all open AMH work orders…' });
+      try { await run(false); }
+      catch (e) { toast('Batch capture error: ' + e.message); }
+      finally { setCaptureStatus(null); }
+    })();
+  }, [orders, applyCapture, upsertOrders, toast, amhRelogin, ensureAmhSession]);
 
   // Find new MSR WOs: MSR batch capture was dropped (Salesforce lazy-render made
   // off-screen scraping unreliable). Instead, ask the extension to scan the open
@@ -6431,7 +6495,9 @@ function App() {
               isPresetView={!!activePreset || !!activeInbox}
               isInboxView={!!activeInbox}
               headerRight={(
-                <div style={{ display: 'flex', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <AmhSessionChip session={amhSession}
+                    onLogin={() => { Promise.resolve(ensureAmhSession()).catch(() => {}); }} />
                   {(window.scraper && window.scraper.captureAllAMH) && (
                     <CaptureButton busy={!!captureStatus} onClick={captureAllAMH}
                       title="Capture all active AMH work orders from the portal">
