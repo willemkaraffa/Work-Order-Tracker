@@ -39,11 +39,23 @@ const question = (rel) => 'Unlock the role definition for editing "' + rel + '"?
 // Locked paths live in overseer.json so the human can inspect them.
 // Any config problem returns [] -> nothing is locked -> fail OPEN.
 function lockedPaths(root) {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(root, 'overseer.json'), 'utf8'));
-    const list = cfg.roles.locked;
-    return Array.isArray(list) ? list : [];
-  } catch { return []; }
+  let raw;
+  // ABSENT/unreadable -> nothing locked -> fail OPEN (non-PO tree, not tampering).
+  try { raw = fs.readFileSync(path.join(root, 'overseer.json'), 'utf8'); }
+  catch { return []; }
+  // PRESENT but unparseable -> fail CLOSED. Corrupting the role definition must not
+  // unlock the locked paths. overseer.json is itself locked; a real corruption is a
+  // bad human edit, recoverable by fixing the JSON.
+  let cfg;
+  try { cfg = JSON.parse(raw); }
+  catch {
+    process.stderr.write(
+      '[role-lock] BLOCKED: overseer.json is present but unparseable. Refusing to\n' +
+      'fail open on a corrupt role definition. Fix the JSON, then retry.\n');
+    process.exit(2);
+  }
+  const list = cfg && cfg.roles && cfg.roles.locked;
+  return Array.isArray(list) ? list : [];
 }
 
 // Repo-relative, forward slashes. null for anything outside the repo or under
