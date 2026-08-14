@@ -12,7 +12,10 @@ chrome.runtime.onInstalled.addListener(() => {
     { id: 'wo_type',    title: 'WO Capture → Set as Type' },
     { id: 'wo_status',  title: 'WO Capture → Set as Status' },
   ];
-  fields.forEach(f => chrome.contextMenus.create({ id: f.id, title: f.title, contexts: ['selection'] }));
+  // Menus survive extension reloads; a bare create() throws duplicate-id on reload.
+  chrome.contextMenus.removeAll(() => {
+    fields.forEach(f => chrome.contextMenus.create({ id: f.id, title: f.title, contexts: ['selection'] }));
+  });
 });
 
 // ── Command polling (app-triggered capture) ───────────────────────────────────
@@ -25,14 +28,19 @@ chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'woCommandPoll') pollC
 let commandRunning = false;
 async function pollCommand() {
   if (commandRunning) return;
-  let cmd = null;
+  commandRunning = true;
   try {
-    const r = await fetch(BRIDGE_URL + '/command', { signal: AbortSignal.timeout(3000) });
-    if (r.ok) cmd = (await r.json()).command;
-  } catch (_) { return; } // tracker not running
-  if (!cmd || !cmd.action) return;
-  if (cmd.action === 'findNewMsr') {
-    await backgroundFindNew();
+    let cmd = null;
+    try {
+      const r = await fetch(BRIDGE_URL + '/command', { signal: AbortSignal.timeout(3000) });
+      if (r.ok) cmd = (await r.json()).command;
+    } catch (_) { return; } // tracker not running
+    if (!cmd || !cmd.action) return;
+    if (cmd.action === 'findNewMsr') {
+      await backgroundFindNew();
+    }
+  } finally {
+    commandRunning = false;
   }
 }
 
@@ -90,7 +98,11 @@ async function backgroundFindNew() {
     return;
   }
   console.log('[wo] find-new: dequeued, host tab', tab.id, tab.url);
-  const r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
+  let r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' });
+  if (!r) {
+    console.log('[wo] find-new: no ack, reviving content script in tab', tab.id);
+    if (await reviveContentScript(tab)) r = await sendTabMsgRetry(tab.id, { action: 'scanMsrList' }, 3, 1000);
+  }
   if (!r || !r.ok) {
     const msg = 'MSR page not ready, keep an amherst tab open and loaded, then try again.';
     notify('Find new MSR WOs', msg);
@@ -112,7 +124,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       const draft = res.wo_draft || {};
       draft[field] = info.selectionText.trim();
       chrome.storage.local.set({ wo_draft: draft });
-      chrome.tabs.sendMessage(tab.id, { action: 'fieldCaptured', field, value: info.selectionText.trim() });
+      // sendTabMsg, not a bare sendMessage: the draft is already saved above, so a
+      // tab with no live content script (discarded/orphaned) must not reject.
+      if (tab && tab.id != null) sendTabMsg(tab.id, { action: 'fieldCaptured', field, value: info.selectionText.trim() });
     });
   }
 });
@@ -165,6 +179,42 @@ async function sendTabMsgRetry(tabId, message, tries = 5, gap = 1000) {
   return null;
 }
 
+// A tab can appear in tabs.query results yet have NO live content script: Chrome
+// Memory Saver DISCARDED it, an extension reload orphaned the injected copy, or a
+// silent update replaced the extension. sendTabMsg then never acks and the capture
+// bails with "page not ready" (seen live 2026-08-14). Revive before giving up.
+async function waitTabComplete(tabId, ms = 20000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    let t = null;
+    try { t = await chrome.tabs.get(tabId); } catch (_) { return false; }
+    if (t && !t.discarded && t.status === 'complete') return true;
+    await new Promise(s => setTimeout(s, 500));
+  }
+  return false;
+}
+
+async function reviveContentScript(tab) {
+  try {
+    if (tab.discarded) {
+      // No renderer to inject into; a reload re-runs the declarative injection.
+      await chrome.tabs.reload(tab.id);
+      const ok = await waitTabComplete(tab.id);
+      if (ok) await new Promise(s => setTimeout(s, 1500)); // content.js runs at document_idle
+      return ok;
+    }
+    // content.js self-guards with window.__woCaptureInjected; an ORPHANED copy leaves
+    // that flag set in the isolated world, which would make re-injection a silent
+    // no-op. Clear it first (func: runs in the same ISOLATED world), then inject.
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => { try { window.__woCaptureInjected = false; } catch (_) {} } });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+    return true;
+  } catch (e) {
+    console.log('[wo] revive failed:', e && e.message);
+    return false;
+  }
+}
+
 let msrInFlight = false;
 let msrInFlightTimer = null;
 
@@ -178,7 +228,11 @@ async function backgroundStartMsr(one) {
     notify('MSR capture', 'Open an MSR tab (amherst.my.site.com) first, then try again.');
     return { ok: false, error: 'No MSR tab open.' };
   }
-  const r = await sendTabMsgRetry(tab.id, { action: 'startMsrCapture', one: one || null });
+  let r = await sendTabMsgRetry(tab.id, { action: 'startMsrCapture', one: one || null });
+  if (!r) {
+    console.log('[wo] msr-capture: no ack, reviving content script in tab', tab.id);
+    if (await reviveContentScript(tab)) r = await sendTabMsgRetry(tab.id, { action: 'startMsrCapture', one: one || null }, 3, 1000);
+  }
   if (!r || !r.ok) {
     notify('MSR capture', 'Could not start — make sure an MSR page is fully loaded.');
     return { ok: false, error: (r && r.error) || 'content script not ready' };
@@ -229,14 +283,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'clearDraft') {
-    chrome.storage.local.set({ wo_draft: {} });
-    sendResponse({ ok: true });
+    chrome.storage.local.set({ wo_draft: {} }, () => sendResponse({ ok: true }));
     return true;
   }
 
   if (msg.action === 'saveDraft') {
-    chrome.storage.local.set({ wo_draft: msg.draft });
-    sendResponse({ ok: true });
+    chrome.storage.local.set({ wo_draft: msg.draft }, () => sendResponse({ ok: true }));
     return true;
   }
 
