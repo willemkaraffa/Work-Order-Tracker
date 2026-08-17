@@ -13,15 +13,10 @@
 // amh-edge-profile (the app passes its own userData path so both sides agree).
 const { chromium } = require('playwright');
 const path = require('path');
-
-// Land on the VENDOR order list, not on a login path. A dead session bounces this to
+// Land on the VENDOR order list, not on a login path: a dead session bounces this to
 // /login?state=<this url> (the real sign-in form) and a live one renders the list and
-// fires the authed request the Bearer sniffer below needs. Same URL amh-pw-token.js
-// mints from, for the same reason: the /my-amh/ prefix is what makes it authed.
-// The old 'https://www.amh.com/let-yourself-in' is the RESIDENT self-tour page. It
-// renders "No viewings to display" and NO login form, which is the blank Edge window
-// users hit whenever the session was actually dead (both paths proven live 2026-08-17).
-const LOGIN_URL = 'https://www.amh.com/my-amh/vendor-admin-orders?tabId=AllOpen';
+// fires the authed request the Bearer sniffer below needs. Route lives in amh-urls.js.
+const { VENDOR_ORDERS_URL } = require('./amh-urls');
 const PROFILE_DIR = process.argv[2]
   || process.env.AMH_PROFILE_DIR
   || path.join(process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
@@ -44,11 +39,20 @@ async function seed(profileDir) {
     });
 
     console.error('[amh:login] Edge opening. Log into AMH. Waiting up to 4 min for sign-in...');
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    // Never swallow the goto silently: a wrong/dead page used to look exactly like "the
+    // human has not logged in yet". Log the error, then name the page actually landed on.
+    await page.goto(VENDOR_ORDERS_URL, { waitUntil: 'domcontentloaded' })
+      .catch(e => { console.error('[amh:login] navigation error: ' + (e && e.message || e)); });
+    const landedUrl = page.url();
+    const landedTitle = await page.title().catch(() => '(title unavailable)');
+    console.error('[amh:login] landed on ' + landedUrl + ' -- "' + landedTitle + '"');
 
     // Authenticated once the SPA fires an authed API request (a Bearer appears).
     for (let i = 0; i < 48 && !bearer; i++) await page.waitForTimeout(5000);
-    if (!bearer) throw new Error('no sign-in detected within the timeout (no Bearer seen)');
+    if (!bearer) {
+      throw new Error('no sign-in detected within the timeout (no Bearer seen); page was '
+        + landedUrl + ' -- "' + landedTitle + '"');
+    }
 
     console.error('[amh:login] signed in; profile persisted -> ' + profileDir);
     return true;

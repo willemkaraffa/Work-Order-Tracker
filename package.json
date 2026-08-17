@@ -7,6 +7,7 @@
     "build:renderer": "esbuild src/app.jsx --bundle --outfile=bundle/app.js --format=iife --jsx=automatic --target=chrome120 --loader:.jsx=jsx",
     "watch:renderer": "npm run build:renderer -- --watch",
     "amh:login": "node amh-pw-login.js",
+    "amh:health": "node amh-health.js",
     "test": "node test/run.js",
     "test:logic": "node test/run.js --logic",
     "lint": "eslint \"src/**/*.{js,jsx}\" \"test/**/*.js\" \"extension/**/*.js\"",
@@ -59,6 +60,7 @@
     "extraResources": [
       "scrape_amh.py",
       "amh-pw-token.js",
+      "amh-urls.js",
       "amh-pw-login.js",
       {
         "from": "resources/python",
