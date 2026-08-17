@@ -14,7 +14,14 @@
 const { chromium } = require('playwright');
 const path = require('path');
 
-const LOGIN_URL = 'https://www.amh.com/let-yourself-in';   // vendor login entry
+// Land on the VENDOR order list, not on a login path. A dead session bounces this to
+// /login?state=<this url> (the real sign-in form) and a live one renders the list and
+// fires the authed request the Bearer sniffer below needs. Same URL amh-pw-token.js
+// mints from, for the same reason: the /my-amh/ prefix is what makes it authed.
+// The old 'https://www.amh.com/let-yourself-in' is the RESIDENT self-tour page. It
+// renders "No viewings to display" and NO login form, which is the blank Edge window
+// users hit whenever the session was actually dead (both paths proven live 2026-08-17).
+const LOGIN_URL = 'https://www.amh.com/my-amh/vendor-admin-orders?tabId=AllOpen';
 const PROFILE_DIR = process.argv[2]
   || process.env.AMH_PROFILE_DIR
   || path.join(process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'),
