@@ -14,7 +14,7 @@ const path = require('path');
 // The vendor order list lives under /my-amh/. The bare /vendor-admin-orders path
 // bounces to the PUBLIC marketing site and fires NO authed app.amh.com request, so
 // no Bearer surfaces (proven live 2026-08-11). The /my-amh/ prefix is required.
-const WO_LIST_URL = 'https://www.amh.com/my-amh/vendor-admin-orders?tabId=AllOpen';
+const { VENDOR_ORDERS_URL: WO_LIST_URL } = require('./amh-urls');
 const MINT_CEILING_MS = 45000;   // whole capture-the-Bearer race; a healthy mint is seconds
 
 // Same resolution order as amh-pw-login.js so both sides land on ONE profile dir.
