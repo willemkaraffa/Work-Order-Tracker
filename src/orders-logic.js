@@ -155,8 +155,8 @@ export function migrateOrders(orders, storedPhases) {
       const phaseName = phaseForOrder(next, phaseList);
       if (completeNames.has(phaseName)) {
         next.tab = 'complete';
-        // Auto-unschedule per change11 rule: complete WOs leave the itinerary.
-        if (next.schedule) delete next.schedule;
+        // Schedule is RETAINED (scheduling-module S1): tab='complete' already
+        // says the visit happened, and the calendar needs the past date.
       }
     }
     if (next.deleted && !next.status) next.status = 'Cancelled';
@@ -246,7 +246,8 @@ function appendHistory(cur, action, detail) {
   return [...(Array.isArray(cur.history) ? cur.history : []), { ts: Date.now(), action, detail }];
 }
 
-// Active -> Complete. Hardcodes status, saves prevStatus for Reopen, unschedules.
+// Active -> Complete. Hardcodes status, saves prevStatus for Reopen. Keeps the
+// schedule (S1 retention: past days stay populated; tab carries "done").
 export function applyMarkComplete(cur) {
   const prior = cur.status || 'Open';
   const next = {
@@ -255,7 +256,6 @@ export function applyMarkComplete(cur) {
     prevStatus: cur.prevStatus || prior,
     status: 'Complete - Pending Approval',
   };
-  if (next.schedule) delete next.schedule;
   next.history = appendHistory(cur, 'marked complete', 'status: ' + prior + ' → Complete - Pending Approval');
   return next;
 }
@@ -283,10 +283,9 @@ export function applyReopen(cur) {
   return next;
 }
 
-// Complete -> Sent (billing queue). Unschedules.
+// Complete -> Sent (billing queue). Keeps the schedule (S1 retention).
 export function applySendToInvoice(cur) {
   const next = { ...cur, tab: 'sent' };
-  if (next.schedule) delete next.schedule;
   next.history = appendHistory(cur, 'sent to billing queue', '');
   return next;
 }
@@ -343,7 +342,35 @@ export function clearsScheduleOnSet(status, statusTags) {
   return /job complete/i.test(String(status || ''));
 }
 
-// Today as YYYY-MM-DD (local), for expired-schedule comparison.
+// Is this WO still a LIVE job whose schedule means something? Schedules now
+// persist through complete/sent/visited/past dates (S1 retention), so
+// "has a schedule" no longer implies "is upcoming". Deliberately NO date
+// comparison inside, so callers compose it:
+//   chip / marker = isLiveSchedule(o, tags) && o.schedule.date >= itinTodayStr()
+//   overdue       = isLiveSchedule(o, tags) && isOverdueSched(date, start)
+// The status test REUSES clearsScheduleOnSet -- exactly the statuses that used
+// to delete the schedule (visited-tagged OR "Job Complete") now just read as
+// not-live, so behavior is preserved without the data loss.
+// `onsite` is NOT excluded here: only the overdue nag silences onsite (app.jsx),
+// while the chip/marker still show onsite jobs today. Keeping that split
+// preserves existing behavior exactly.
+export function isLiveSchedule(o, statusTags) {
+  if (!o || !o.schedule || !o.schedule.date) return false;
+  if (o.deleted || (o.tab || 'active') !== 'active') return false;
+  return !clearsScheduleOnSet(o.status, statusTags);
+}
+
+// Is this overdue notification suppressed? Dismissals persist in
+// settings.dismissedOverdueIds keyed to the schedule DATE they were dismissed
+// for. A bare id set would silence a WO forever (notif ids are 'overdue-'+id,
+// stable across reschedules); keying on the date re-arms the nag the moment the
+// WO is rescheduled and later goes overdue again.
+export function isOverdueDismissed(dismissed, notifId, schedDate) {
+  if (!dismissed || !schedDate) return false;
+  return dismissed[notifId] === schedDate;
+}
+
+// Today as YYYY-MM-DD (local), for schedule date comparison.
 export function itinTodayStr() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
@@ -431,26 +458,13 @@ export function reconcileChange11(orders, storedPhases) {
       prevStatus: o.prevStatus || o.status || 'Open',
       status: 'Complete - Pending Approval',
     };
-    if (next.schedule) delete next.schedule;
     next.history = appendHistory(o, 'auto-flipped to Complete (change11 v4)',
       'phase=' + phaseName + ' status=' + (o.status || '') + ' → Complete - Pending Approval');
     return next;
   });
-  // Pass 4: clear expired schedules in the SAME write.
-  const today = itinTodayStr();
-  let expiredCleared = 0;
-  const finalOrders = nextOrders.map(o => {
-    if (!o || !o.schedule || !o.schedule.date) return o;
-    if (o.schedule.date >= today) return o;
-    expiredCleared++;
-    const clone = { ...o };
-    const wasDate = clone.schedule.date;
-    delete clone.schedule;
-    clone.history = appendHistory(o, 'auto-unscheduled (expired)', 'was ' + wasDate);
-    return clone;
-  });
-  return { orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
-    hardcodedCancelled, revertedFromComplete, expiredCleared };
+  // Pass 4 (expired-schedule clearing) REMOVED in S1: past schedules are kept.
+  return { orders: nextOrders, flipped, promotedFromInvoiced, hardcodedComplete,
+    hardcodedCancelled, revertedFromComplete };
 }
 
 /* ---------- WO search number match ---------- */

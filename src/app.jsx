@@ -10,7 +10,7 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
-  clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
+  isLiveSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
@@ -341,7 +341,9 @@ export function splitAddress(o) {
   return { addr: full, city: '' };
 }
 
-function toDisplayRow(o) {
+// statusTags feeds isLiveSchedule: schedules persist past completion now, so the
+// `◷` chip must gate on live-and-not-past rather than on "has a schedule".
+function toDisplayRow(o, statusTags) {
   const { addr, city } = splitAddress(o);
   const flags = [];
   if (o.emergency) flags.push('emergency');
@@ -365,7 +367,7 @@ function toDisplayRow(o) {
     ageLevel: ageLevelForDays(ageDays),
     status: o.status || 'Open',
     tab: o.tab || 'active',
-    scheduled: !!(o.schedule && o.schedule.date),
+    scheduled: isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr(),
     schedDate: o.schedule ? o.schedule.date : null,
     schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
@@ -376,12 +378,12 @@ function toDisplayRow(o) {
   };
 }
 
-function groupByPhase(orders, phases) {
+function groupByPhase(orders, phases, statusTags) {
   const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
   const buckets = {};
   for (const o of orders) {
     const name = phaseForOrder(o, list);
-    (buckets[name] = buckets[name] || []).push(toDisplayRow(o));
+    (buckets[name] = buckets[name] || []).push(toDisplayRow(o, statusTags));
   }
   const groups = [];
   for (const p of list) {
@@ -3486,7 +3488,7 @@ export const navBtnStyle = {
 
 // Scheduling form launched from the WO context menu. Assign a technician + a
 // timeframe (day + 30-min start). Prefills from any existing schedule.
-function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick }) {
+function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick, statusTags }) {
   useModalOpenFlag(true);
   const slots = React.useMemo(() => itinSlots(), []);
   const [tech, setTech] = React.useState(order.tech || techs[0] || '');
@@ -3508,7 +3510,9 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOr
     if (!onPick) return null; // routing not wired
     const gc = geocache || {};
     const anchorGeo = gc[order.id] && gc[order.id].lat != null ? gc[order.id] : null;
-    const scheduledIds = new Set((activeOrders || []).filter(o => o.schedule && o.schedule.date).map(o => o.id));
+    // Retention (S1): a stale past date is not "already scheduled" any more.
+    const today = itinTodayStr();
+    const scheduledIds = new Set((activeOrders || []).filter(o => isLiveSchedule(o, statusTags) && o.schedule.date >= today).map(o => o.id));
     const cityCounts = {};
     for (const o of (activeOrders || [])) {
       if (scheduledIds.has(o.id)) continue;
@@ -3521,7 +3525,7 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOr
       tech, techJobTypes: techJobTypes || {}, weights: routingWeights,
       scheduledIds, cityCounts,
     });
-  }, [onPick, order, activeOrders, geocache, tech, techJobTypes, routingWeights]);
+  }, [onPick, order, activeOrders, geocache, tech, techJobTypes, routingWeights, statusTags]);
 
   const routeRows = routing ? (routeTab === 'suggested' ? routing.suggested : routing.closeBy) : [];
 
@@ -4170,17 +4174,17 @@ function App() {
     if (loading || !settings) return;
     if (settings.change11Reconciled_v6 === '1') return;
     const storedPhases = (data && Array.isArray(data.phases)) ? data.phases : DEFAULT_PHASES;
-    // Pure core in ./orders-logic.js (passes 0-4 + counters). Side effects
+    // Pure core in ./orders-logic.js (passes 0-3 + counters). Side effects
     // (settings patch, write, toast) stay here.
     const {
       orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
-      hardcodedCancelled, revertedFromComplete, expiredCleared,
+      hardcodedCancelled, revertedFromComplete,
     } = reconcileChange11(orders, storedPhases);
     const patch = migrateSettingsForChange11(data || {});
     const phasesChanged   = JSON.stringify(patch.phases)   !== JSON.stringify(storedPhases);
     const statusesChanged = JSON.stringify(patch.statuses) !== JSON.stringify((data && data.statuses) || []);
     const colorsChanged   = patch.statusColors && JSON.stringify(patch.statusColors) !== JSON.stringify((data && data.statusColors) || {});
-    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (expiredCleared > 0) || (revertedFromComplete > 0);
+    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (revertedFromComplete > 0);
     const wrote = {};
     if (touched) wrote.orders = finalOrders;
     if (phasesChanged) wrote.phases = patch.phases;
@@ -4195,39 +4199,14 @@ function App() {
       if (promotedFromInvoiced) parts.push(promotedFromInvoiced + ' moved to Sent');
       if (hardcodedComplete) parts.push(hardcodedComplete + ' Complete status set');
       if (hardcodedCancelled) parts.push(hardcodedCancelled + ' Cancelled status set');
-      if (expiredCleared) parts.push(expiredCleared + ' expired schedule' + (expiredCleared === 1 ? '' : 's') + ' cleared');
       toast('change11 reconcile: ' + parts.join(', '));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
-  // Standalone auto-unschedule for subsequent loads (after the change11
-  // reconciler ran once). The first-load pass is handled INSIDE the reconciler
-  // to avoid a race over the same orders write. This effect waits until the
-  // reconciler's gate is set, then takes over on every load + orders mutation.
-  // Idempotent: writes only when something was cleared, so it terminates.
-  React.useEffect(() => {
-    if (loading || !Array.isArray(orders)) return;
-    if (!(settings && settings.change11Reconciled_v6 === '1')) return;
-    const today = itinTodayStr();
-    let cleared = 0;
-    const next = orders.map(o => {
-      if (!o || !o.schedule || !o.schedule.date) return o;
-      if (o.schedule.date >= today) return o;
-      cleared++;
-      const clone = { ...o };
-      const wasDate = clone.schedule.date;
-      delete clone.schedule;
-      clone.history = [...(Array.isArray(o.history) ? o.history : []),
-        { ts: Date.now(), action: 'auto-unscheduled (expired)', detail: 'was ' + wasDate }];
-      return clone;
-    });
-    if (cleared > 0) {
-      updateData({ orders: next });
-      if (toast) toast('Cleared ' + cleared + ' expired schedule' + (cleared === 1 ? '' : 's'));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, orders, settings && settings.change11Reconciled_v6]);
+  // (S1) The standalone expired-schedule sweeper that used to live here is GONE,
+  // along with reconciler Pass 4. Past schedules are retained; "is this schedule
+  // still live" is now derived at read time via isLiveSchedule.
 
   const viewSorts = (settings && settings.viewSorts) || {};
   const currentSort = viewSorts[currentView] || { key: 'created', dir: 'desc' };
@@ -4263,6 +4242,16 @@ function App() {
   // alert) re-activate once the re-nag window elapses (overdue-threshold setting)
   // so a stale WO is never lost; capture events are removed outright on click.
   const [notifReads, setNotifReads] = React.useState({});
+  // Overdue dismissals PERSIST (settings, inside the one wo_data blob) so the
+  // nag stops for good — { 'overdue-<woId>': 'YYYY-MM-DD' }. Value is the
+  // schedule date it was dismissed for; rescheduling re-arms the nag.
+  const dismissedOverdueIds = (settings && settings.dismissedOverdueIds && typeof settings.dismissedOverdueIds === 'object') ? settings.dismissedOverdueIds : {};
+  const dismissOverdue = React.useCallback((items) => {
+    const add = {};
+    for (const n of items) { if (n && n.kind === 'overdue' && n.schedDate) add[n.id] = n.schedDate; }
+    if (!Object.keys(add).length) return;
+    updateSettings(s => ({ dismissedOverdueIds: { ...(s.dismissedOverdueIds || {}), ...add } }));
+  }, [updateSettings]);
   const pushNotif = React.useCallback((ev) => {
     setNotifEvents(prev => [{ id: 'ev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), ts: Date.now(), ...ev }, ...prev].slice(0, 30));
   }, []);
@@ -4780,9 +4769,12 @@ function App() {
         // immune to overdue (no overdue notification). 'visited' still clears
         // the schedule elsewhere; onsite keeps it but silences the nag.
         if (statusTags[o.status] === 'onsite') continue;
-        if (o.schedule && o.schedule.date && isOverdueSched(o.schedule.date, o.schedule.start)) {
+        // isLiveSchedule additionally drops `visited`-tagged WOs: schedules now
+        // survive the visit, and a finished job must not nag.
+        if (isLiveSchedule(o, statusTags) && isOverdueSched(o.schedule.date, o.schedule.start)) {
           out.push({ id: 'overdue-' + o.id, kind: 'overdue', title: 'Overdue · ' + o.id,
-            sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''), wo: o.id });
+            sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''),
+            wo: o.id, schedDate: o.schedule.date });
         }
       }
     }
@@ -4801,10 +4793,14 @@ function App() {
     const renagMs = (overdueCfg.thresholdMinutes || 60) * 60000;
     return out.filter(n => {
       if (n.update) return true;
+      // Overdue is the exception: dismissing it stops the nag PERMANENTLY (no
+      // re-nag), persisted in settings.dismissedOverdueIds keyed to the schedule
+      // date so a reschedule re-arms it. alert/update re-nag is unchanged.
+      if (n.kind === 'overdue') return !isOverdueDismissed(dismissedOverdueIds, n.id, n.schedDate);
       const readAt = notifReads[n.id];
       return !readAt || (now - readAt) >= renagMs;
     });
-  }, [orders, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg]);
+  }, [orders, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
   // Click a notification: WO items open the command center; capture items open
   // their review modal; the update item installs.
   const onNotifClick = React.useCallback((n) => {
@@ -4812,14 +4808,16 @@ function App() {
     // Mark read so it drops off the counter. Capture events are removed outright
     // (their payload is a point-in-time snapshot — avoid acting on stale data).
     if (n.id) setNotifReads(r => ({ ...r, [n.id]: Date.now() }));
+    dismissOverdue([n]);
     if (String(n.id).startsWith('ev-')) dismissNotif(n.id);
     if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
     else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
     else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
     else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
-  }, [openWO, dismissNotif]);
+  }, [openWO, dismissNotif, dismissOverdue]);
   // Mark all currently-shown notifications read (counter -> 0). Capture events
-  // are cleared entirely; derived notifs re-surface after the re-nag window.
+  // are cleared entirely; alerts re-surface after the re-nag window; overdue
+  // dismissals are permanent (persisted) until the WO is rescheduled.
   const markAllNotifsRead = React.useCallback(() => {
     const now = Date.now();
     setNotifReads(r => {
@@ -4827,8 +4825,9 @@ function App() {
       for (const n of notifications) next[n.id] = now;
       return next;
     });
+    dismissOverdue(notifications);
     setNotifEvents([]);
-  }, [notifications]);
+  }, [notifications, dismissOverdue]);
 
   // Push tray state whenever relevant values change.
   React.useEffect(() => {
@@ -4915,7 +4914,7 @@ function App() {
   }, [selectedIds, deleteOrdersHard, toast, clearSelection]);
 
   // change11: bulk send-to-invoice only applies to Complete tab. Filters
-  // selection accordingly. Also auto-unschedules each moved WO.
+  // selection accordingly. Schedule is retained (S1).
   const bulkSendToInvoice = React.useCallback(() => {
     const ts = Date.now();
     const targets = orders.filter(o => selectedIds.has(o.id) && o.tab === 'complete');
@@ -4926,7 +4925,6 @@ function App() {
       o => selectedIds.has(o.id) && o.tab === 'complete',
       cur => {
         const next = { ...cur, tab: 'sent' };
-        if (next.schedule) delete next.schedule;
         next.history = [...(cur.history || []), { ts, action: 'sent to billing queue (bulk)', detail: '' }];
         return next;
       }
@@ -4944,7 +4942,6 @@ function App() {
       o => selectedIds.has(o.id) && (o.tab || 'active') === 'active',
       cur => {
         const next = { ...cur, tab: 'complete' };
-        if (next.schedule) delete next.schedule;
         next.history = [...(cur.history || []), { ts, action: 'marked complete (bulk)', detail: '' }];
         return next;
       }
@@ -4972,7 +4969,6 @@ function App() {
             prevStatus: cur.prevStatus || status,
             status: 'Complete - Pending Approval',
           };
-          if (next.schedule) delete next.schedule;
           next.history = [...(cur.history || []),
             { ts, action: 'status', detail: (cur.status || '') + ' → ' + status },
             { ts, action: 'auto-flipped to Complete', detail: 'bulk trigger status=' + status }];
@@ -4980,20 +4976,17 @@ function App() {
         }
         const next = { ...cur, status,
           history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] };
-        // `visited` tag OR "Job Complete" status clears the schedule (mirrors the
-        // single-WO path; round5 A1 / #8).
-        if (clearsScheduleOnSet(status, statusTags) && next.schedule) delete next.schedule;
         return next;
       }
     );
     toast(ids.size + ' set to ' + status);
     clearSelection();
-  }, [selectedIds, batchUpdate, toast, clearSelection, statusTags]);
+  }, [selectedIds, batchUpdate, toast, clearSelection]);
 
   const VIEW_BUILDERS = {
-    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases) }),
-    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases) }),
-    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases) }),
+    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases, statusTags) }),
+    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases, statusTags) }),
+    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases, statusTags) }),
   };
 
   const activePresetId = (typeof currentView === 'string' && currentView.startsWith('sv:')) ? currentView.slice(3) : null;
@@ -5017,7 +5010,7 @@ function App() {
     // Curated, manually-ordered list: resolve woIds against live (non-trashed)
     // orders, preserve the inbox's order, drop ids that no longer resolve.
     const byId = new Map(orders.filter(o => !o.deleted).map(o => [o.id, o]));
-    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(toDisplayRow);
+    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(o => toDisplayRow(o, statusTags));
     viewData = {
       title: activeInbox.name || 'Inbox',
       total: rows.length,
@@ -5578,7 +5571,6 @@ function App() {
         patch.tab = 'complete';
         patch.prevStatus = cur.prevStatus || cur.status || 'Open';
         patch.status = 'Complete - Pending Approval';
-        if (patch.schedule) delete patch.schedule;
         hist.push({ ts: Date.now(), action: 'auto-flipped to Complete', detail: 'auto: Pending Validation' });
       }
       patch.history = hist;
@@ -5948,18 +5940,12 @@ function App() {
               prevStatus: cur.prevStatus || payload,
               status: 'Complete - Pending Approval',
             };
-            if (next.schedule) delete next.schedule;
             next.history = [...(cur.history || []),
               histEntry('status', (cur.status || '') + ' → ' + payload),
               histEntry('auto-flipped to Complete', 'trigger status=' + payload)];
             return next;
           }
           const next = { ...cur, status: payload };
-          // `visited` tag OR a "Job Complete" status clears the schedule (tech
-          // finished at the site). Same data effect as completion, but the WO
-          // stays on its tab (round5 A1 / #8 — batched "Job Complete - Enter Bid"
-          // is not a completion status yet still means the visit is done).
-          if (clearsScheduleOnSet(payload, statusTags) && next.schedule) delete next.schedule;
           next.history = [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)];
           return next;
         });
@@ -6677,6 +6663,7 @@ function App() {
               geocache={geocache}
               techJobTypes={techJobTypes}
               routingWeights={routingWeights}
+              statusTags={statusTags}
               onPick={(id) => setScheduleTarget(id)}
               onSubmit={(tech, sched) => { setSchedule(scheduleTarget, sched, tech); setScheduleTarget(null); toast('Scheduled ' + scheduleTarget); }}
               onUnschedule={() => { setSchedule(scheduleTarget, null); setScheduleTarget(null); toast('Unscheduled ' + scheduleTarget); }}

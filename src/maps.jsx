@@ -10,7 +10,7 @@ import {
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
-import { orderNumberMatches, phoneMatches } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches, isLiveSchedule } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
@@ -23,7 +23,9 @@ import { useTypeToSearch } from './search-hook.js';
 export function woMarkerIcon(L, o, g, cfg) {
   const { statusColors, statusTags, typeColors, markerColors, overdueCfg } = cfg;
   const suspect = !!(g && g.suspect);
-  const isScheduled = !!(o.schedule && o.schedule.date);
+  // Retention (S1): schedules survive completion, so gold/overdue must gate on
+  // live-and-today-or-later, not on "has a schedule".
+  const isScheduled = isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr();
   const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
   const tag = statusTags[o.status];
   const statusPill = statusColors && statusColors[o.status];
@@ -458,7 +460,10 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       // Otherwise: popup was previously dismissed by the user. Leave it
       // closed until they pick a different WO.
     }
-  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors, techColors, routeDay, routeStops]);
+    // defaultView/markerColors/typeColors are read in the body but were missing
+    // here, so those settings never repainted. All three are stable identities
+    // (memo/settings object), so adding them costs no extra runs.
+  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors, techColors, routeDay, routeStops, defaultView, markerColors, typeColors]);
 
   // Pan to the selected WO when selection changes. Does NOT touch the
   // popup - that is handled by the render-markers effect above so a
@@ -832,7 +837,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
               {o && item('View notes', () => setNotesWO(o.id))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
-              {onWoAction && item(o && o.schedule && o.schedule.date ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
+              {onWoAction && item(o && isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr() ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
               {onWoAction && statuses && statuses.length > 0 && (
                 <div onClick={(e) => { e.stopPropagation(); setCtxStatus(true); }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
