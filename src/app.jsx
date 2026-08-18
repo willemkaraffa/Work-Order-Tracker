@@ -3814,9 +3814,12 @@ function App() {
 
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
          addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
-         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox] = useWorkOrders();
+         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
+         addEntry, updateEntry, deleteEntry] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
+  // Schedule entries (tasks / events / reminders) — Schedule module only.
+  const entries = data?.entries || [];
   // search-ux Part 4: jump to a WO in whatever tab/module it lives (used by the
   // "In other tabs" search list). active/complete/trash -> Work Orders module;
   // sent -> Invoices module. Select + scroll, no forced command center.
@@ -6453,6 +6456,10 @@ function App() {
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
               onOpenWO={openWO}
+              entries={entries}
+              onAddEntry={addEntry}
+              onUpdateEntry={updateEntry}
+              onDeleteEntry={deleteEntry}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>

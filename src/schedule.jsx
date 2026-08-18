@@ -4,11 +4,14 @@
 // bindings; app.jsx <-> schedule.jsx cycle is eval-safe).
 import React from 'react';
 import { statusColor } from './constants.js';
-import { isLiveSchedule, weekDays, monthGrid, groupByScheduleDate } from './orders-logic.js';
-import { TypeIcon, Seg } from './primitives.jsx';
+import {
+  isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
+  groupEntriesByDate, backlogEntries,
+} from './orders-logic.js';
+import { TypeIcon, Seg, ActionBtn } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG,
-  navBtnStyle, HeaderChips,
+  navBtnStyle, HeaderChips, Modal,
   itinTodayStr, itinShiftDay, itinSlots, itinSnapSlot, itinFmtTime,
   itinDayLabel, itinDayMonth,
 } from './app.jsx';
@@ -112,13 +115,95 @@ export function DayTimeline({ wo, activeOrders, statusColors, statusTags, onOpen
   );
 }
 
+// Create / edit one schedule entry. `entry` is either an existing stored entry
+// or a draft ({ kind, date }) minted by the caller -- an id means edit, no id
+// means create. Field rules (undated tasks only, time format) are enforced by
+// normalizeEntry on the way into the store, not here; this form only collects.
+function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
+  const [kind, setKind] = React.useState(entry.kind || 'task');
+  const [title, setTitle] = React.useState(entry.title || '');
+  const [body, setBody] = React.useState(entry.body || '');
+  const [date, setDate] = React.useState(entry.date || '');
+  const [start, setStart] = React.useState(entry.start || '');
+  const [end, setEnd] = React.useState(entry.end || '');
+  const [tech, setTech] = React.useState(entry.tech || '');
+  const [woId, setWoId] = React.useState(entry.woId || '');
+  const isEdit = !!entry.id;
+
+  const fld = {
+    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 14, boxSizing: 'border-box',
+  };
+  const lbl = { fontSize: 12, color: 'var(--text-3)' };
+  // An event occupies a day, so it cannot be saved undated; the store would
+  // default it to today anyway. Say so instead of silently moving it.
+  const dateMissing = kind !== 'task' && !date;
+  const canSave = !!title.trim() && !dateMissing;
+
+  return (
+    <Modal open onClose={onClose} title={isEdit ? 'Edit entry' : 'New entry'} width={460}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Seg
+          options={[{ value: 'task', label: 'Task' }, { value: 'event', label: 'Event' }]}
+          value={kind === 'event' ? 'event' : 'task'}
+          onChange={setKind}
+        />
+        <label style={lbl}>Title
+          <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus style={fld} />
+        </label>
+        <label style={lbl}>{kind === 'task' ? 'Due date (blank = backlog)' : 'Day'}
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={fld} />
+        </label>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <label style={{ ...lbl, flex: 1 }}>Start
+            <input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={fld} />
+          </label>
+          <label style={{ ...lbl, flex: 1 }}>End
+            <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={fld} />
+          </label>
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <label style={{ ...lbl, flex: 1 }}>Tech
+            <select value={tech} onChange={(e) => setTech(e.target.value)} style={fld}>
+              <option value="">(anyone)</option>
+              {(techs || []).map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+          <label style={{ ...lbl, flex: 1 }}>Work order
+            <input value={woId} onChange={(e) => setWoId(e.target.value)} list="entry-wo-ids" placeholder="WO #" style={fld} />
+            <datalist id="entry-wo-ids">
+              {(orders || []).slice(0, 400).map(o => <option key={o.id} value={o.id} />)}
+            </datalist>
+          </label>
+        </div>
+        <label style={lbl}>Notes
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={3} style={{ ...fld, resize: 'vertical' }} />
+        </label>
+        {dateMissing && <div style={{ fontSize: 12, color: 'var(--danger, #d9534f)' }}>An event needs a day.</div>}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          {isEdit && <ActionBtn onClick={() => onDelete(entry.id)}>Delete</ActionBtn>}
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+          <ActionBtn primary disabled={!canSave}
+            onClick={() => onSave({ kind, title, body, date: date || null, start: start || null, end: end || null, tech: tech || null, woId: woId || null })}>
+            Save
+          </ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // Read-only calendar over every WO that carries a schedule (NOT just active
 // ones: S1 retention keeps schedules on completed WOs, so past days still read
 // as history -- not-live jobs just render muted). Day / Week / Month; week is
 // seven stacked day columns, not an hour grid. No drag, no drop, no inline
 // reschedule: clicking a card opens the WO command center over this module.
-export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO }) {
+export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO,
+  entries, onAddEntry, onUpdateEntry, onDeleteEntry }) {
   const [view, setView] = React.useState('week');
+  // The entry being created or edited, or null. A draft (no id) means create.
+  const [editing, setEditing] = React.useState(null);
   const [anchor, setAnchor] = React.useState(itinTodayStr());
   const [highlightId, setHighlightId] = React.useState(null);
   const highlightRef = React.useRef(null);
@@ -162,8 +247,29 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     return isAll ? list : list.filter(o => (o.tech || '') === tech);
   }, [byDate, isAll, tech]);
 
+  const byEntryDate = React.useMemo(() => groupEntriesByDate(entries), [entries]);
+  // Entries with no tech are admin work that belongs to nobody in particular,
+  // so they stay visible under every tech filter; a tech-tagged entry hides
+  // like a WO does.
+  const entriesOn = React.useCallback((d) => {
+    const list = byEntryDate[d] || [];
+    return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
+  }, [byEntryDate, isAll, tech]);
+  const backlog = React.useMemo(() => {
+    const list = backlogEntries(entries);
+    return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
+  }, [entries, isAll, tech]);
+
+  const saveEntry = (fields) => {
+    if (editing && editing.id) onUpdateEntry && onUpdateEntry(editing.id, fields);
+    else onAddEntry && onAddEntry(fields);
+    setEditing(null);
+  };
+  const removeEntry = (id) => { if (onDeleteEntry) onDeleteEntry(id); setEditing(null); };
+
   const days = view === 'day' ? [anchor] : view === 'week' ? weekDays(anchor) : monthGrid(anchor);
   const total = days.reduce((n, d) => n + jobsOn(d).length, 0);
+  const entryTotal = days.reduce((n, d) => n + entriesOn(d).length, 0);
 
   // prev/next steps one day, one week or one month depending on the view.
   const step = (dir) => {
@@ -201,7 +307,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     const { city } = splitAddress(o);
     return (
       <div key={o.id} ref={isHi ? highlightRef : undefined}
-        onClick={() => onOpenWO && onOpenWO(o.id)}
+        onClick={(ev) => { ev.stopPropagation(); if (onOpenWO) onOpenWO(o.id); }}
         title={o.id + (city ? ' - ' + city : '') + (o.tech ? ' - ' + o.tech : '')}
         style={{
           border: '1px solid var(--border-1)', borderLeft: '4px solid ' + statusColor(o.status, statusColors),
@@ -231,6 +337,34 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     );
   };
 
+  // Entry chip. Same "plain function returning JSX" rule as `card` above: not a
+  // component defined in render. Clicking the row opens the editor; clicking a
+  // task's checkbox only toggles done (stopPropagation), it must not open it.
+  const entryChip = (e, compact) => {
+    const isTask = e.kind === 'task';
+    return (
+      <div key={e.id} onClick={(ev) => { ev.stopPropagation(); setEditing(e); }}
+        title={e.title + (e.tech ? ' - ' + e.tech : '') + (e.woId ? ' - ' + e.woId : '')}
+        style={{
+          border: '1px dashed var(--border-2)', borderLeft: '4px solid ' + (isTask ? 'var(--text-3)' : 'var(--accent)'),
+          borderRadius: 6, background: 'var(--bg-surface-2, var(--bg-surface))', cursor: 'pointer',
+          padding: compact ? '2px 4px' : '4px 7px', fontSize: compact ? 11 : 12,
+          display: 'flex', gap: 5, alignItems: 'center', whiteSpace: 'nowrap', overflow: 'hidden',
+          opacity: e.done ? 0.5 : 1,
+        }}>
+        {isTask && (
+          <input type="checkbox" checked={!!e.done} onClick={(ev) => ev.stopPropagation()}
+            onChange={() => onUpdateEntry && onUpdateEntry(e.id, { done: !e.done })}
+            style={{ margin: 0, cursor: 'pointer', flexShrink: 0 }} />
+        )}
+        {e.start && <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{itinFmtTime(e.start)}</span>}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: e.done ? 'line-through' : 'none' }}>
+          {e.title || '(untitled)'}
+        </span>
+      </div>
+    );
+  };
+
   const emptyLine = <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No jobs scheduled</div>;
 
   return (
@@ -246,6 +380,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           <button onClick={() => step(1)} style={navBtnStyle}>&rsaquo;</button>
           <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
             {rangeLabel} - {isAll ? 'All techs' : tech} - {total} job{total === 1 ? '' : 's'}
+            {entryTotal ? ' - ' + entryTotal + (entryTotal === 1 ? ' entry' : ' entries') : ''}
           </div>
           <Seg
             options={[{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }]}
@@ -259,19 +394,24 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
             <option value="ALL">All techs</option>
             {techs.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
+          <button onClick={() => setEditing({ kind: 'task', date: view === 'day' ? anchor : '' })}
+            title="Create a task or event" style={navBtnStyle}>+ New</button>
           <div style={{ flex: 1 }} />
           <HeaderChips />
         </div>
       </div>
 
-      {/* Body */}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12 }}>
+      {/* Body: calendar on the left, the undated-task backlog pinned right. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+      <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 12 }}>
         {view === 'day' && (
           <div style={{ border: '1px solid ' + (anchor === today ? 'var(--accent)' : 'var(--border-1)'),
             borderRadius: 8, background: 'var(--bg-surface)' }}>
             <div style={colHeadStyle(anchor)}>{itinDayLabel(anchor)}</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: 6 }}>
-              {jobsOn(anchor).length ? jobsOn(anchor).map(o => card(o, false)) : emptyLine}
+              {entriesOn(anchor).map(e => entryChip(e, false))}
+              {jobsOn(anchor).map(o => card(o, false))}
+              {!jobsOn(anchor).length && !entriesOn(anchor).length && emptyLine}
             </div>
           </div>
         )}
@@ -286,11 +426,12 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
               }}>
                 <div style={colHeadStyle(d)}>{weekdayOf(d)} {itinDayMonth(d)}</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 5 }}>
+                  {entriesOn(d).map(e => entryChip(e, false))}
                   {jobsOn(d).map(o => card(o, false))}
                 </div>
               </div>
             ))}
-            {total === 0 && <div style={{ gridColumn: '1 / -1' }}>{emptyLine}</div>}
+            {total === 0 && entryTotal === 0 && <div style={{ gridColumn: '1 / -1' }}>{emptyLine}</div>}
           </div>
         )}
 
@@ -298,6 +439,9 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 4 }}>
             {days.map(d => {
               const jobs = jobsOn(d);
+              const ents = entriesOn(d);
+              // Cell is short: at most 2 entries + 3 jobs, the rest rolls into "+N more".
+              const hidden = Math.max(0, ents.length - 2) + Math.max(0, jobs.length - 3);
               const inMonth = d.slice(0, 7) === anchor.slice(0, 7);
               return (
                 <div key={d} onClick={() => { setAnchor(d); setView('day'); }} style={{
@@ -309,9 +453,10 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   <div style={{ fontSize: 11, fontWeight: 700, color: d === today ? 'var(--accent)' : 'var(--text-3)' }}>
                     {Number(d.slice(8))}
                   </div>
+                  {ents.slice(0, 2).map(e => entryChip(e, true))}
                   {jobs.slice(0, 3).map(o => card(o, true))}
-                  {jobs.length > 3 && (
-                    <div style={{ fontSize: 10, color: 'var(--text-3)' }}>+{jobs.length - 3} more</div>
+                  {hidden > 0 && (
+                    <div style={{ fontSize: 10, color: 'var(--text-3)' }}>+{hidden} more</div>
                   )}
                 </div>
               );
@@ -319,6 +464,38 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           </div>
         )}
       </div>
+
+      {/* Backlog: undated tasks. Dating one (in the editor) moves it onto the
+          calendar; there is no drag target, by design. */}
+      <aside style={{ width: 240, flexShrink: 0, borderLeft: '1px solid var(--border-1)',
+        display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: '1px solid var(--border-1)' }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+            Backlog
+          </span>
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{backlog.length}</span>
+          <div style={{ flex: 1 }} />
+          <button onClick={() => setEditing({ kind: 'task', date: '' })} title="Add an undated task"
+            style={{ ...navBtnStyle, padding: '2px 8px' }}>+</button>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {backlog.length
+            ? backlog.map(e => entryChip(e, false))
+            : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>No undated tasks</div>}
+        </div>
+      </aside>
+      </div>
+
+      {editing && (
+        <EntryModal
+          entry={editing}
+          techs={techs}
+          orders={orders}
+          onSave={saveEntry}
+          onDelete={removeEntry}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }

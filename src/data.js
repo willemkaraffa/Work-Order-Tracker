@@ -9,7 +9,7 @@ import {
   DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, isCompletionStatusName,
 } from './constants.js';
 import { formatPhone, composeNotes } from './utils.js';
-import { isTrashedReimport } from './orders-logic.js';
+import { isTrashedReimport, normalizeEntry } from './orders-logic.js';
 import { nextWOId, DEFAULT_STATUSES } from './app.jsx';
 
 // Returns [data, updateOrder]; data is null while loading.
@@ -22,7 +22,7 @@ export function useWorkOrders() {
     let cancelled = false;
     (async () => {
       const fresh = () => ({
-        orders: [], presets: [], inboxes: [],
+        orders: [], presets: [], inboxes: [], entries: [],
         statuses: DEFAULT_STATUSES.slice(),
         phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
@@ -55,6 +55,9 @@ export function useWorkOrders() {
         }
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
         if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
+        // Schedule entries (tasks / events / reminders). Absent on every pre-S3
+        // blob; no migration, they simply start empty.
+        if (!Array.isArray(parsed.entries))  parsed.entries  = [];
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         // change11: do NOT strip the legacy `complete` flag here — the
@@ -253,6 +256,34 @@ export function useWorkOrders() {
     const cur = dataRef.current;
     if (!cur) return;
     persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, woIds } : b));
+  }, []);
+
+  // --- Schedule entries (tasks / events / reminders) ---
+  // Same shape as the inbox mutators: one persist helper, one write path.
+  // normalizeEntry (orders-logic) owns the field rules, so a bad form submit
+  // cannot store an undated event or an undefined field.
+  const persistEntries = (cur, entries) => {
+    const next = { ...cur, entries };
+    dataRef.current = next; setData(next);
+    if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
+  };
+  const addEntry = React.useCallback((record) => {
+    const cur = dataRef.current;
+    if (!cur) return null;
+    const id = 'e-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    persistEntries(cur, [...(cur.entries || []), normalizeEntry(record, id)]);
+    return id;
+  }, []);
+  const updateEntry = React.useCallback((id, patch) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistEntries(cur, (cur.entries || []).map(e =>
+      e.id === id ? normalizeEntry({ ...e, ...patch }, id) : e));
+  }, []);
+  const deleteEntry = React.useCallback((id) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistEntries(cur, (cur.entries || []).filter(e => e.id !== id));
   }, []);
 
   const deleteOrdersHard = React.useCallback((ids) => {
@@ -466,5 +497,6 @@ export function useWorkOrders() {
   }, []);
 
   return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
-          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox];
+          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
+          addEntry, updateEntry, deleteEntry];
 }

@@ -26,7 +26,8 @@ const { JSDOM } = require('jsdom');
 const { loadEsm } = require('./_load.js');
 
 const ROOT = path.resolve(__dirname, '..');
-const { weekStart, weekDays, monthGrid, groupByScheduleDate, itinShiftDay, itinTodayStr } = loadEsm('src/orders-logic.js');
+const { weekStart, weekDays, monthGrid, groupByScheduleDate, itinShiftDay, itinTodayStr,
+        normalizeEntry, groupEntriesByDate, backlogEntries } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -173,6 +174,76 @@ test('groupByScheduleDate: keeps completed WOs (S1 retention) so past days show 
 test('groupByScheduleDate: empty / missing input is an empty map', () => {
   assert.deepStrictEqual(groupByScheduleDate([]), {});
   assert.deepStrictEqual(groupByScheduleDate(undefined), {});
+});
+
+// --- Schedule entries: normalizeEntry / grouping / backlog (S3) -------------
+
+test('normalizeEntry: defaults an unknown kind to task and keeps it undated', () => {
+  const e = normalizeEntry({ kind: 'bogus', title: '  Order parts  ' }, 'e-1', 1000);
+  assert.strictEqual(e.kind, 'task');
+  assert.strictEqual(e.title, 'Order parts');
+  assert.strictEqual(e.date, null);
+  assert.strictEqual(e.id, 'e-1');
+  assert.strictEqual(e.created, 1000);
+  assert.strictEqual(e.updated, 1000);
+});
+
+test('normalizeEntry: an event is never undated (falls back to today)', () => {
+  const e = normalizeEntry({ kind: 'event', title: 'Meeting' }, 'e-2', 1000);
+  assert.strictEqual(e.date, itinTodayStr());
+});
+
+test('normalizeEntry: rejects a malformed date and pads a short time', () => {
+  const e = normalizeEntry({ title: 'x', date: '8/18/2026', start: '9:30', end: 'nope' }, 'e-3', 1);
+  assert.strictEqual(e.date, null);
+  assert.strictEqual(e.start, '09:30');
+  assert.strictEqual(e.end, null);
+});
+
+test('normalizeEntry: only a task can be done; created survives an edit, updated moves', () => {
+  const first = normalizeEntry({ kind: 'task', title: 't', done: true }, 'e-4', 1000);
+  assert.strictEqual(first.done, true);
+  const edited = normalizeEntry({ ...first, kind: 'event', date: '2026-08-18' }, 'e-4', 2000);
+  assert.strictEqual(edited.done, false);
+  assert.strictEqual(edited.created, 1000);
+  assert.strictEqual(edited.updated, 2000);
+});
+
+test('normalizeEntry: absent optional links are null, never undefined', () => {
+  const e = normalizeEntry({ title: 't' }, 'e-5', 1);
+  for (const k of ['date', 'start', 'end', 'remindAt', 'woId', 'tech']) {
+    assert.strictEqual(e[k], null, k + ' should be null');
+  }
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(e)), e); // stable round-trip
+});
+
+test('groupEntriesByDate: buckets dated entries, timed before untimed', () => {
+  const g = groupEntriesByDate([
+    { id: 'b', date: '2026-08-18', start: null, title: 'zz' },
+    { id: 'a', date: '2026-08-18', start: '13:00', title: 'aa' },
+    { id: 'c', date: '2026-08-18', start: '08:00', title: 'cc' },
+    { id: 'd', date: '2026-08-19', start: '09:00', title: 'dd' },
+    { id: 'e', date: null, title: 'backlog' },
+  ]);
+  assert.deepStrictEqual(g['2026-08-18'].map(e => e.id), ['c', 'a', 'b']);
+  assert.deepStrictEqual(g['2026-08-19'].map(e => e.id), ['d']);
+  assert.deepStrictEqual(Object.keys(g).sort(), ['2026-08-18', '2026-08-19']);
+});
+
+test('groupEntriesByDate: empty / missing input is an empty map', () => {
+  assert.deepStrictEqual(groupEntriesByDate([]), {});
+  assert.deepStrictEqual(groupEntriesByDate(undefined), {});
+});
+
+test('backlogEntries: undated tasks only, open before done, oldest first', () => {
+  const list = backlogEntries([
+    { id: 'done-old', kind: 'task', date: null, done: true, created: 1 },
+    { id: 'open-new', kind: 'task', date: null, done: false, created: 3 },
+    { id: 'open-old', kind: 'task', date: null, done: false, created: 2 },
+    { id: 'dated', kind: 'task', date: '2026-08-18', done: false, created: 4 },
+    { id: 'event', kind: 'event', date: null, created: 5 },
+  ]);
+  assert.deepStrictEqual(list.map(e => e.id), ['open-old', 'open-new', 'done-old']);
 });
 
 // ─── Mounted ScheduleModule (jsdom) ──────────────────────────────────────────
@@ -348,10 +419,120 @@ async function mountedChecks() {
   root.unmount();
 }
 
+// --- Mounted entries: calendar chips, backlog, checkbox, editor (S3) --------
+// Own fixture and own mount: the section above asserts exact card counts, and
+// entry chips share the div[title] selector with WO cards.
+
+async function entryChecks() {
+  const dom = freshDom();
+  const { React, createRoot, ScheduleModule } = loadMountBridge();
+
+  const today = itinTodayStr();
+  const entries = [
+    { id: 'e-task', kind: 'task', title: 'Order parts', date: today, start: '08:00', done: false, tech: null, created: 1 },
+    { id: 'e-event', kind: 'event', title: 'Team meeting', date: today, start: '12:00', done: false, tech: 'Bob', created: 2 },
+    { id: 'e-back', kind: 'task', title: 'Call vendor', date: null, done: false, tech: null, created: 3 },
+    { id: 'e-back-done', kind: 'task', title: 'File permit', date: null, done: true, tech: null, created: 4 },
+  ];
+  const orders = [
+    { id: 'WO-LIVE-A', city: 'Springfield', tab: 'active', status: 'Scheduled', tech: 'Alice', type: 'Plumbing',
+      address: '1 Main St, Springfield, IL 62701', schedule: { date: today, start: '09:00' } },
+  ];
+
+  const added = [], updated = [], deleted = [];
+  let tech = 'ALL';
+  const container = dom.window.document.getElementById('probe');
+  const root = createRoot(container);
+  const render = () => root.render(React.createElement(ScheduleModule, {
+    orders, techs: ['Alice', 'Bob'], statusColors: {}, statusTags: {},
+    tech, setTech: (t) => { tech = t; render(); },
+    focus: null, onClearFocus: () => {}, onOpenWO: () => {},
+    entries,
+    onAddEntry: (rec) => { added.push(rec); },
+    onUpdateEntry: (id, patch) => { updated.push([id, patch]); },
+    onDeleteEntry: (id) => { deleted.push(id); },
+  }));
+  const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  const byLabel = (l) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === l);
+  const chip = (t) => Array.from(container.querySelectorAll('div[title]'))
+    .find(d => (d.getAttribute('title') || '').indexOf(t) === 0);
+  // React installs its own value setter on the input node; assigning .value
+  // directly never reaches onChange. Call the prototype setter, then fire input.
+  const typeInto = (el, v) => {
+    const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value');
+    desc.set.call(el, v);
+    el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
+
+  render(); await flush();
+
+  // [1] dated entries render on the calendar
+  ok('entries: dated task renders on the calendar', !!chip('Order parts'));
+  ok('entries: event renders on the calendar', !!chip('Team meeting'));
+  ok('entries: header counts the dated entries', container.textContent.indexOf('2 entries') !== -1,
+    container.textContent.slice(0, 300));
+
+  // [2] backlog holds the undated tasks
+  const backlogChips = Array.from(container.querySelectorAll('div[title]'))
+    .map(d => d.getAttribute('title'))
+    .filter(t => t === 'Call vendor' || t === 'File permit');
+  ok('entries: both undated tasks are in the backlog', backlogChips.length === 2, backlogChips.join(','));
+  ok('entries: done backlog task is dimmed', chip('File permit') && chip('File permit').style.opacity === '0.5',
+    chip('File permit') && chip('File permit').style.opacity);
+
+  // [3] checkbox toggles done through the store callback, and does NOT open the editor
+  const cb = chip('Order parts').querySelector('input[type="checkbox"]');
+  cb.click(); await flush();
+  ok('entries: checkbox calls onUpdateEntry with the flipped done flag',
+    updated.length === 1 && updated[0][0] === 'e-task' && updated[0][1].done === true, JSON.stringify(updated));
+  ok('entries: checkbox click did not open the editor', container.textContent.indexOf('Edit entry') === -1);
+
+  // [4] clicking the chip body opens the editor, prefilled
+  click(chip('Team meeting')); await flush();
+  ok('entries: chip click opens the editor', container.textContent.indexOf('Edit entry') !== -1);
+  ok('entries: editor is prefilled with the entry title',
+    !!Array.from(container.querySelectorAll('input')).find(i => i.value === 'Team meeting'));
+  click(byLabel('Cancel')); await flush();
+  ok('entries: cancel closes the editor', container.textContent.indexOf('Edit entry') === -1);
+
+  // [5] tech filter: tagged entry hides, untagged stays
+  const sel = container.querySelector('select');
+  sel.value = 'Alice';
+  sel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await flush();
+  ok('entries: an event tagged to another tech is filtered out', !chip('Team meeting'));
+  ok('entries: untagged entry survives the tech filter', !!chip('Order parts'));
+  ok('entries: untagged backlog task survives the tech filter', !!chip('Call vendor'));
+  sel.value = 'ALL';
+  sel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await flush();
+
+  // [6] + New creates through onAddEntry
+  click(byLabel('+ New')); await flush();
+  ok('entries: + New opens the create form', container.textContent.indexOf('New entry') !== -1);
+  const blank = Array.from(container.querySelectorAll('input')).find(i => !i.type || i.type === 'text');
+  typeInto(blank, 'Invoice run'); await flush();
+  click(byLabel('Save')); await flush();
+  ok('entries: Save calls onAddEntry with the typed fields',
+    added.length === 1 && added[0].title === 'Invoice run' && added[0].kind === 'task' && added[0].date === null,
+    JSON.stringify(added));
+  ok('entries: the form closed after saving', container.textContent.indexOf('New entry') === -1);
+
+  // [7] delete from the editor
+  click(chip('Call vendor')); await flush();
+  click(byLabel('Delete')); await flush();
+  ok('entries: Delete calls onDeleteEntry with the id', deleted.length === 1 && deleted[0] === 'e-back',
+    JSON.stringify(deleted));
+
+  root.unmount();
+}
+
 // ─── Report ──────────────────────────────────────────────────────────────────
 
 (async () => {
   await mountedChecks();
+  await entryChecks();
   console.log('schedule calendar math + mounted module');
   console.log('=======================================');
   let pass = 0, fail = 0;

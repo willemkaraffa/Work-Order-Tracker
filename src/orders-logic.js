@@ -429,6 +429,71 @@ export function groupByScheduleDate(orders) {
   return out;
 }
 
+// --- Schedule entries (S3) --------------------------------------------------
+// User-created calendar items that are NOT work orders: tasks (checkbox,
+// optional date -- undated ones sit in the backlog), events (a titled block of
+// time) and reminders (S4, a task with a fire time). ONE array with a `kind`
+// field, stored inside wo_data.entries, so persistence / backup / export stay
+// single-path. WO schedules are untouched by all of this.
+export const ENTRY_KINDS = ['task', 'event', 'reminder'];
+
+// Coerce anything (a form submit, a hand-edited blob) into a storable entry.
+// Absent fields land as null, never undefined, so the JSON round-trip is
+// stable. `now` is injectable for tests. An event/reminder must be dated (it
+// occupies a day); only a task may be undated, which is what puts it in the
+// backlog.
+export function normalizeEntry(raw, id, now) {
+  const e = raw || {};
+  const ts = now || Date.now();
+  const kind = ENTRY_KINDS.indexOf(e.kind) !== -1 ? e.kind : 'task';
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.date || '')) ? e.date : null;
+  const time = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '')) ? String(v).padStart(5, '0') : null);
+  return {
+    id: id || e.id || null,
+    kind,
+    title: String(e.title || '').trim(),
+    body: e.body ? String(e.body) : '',
+    date: kind === 'task' ? day : (day || itinTodayStr()),
+    start: time(e.start),
+    end: time(e.end),
+    remindAt: typeof e.remindAt === 'number' ? e.remindAt : null,
+    done: kind === 'task' ? !!e.done : false,
+    woId: e.woId ? String(e.woId).trim() : null,
+    tech: e.tech ? String(e.tech) : null,
+    created: typeof e.created === 'number' ? e.created : ts,
+    updated: ts,
+  };
+}
+
+// Within one day: timed items first in clock order, untimed after, then title.
+function entryDaySort(a, b) {
+  return String(a.start || '99:99').localeCompare(String(b.start || '99:99'))
+    || String(a.title || '').localeCompare(String(b.title || ''))
+    || String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+// { 'YYYY-MM-DD': [entries] } for every dated entry. Mirrors
+// groupByScheduleDate so the calendar can zip the two maps per day.
+export function groupEntriesByDate(entries) {
+  const out = {};
+  for (const e of entries || []) {
+    if (!e || !e.date) continue;
+    (out[e.date] = out[e.date] || []).push(e);
+  }
+  for (const k of Object.keys(out)) out[k].sort(entryDaySort);
+  return out;
+}
+
+// Undated tasks, open ones first, oldest first within each group. Events and
+// reminders always carry a date, so they can never reach the backlog.
+export function backlogEntries(entries) {
+  return (entries || [])
+    .filter(e => e && e.kind === 'task' && !e.date)
+    .sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0)
+      || (a.created || 0) - (b.created || 0)
+      || String(a.id || '').localeCompare(String(b.id || '')));
+}
+
 // change11 self-healing reconciler (v6) — PURE core. The effect in app.jsx
 // gates it (settings flag), calls this, then writes the result + settings patch
 // + toast. Returns the reconciled orders plus per-pass counters.
