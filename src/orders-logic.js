@@ -376,6 +376,59 @@ export function itinTodayStr() {
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
 }
 
+// Shift 'YYYY-MM-DD' by delta days. Anchored at noon so a DST transition can
+// never push the result into the neighbouring day. Moved here from app.jsx
+// (re-exported there) so the calendar math below can reuse it without a cycle.
+export function itinShiftDay(dateStr, delta) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(y, mo - 1, d + delta, 12);
+  const p = (n) => String(n).padStart(2, '0');
+  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+}
+
+/* ---------- calendar ranges (Schedule module) ---------- */
+// All three build dates by day-stepping from a noon-anchored Date, so month and
+// year boundaries and DST are handled by the Date object, not by arithmetic here.
+
+// Sunday of the week containing dateStr.
+export function weekStart(dateStr) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  return itinShiftDay(dateStr, -new Date(y, mo - 1, d, 12).getDay());
+}
+
+// The 7 date strings of that week, Sunday first.
+export function weekDays(dateStr) {
+  const s = weekStart(dateStr);
+  return Array.from({ length: 7 }, (_, i) => itinShiftDay(s, i));
+}
+
+// 6x7 = 42 date strings starting at the Sunday of the week holding the 1st of
+// dateStr's month. Leading/trailing days from the adjacent months are included
+// (the view dims them).
+export function monthGrid(dateStr) {
+  const [y, mo] = String(dateStr).split('-').map(Number);
+  const first = y + '-' + String(mo).padStart(2, '0') + '-01';
+  const s = weekStart(first);
+  return Array.from({ length: 42 }, (_, i) => itinShiftDay(s, i));
+}
+
+// { 'YYYY-MM-DD': [orders] } for every scheduled, non-deleted WO. Buckets are
+// sorted by start time then id. Deliberately NOT filtered to active orders:
+// S1 retention keeps schedules on completed WOs so past days read as history.
+export function groupByScheduleDate(orders) {
+  const out = {};
+  for (const o of orders || []) {
+    if (!o || o.deleted || !o.schedule || !o.schedule.date) continue;
+    (out[o.schedule.date] = out[o.schedule.date] || []).push(o);
+  }
+  for (const k of Object.keys(out)) {
+    out[k].sort((a, b) =>
+      String(a.schedule.start || '').localeCompare(String(b.schedule.start || '')) ||
+      String(a.id).localeCompare(String(b.id)));
+  }
+  return out;
+}
+
 // change11 self-healing reconciler (v6) — PURE core. The effect in app.jsx
 // gates it (settings flag), calls this, then writes the result + settings patch
 // + toast. Returns the reconciled orders plus per-pass counters.

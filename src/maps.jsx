@@ -140,11 +140,11 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
   // ids the user has staged for a route. "Open in Google Maps" passes them as
   // waypoints to /maps/dir; origin defaults to the home address from settings.
   // State is session-local (does not persist) so it never blocks normal use.
-  // routeStops/setRouteStops are now App-owned props (shared with Itinerary).
+  // routeStops/setRouteStops are now App-owned props (shared with Schedule).
   // Route panel collapse: always visible at the panel bottom, collapsed by
   // default. Reuses the sidebar-section collapse store.
   const [routeOpen, toggleRoutePanel] = useCollapsedSection('maps-route', false);
-  // Target tech for "Send to Itinerary" (commits the staged route to a day).
+  // Target tech for "Send to Schedule" (commits the staged route to a day).
   const [sendTech, setSendTech] = React.useState('');
   const inRoute = React.useCallback((id) => routeStops.includes(id), [routeStops]);
   const toggleRoute = React.useCallback((id) => {
@@ -468,11 +468,19 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
   // Pan to the selected WO when selection changes. Does NOT touch the
   // popup - that is handled by the render-markers effect above so a
   // geocache update never resurrects a popup the user closed.
+  //
+  // geocache IS a dep here, on purpose: a WO can be selected BEFORE its address
+  // is geocoded (Jump to Map on a fresh import), and at that moment
+  // markerByIdRef has no marker for it, so the pan is skipped. Without geocache
+  // in the deps nothing ever retries and the selection silently never gets
+  // panned to. Re-running when the cache fills pans as soon as the marker exists.
+  // ACCEPTED TRADEOFF, do not "simplify" this back: an already-visible selection
+  // re-pans on every geocache update while background geocoding streams in.
   React.useEffect(() => {
     if (!selected || !mapRef.current) return;
     const m = markerByIdRef.current[selected];
     if (m) mapRef.current.panTo(m.getLatLng());
-  }, [selected]);
+  }, [selected, geocache]);
 
   // Geocoder lives at the App level (runs at startup + after imports). The
   // Maps module only reads the cache + progress here.
@@ -732,7 +740,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
                           background: 'transparent', color: 'var(--accent)',
                           fontFamily: 'inherit', fontSize: 13, fontWeight: 600,
                           cursor: tech ? 'pointer' : 'default', opacity: tech ? 1 : 0.5,
-                        }}>Send to Itinerary</button>
+                        }}>Send to Schedule</button>
                     </div>
                   );
                 })()}
@@ -844,7 +852,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   style={{ padding: '7px 12px', fontSize: 13, color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }}>Change status ▸</div>
               )}
-              {onWoAction && item('Jump to itinerary', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
+              {onWoAction && item('Jump to schedule', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />

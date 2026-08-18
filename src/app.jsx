@@ -12,9 +12,11 @@ import {
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   isLiveSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
+  itinTodayStr, itinShiftDay,
 } from './orders-logic.js';
-// Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
-export { DEFAULT_STATUSES };
+// Re-export so existing consumers (detail.jsx, data.js, maps.jsx, schedule.jsx)
+// keep importing these from here.
+export { DEFAULT_STATUSES, itinTodayStr, itinShiftDay };
 import {
   PhasesContext, usePhases, StatusColorsContext, useStatusColors,
   ToastContext, useToast, PMsContext, usePMs, ClearSearchKeyContext,
@@ -27,7 +29,7 @@ import {
 import { formatPhone, haversineKm, roadKm, composeNotes } from './utils.js';
 import { MODULE_GROUPS, MODULES, MODULE_ORDER, ModuleNavContext, NavWing, RAIL as NAV_RAIL } from './nav.jsx';
 import { MapsModule, MapInset } from './maps.jsx';
-import { ItineraryModule, DayTimeline } from './itinerary.jsx';
+import { ScheduleModule, DayTimeline } from './schedule.jsx';
 import { DetailPane } from './detail.jsx';
 import { ListPane } from './listpane.jsx';
 import { SettingsDrawer } from './settings.jsx';
@@ -429,8 +431,8 @@ export function sortRows(rows, sort, phaseStatuses) {
     }
     if (k === 'status') {
       // Ascending in settings/phase order (Open -> Closed) by default; dir flips it.
-      // Matches phase-grouping sort (:659) and Itinerary unscheduled pool (:5587)
-      // so all status-based sorts across the app agree on direction.
+      // Matches the phase-grouping sort so all status-based sorts across the app
+      // agree on direction.
       const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
       const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
       const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
@@ -589,7 +591,7 @@ const ROUTE_WEIGHT_MAP = { low: 0.33, med: 0.66, high: 1 };
 // the candidate pool, a geo lookup, techJobTypes + weights, returns ranked
 // arrays for the two tabs plus a skipped count (candidates with no geocode).
 //   anchorGeo = { lat, lon } | null ; geoOf(id) -> { lat, lon } | null
-//   scheduledIds = Set of WO ids already on the itinerary (excluded)
+//   scheduledIds = Set of WO ids already scheduled that day (excluded)
 function scoreCandidates({ anchor, anchorGeo, candidates, geoOf, tech, techJobTypes, weights, scheduledIds, cityCounts }) {
   if (!anchorGeo) return { suggested: [], closeBy: [], skipped: 0, noAnchor: true };
   const w = { ...DEFAULT_ROUTING_WEIGHTS, ...(weights || {}) };
@@ -3417,13 +3419,12 @@ export function HeaderChips() {
 // ModuleLauncher removed: the fold-out NavWing (nav.jsx) replaces the
 // fullscreen module-picker overlay.
 
-// ── Itinerary module ──────────────────────────────────────────────────────────
-// Daily, single-tech timeline. Pick a tech + day; drag active WOs from the
-// unscheduled pool onto 30-min slots (8:00 AM - 6:00 PM). Drag a scheduled
-// block to another slot to change its start time. Click a block for a popover
-// to move it to a different day/tech or unschedule. End times are intentionally
-// not modeled (job length varies). schedule lives on the WO as {date,start};
-// tech is order.tech (kept in sync by setSchedule).
+// ── Schedule helpers ──────────────────────────────────────────────────────────
+// Fixed 30-min slot grid (8:00 AM - 6:00 PM) shared by the schedule form and
+// the command-center DayTimeline rail. The Schedule module's calendar does NOT
+// use it (it lists jobs by start time instead). End times are intentionally not
+// modeled (job length varies). schedule lives on the WO as {date,start}; tech
+// is order.tech (kept in sync by setSchedule).
 const ITIN_START_MIN = 8 * 60;   // 8:00 AM
 const ITIN_END_MIN   = 18 * 60;  // 6:00 PM
 const ITIN_STEP_MIN  = 30;
@@ -3441,16 +3442,8 @@ export function itinFmtTime(hhmm) {
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return h12 + ':' + String(m).padStart(2, '0') + ' ' + ap;
 }
-export function itinTodayStr() {
-  const d = new Date(), p = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
-export function itinShiftDay(dateStr, delta) {
-  const [y, mo, d] = String(dateStr).split('-').map(Number);
-  const dt = new Date(y, mo - 1, d + delta, 12);
-  const p = (n) => String(n).padStart(2, '0');
-  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
-}
+// itinTodayStr / itinShiftDay live in orders-logic.js (imported + re-exported
+// at the top of this file) so the pure calendar math can reuse them.
 export function itinDayLabel(dateStr) {
   const [y, mo, d] = String(dateStr).split('-').map(Number);
   const dt = new Date(y, mo - 1, d, 12);
@@ -3479,7 +3472,7 @@ export function itinSnapSlot(start) {
   return String(Math.floor(snapped / 60)).padStart(2, '0') + ':' + String(snapped % 60).padStart(2, '0');
 }
 
-// ItineraryModule carved out to ./itinerary.jsx (imported at top).
+// ScheduleModule (the read-only calendar) carved out to ./schedule.jsx.
 
 export const navBtnStyle = {
   padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border-1)',
@@ -3806,10 +3799,10 @@ function App() {
   React.useEffect(() => {
     if (launchPhase && currentModule !== 'overview') setLaunchPhase(false);
   }, [currentModule, launchPhase]);
-  // Itinerary focus request from the WO context menu (jump/add to schedule).
+  // Schedule-module focus request from the WO context menu (jump to schedule).
   // { tech, date, highlightId, ts } — ts forces the module to re-apply.
   const [itinFocus, setItinFocus] = React.useState(null);
-  // Itinerary tech selection lifted to App so it persists across module navigation
+  // Schedule tech filter lifted to App so it persists across module navigation
   // within a session. Page reload resets to 'ALL' (default) by design.
   const [itinTech, setItinTech] = React.useState('ALL');
   // WO id whose scheduling form (assign tech + timeframe) is open, or null.
@@ -3834,9 +3827,9 @@ function App() {
     if (loc === 'sent') { setCurrentModule('invoices'); setSelectedWO(id); pushRecent(id); }
     else { setCurrentModule('work-orders'); setCurrentView(loc); highlightWO(id); }
   }, [orders, highlightWO, pushRecent]);
-  // Auto-switch Itinerary tech when entering Itinerary with a scheduled
-  // selected WO whose tech differs from the current Itinerary tech. Sticks
-  // otherwise. Fires only on the transition INTO Itinerary, not while there.
+  // Auto-switch the Schedule tech filter when entering the module with a
+  // scheduled selected WO whose tech differs from the current filter. Sticks
+  // otherwise. Fires only on the transition INTO the module, not while there.
   const prevModuleRef = React.useRef(currentModule);
   React.useEffect(() => {
     const prev = prevModuleRef.current;
@@ -3862,8 +3855,8 @@ function App() {
   // Lifted so the maps job-type filter persists across module switches (resets on
   // reload, like itinTech). { 'P'|'H'|'PH': true } = hidden.
   const [mapsHiddenTypes, setMapsHiddenTypes] = React.useState({});
-  // Shared route stops (ordered WO ids), lifted from MapsModule so Itinerary
-  // can read/write the same route. Session-local; does not persist.
+  // Shared route stops (ordered WO ids), lifted from MapsModule so the route
+  // send can reuse them. Session-local; does not persist.
   const [routeStops, setRouteStops] = React.useState([]);
   // Import inspect modal: shown after extension import to let user review
   // newly-imported WOs before they vanish into the active list. Cleared
@@ -4444,9 +4437,9 @@ function App() {
   // retired (migrated to 'sent' via migrateOrders).
   const activeOrders   = React.useMemo(() => orders.filter(o => !o.deleted && (o.tab || 'active') === 'active'),  [orders]);
   const completeOrders = React.useMemo(() => orders.filter(o => !o.deleted && o.tab === 'complete'),              [orders]);
-  // Maps + Itinerary share the active-only universe (Complete + Sent + Trash
-  // already drop out of scheduling per change11). No phase-complete filter
-  // needed now that the deprecated `complete:true` phase flag is gone.
+  // Maps uses the active-only universe (Complete + Sent + Trash drop out per
+  // change11). The Schedule calendar deliberately does NOT: it reads every
+  // non-deleted order so past days still show completed jobs (S1 retention).
   const mapOrders = activeOrders;
   // App-level Nominatim geocoder. Runs whenever activeOrders changes (app
   // startup, after import). Walks the active list and geocodes any address
@@ -5100,7 +5093,8 @@ function App() {
 
   // change11: Active → Complete. Hardcoded status='Complete - Pending Approval'
   // (mirrors Trash's hardcoded Cancelled). Saves prior status into prevStatus
-  // so Reopen can revert. Auto-unschedule (Complete WOs leave the itinerary).
+  // so Reopen can revert. The schedule is KEPT (S1 retention); a completed WO
+  // just reads as not-live on the calendar.
   const doMarkComplete = React.useCallback((id) => {
     updateOrder(id, applyMarkComplete);
   }, [updateOrder]);
@@ -5237,9 +5231,9 @@ function App() {
     }
   }, [invoiceEditorWO, orders]);
 
-  // Itinerary module. schedule = { date:'YYYY-MM-DD', start:'HH:MM' } stored on
+  // Scheduling writer. schedule = { date:'YYYY-MM-DD', start:'HH:MM' } stored on
   // the WO. Pass schedule=null to unschedule. tech (when given) is synced into
-  // order.tech so the list view + itinerary stay one source of truth.
+  // order.tech so the list view + calendar stay one source of truth.
   const setSchedule = React.useCallback((id, schedule, tech) => {
     updateOrder(id, o => {
       const next = { ...o };
@@ -5269,10 +5263,10 @@ function App() {
     });
   }, [updateOrder, statusTags]);
 
-  // Commit the staged draft route to a tech's day (the "Send to Itinerary"
+  // Commit the staged draft route to a tech's day (the "Send to Schedule"
   // action in the Maps route panel). Route order -> sequential timeline slots.
   // Overwrites the day: any of that tech's existing scheduled WOs on that date
-  // that are NOT in the route are unscheduled (returned to the pool). Note:
+  // that are NOT in the route are unscheduled. Note:
   // scheduling never changes a WO's status in this app, so unscheduling already
   // leaves the overridden WOs at their real prior status (no prevStatus dance).
   const sendRouteToItinerary = React.useCallback(async (tech, date) => {
@@ -5283,7 +5277,7 @@ function App() {
       && o.schedule && o.schedule.date === date && !inRouteSet.has(o.id));
     if (occupied.length && !(await confirmDialog(
       tech + ' already has ' + occupied.length + ' job(s) scheduled on ' + date +
-      '. Overwrite the day? Those ' + occupied.length + ' will be returned to the unscheduled pool.', { danger: true, confirmLabel: 'Overwrite' }))) return;
+      '. Overwrite the day? Those ' + occupied.length + ' will be unscheduled.', { danger: true, confirmLabel: 'Overwrite' }))) return;
     occupied.forEach(o => setSchedule(o.id, null));
     routeStops.forEach((id, i) => setSchedule(id, { date, start: slots[Math.min(i, slots.length - 1)] }, tech));
     setRouteStops([]);
@@ -5300,11 +5294,10 @@ function App() {
 
   // MODULE_GROUPS/MODULES/MODULE_ORDER live in nav.jsx (imported at top).
 
-  // Single source for "navigate the Itinerary to a WO": scheduled -> snap to its
-  // tech+day and highlight; unscheduled -> highlight its place in the pool (the
-  // module opens the pool and scrolls to it). Shared by switchModule (WO module
-  // entry) and the Maps 'jumpItinerary' action so every entry point behaves the
-  // same.
+  // Single source for "navigate the Schedule module to a WO": scheduled -> move
+  // the calendar to its tech+day and ring-highlight it; unscheduled -> highlight
+  // only (nothing to move to). Shared by switchModule (WO module entry) and the
+  // Maps 'jumpItinerary' action so every entry point behaves the same.
   const focusItinerary = React.useCallback((woId) => {
     const o = orders.find(x => x.id === woId);
     if (!o) return;
@@ -5315,7 +5308,7 @@ function App() {
     }
   }, [orders]);
 
-  // Module entry side-effects: itinerary auto-snaps to selectedWO's schedule
+  // Module entry side-effects: the schedule calendar auto-snaps to selectedWO's schedule
   // (if any); invoices highlights selectedWO row via selectedId prop.
   const switchModule = React.useCallback((m) => {
     if (m === 'itinerary' && selectedWO) focusItinerary(selectedWO);
@@ -6053,8 +6046,8 @@ function App() {
         setCurrentModule('maps');
         break;
       case 'jumpItinerary':
-        // Same navigation as entering Itinerary from the WO module: scheduled ->
-        // snap to slot + highlight; unscheduled -> scroll to its pool position.
+        // Same navigation as entering the Schedule module from the WO module:
+        // scheduled -> move the calendar to its day + highlight.
         focusItinerary(id);
         setCurrentModule('itinerary');
         break;
@@ -6399,7 +6392,7 @@ function App() {
           display: 'grid',
           // Sidebar column always 0: every module (incl. WO since the
           // header-uniformity rework) renders its own sidebar below its
-          // full-width header, matching the Maps/Invoices/Itinerary shell.
+          // full-width header, matching the Maps/Invoices/Schedule shell.
           gridTemplateColumns: '0 1fr 1.2fr',
           gridTemplateRows: 'minmax(0, 1fr)',
           overflow: 'hidden',
@@ -6450,26 +6443,16 @@ function App() {
           ) : currentModule === 'remittances' ? (
             <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} masterCatalog={masterCatalog} />
           ) : currentModule === 'itinerary' ? (
-            <ItineraryModule
-              activeOrders={activeOrders}
+            <ScheduleModule
+              orders={orders}
               techs={techs}
-              phases={phases}
               statusColors={statusColors}
               statusTags={statusTags}
               focus={itinFocus}
               tech={itinTech}
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
-              onSetSchedule={setSchedule}
-              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); openWO(id); }}
-              statuses={statuses}
-              types={types}
-              pms={pms}
-              inboxes={inboxes}
-              onWoAction={woAction}
-              onAddToInbox={onAddToInbox}
-              onAddToNewInbox={onAddToNewInbox}
-              onRemoveFromInbox={removeFromInbox}
+              onOpenWO={openWO}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
