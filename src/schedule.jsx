@@ -115,6 +115,20 @@ export function DayTimeline({ wo, activeOrders, statusColors, statusTags, onOpen
   );
 }
 
+// remindAt is stored as epoch ms; a datetime-local input speaks
+// 'YYYY-MM-DDTHH:MM' in LOCAL time (no offset suffix), which Date.parse reads
+// back as local. Empty string both ways means "no reminder".
+function msToLocalInput(ms) {
+  if (typeof ms !== 'number') return '';
+  const d = new Date(ms), pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+    + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function localInputToMs(v) {
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+}
+
 // Create / edit one schedule entry. `entry` is either an existing stored entry
 // or a draft ({ kind, date }) minted by the caller -- an id means edit, no id
 // means create. Field rules (undated tasks only, time format) are enforced by
@@ -128,6 +142,7 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
   const [end, setEnd] = React.useState(entry.end || '');
   const [tech, setTech] = React.useState(entry.tech || '');
   const [woId, setWoId] = React.useState(entry.woId || '');
+  const [remindAt, setRemindAt] = React.useState(msToLocalInput(entry.remindAt));
   const isEdit = !!entry.id;
 
   const fld = {
@@ -145,8 +160,8 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
     <Modal open onClose={onClose} title={isEdit ? 'Edit entry' : 'New entry'} width={460}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <Seg
-          options={[{ value: 'task', label: 'Task' }, { value: 'event', label: 'Event' }]}
-          value={kind === 'event' ? 'event' : 'task'}
+          options={[{ value: 'task', label: 'Task' }, { value: 'event', label: 'Event' }, { value: 'reminder', label: 'Reminder' }]}
+          value={kind}
           onChange={setKind}
         />
         <label style={lbl}>Title
@@ -163,6 +178,9 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
             <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={fld} />
           </label>
         </div>
+        <label style={lbl}>Remind me (blank = no reminder)
+          <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} style={fld} />
+        </label>
         <div style={{ display: 'flex', gap: 10 }}>
           <label style={{ ...lbl, flex: 1 }}>Tech
             <select value={tech} onChange={(e) => setTech(e.target.value)} style={fld}>
@@ -180,12 +198,12 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
         <label style={lbl}>Notes
           <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={3} style={{ ...fld, resize: 'vertical' }} />
         </label>
-        {dateMissing && <div style={{ fontSize: 12, color: 'var(--danger, #d9534f)' }}>An event needs a day.</div>}
+        {dateMissing && <div style={{ fontSize: 12, color: 'var(--danger, #d9534f)' }}>{kind === 'event' ? 'An event needs a day.' : 'A reminder needs a day.'}</div>}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           {isEdit && <ActionBtn onClick={() => onDelete(entry.id)}>Delete</ActionBtn>}
           <ActionBtn onClick={onClose}>Cancel</ActionBtn>
           <ActionBtn primary disabled={!canSave}
-            onClick={() => onSave({ kind, title, body, date: date || null, start: start || null, end: end || null, tech: tech || null, woId: woId || null })}>
+            onClick={() => onSave({ kind, title, body, date: date || null, start: start || null, end: end || null, tech: tech || null, woId: woId || null, remindAt: localInputToMs(remindAt) })}>
             Save
           </ActionBtn>
         </div>

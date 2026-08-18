@@ -494,6 +494,43 @@ export function backlogEntries(entries) {
       || String(a.id || '').localeCompare(String(b.id || '')));
 }
 
+// "MM/DD h:mm AM" for an epoch-ms reminder time. Mirrors fmtSchedule's shape
+// (app.jsx) but reads a timestamp instead of a {date,start} pair.
+function fmtRemindAt(ms) {
+  const d = new Date(ms), h = d.getHours();
+  return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0')
+    + ' ' + (h % 12 === 0 ? 12 : h % 12) + ':' + String(d.getMinutes()).padStart(2, '0')
+    + ' ' + (h < 12 ? 'AM' : 'PM');
+}
+
+// S4: entries whose remindAt has arrived, as header-bell notification items in
+// the same shape as the derived overdue items in app.jsx. Re-evaluated by the
+// existing minute tick, so no timer lives here and a reminder that fired while
+// the app was shut simply appears on next launch.
+// `dismissed` is settings.dismissedOverdueIds -- ONE map for both kinds; ids are
+// namespaced ('overdue-' / 'reminder-') so they cannot collide, and reusing it
+// means the persisted-dismissal plumbing (dismissOverdue) is shared. schedDate
+// carries the fire time, so editing remindAt re-arms the reminder exactly as
+// rescheduling re-arms an overdue WO. `now` is injectable for tests.
+export function getReminderNotificationItems(entries, dismissed, now) {
+  const ts = now || Date.now();
+  const out = [];
+  for (const e of entries || []) {
+    if (!e || !e.id || typeof e.remindAt !== 'number' || e.remindAt > ts || e.done) continue;
+    const id = 'reminder-' + e.id;
+    const schedDate = String(e.remindAt);
+    if (isOverdueDismissed(dismissed, id, schedDate)) continue;
+    const item = {
+      id, kind: 'reminder', schedDate,
+      title: 'Reminder · ' + (e.title || 'Untitled'),
+      sub: fmtRemindAt(e.remindAt) + (e.woId ? ' · ' + e.woId : ''),
+    };
+    if (e.woId) item.wo = e.woId;
+    out.push(item);
+  }
+  return out;
+}
+
 // change11 self-healing reconciler (v6) — PURE core. The effect in app.jsx
 // gates it (settings flag), calls this, then writes the result + settings patch
 // + toast. Returns the reconciled orders plus per-pass counters.

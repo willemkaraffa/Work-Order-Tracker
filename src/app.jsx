@@ -12,7 +12,7 @@ import {
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
   isLiveSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
-  itinTodayStr, itinShiftDay,
+  itinTodayStr, itinShiftDay, getReminderNotificationItems,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js, maps.jsx, schedule.jsx)
 // keep importing these from here.
@@ -4244,7 +4244,7 @@ function App() {
   const dismissedOverdueIds = (settings && settings.dismissedOverdueIds && typeof settings.dismissedOverdueIds === 'object') ? settings.dismissedOverdueIds : {};
   const dismissOverdue = React.useCallback((items) => {
     const add = {};
-    for (const n of items) { if (n && n.kind === 'overdue' && n.schedDate) add[n.id] = n.schedDate; }
+    for (const n of items) { if (n && (n.kind === 'overdue' || n.kind === 'reminder') && n.schedDate) add[n.id] = n.schedDate; }
     if (!Object.keys(add).length) return;
     updateSettings(s => ({ dismissedOverdueIds: { ...(s.dismissedOverdueIds || {}), ...add } }));
   }, [updateSettings]);
@@ -4774,6 +4774,9 @@ function App() {
         }
       }
     }
+    // S4: schedule entries whose remindAt has arrived. Derived like overdue,
+    // so the existing minute tick (overdueTick) re-evaluates them; no timer.
+    if (!loading) for (const r of getReminderNotificationItems(entries, dismissedOverdueIds)) out.push(r);
     for (const a of alerts) out.push({ id: 'alert-' + (a.wo || a.kind), kind: a.kind, title: (a.wo || a.kind), sub: a.blurb, wo: a.wo });
     // Status vocab must match main.js update-status: available -> downloading -> ready.
     // ('downloaded' is never emitted; using it dropped the notif mid-download and
@@ -4789,16 +4792,19 @@ function App() {
     const renagMs = (overdueCfg.thresholdMinutes || 60) * 60000;
     return out.filter(n => {
       if (n.update) return true;
-      // Overdue is the exception: dismissing it stops the nag PERMANENTLY (no
-      // re-nag), persisted in settings.dismissedOverdueIds keyed to the schedule
-      // date so a reschedule re-arms it. alert/update re-nag is unchanged.
-      if (n.kind === 'overdue') return !isOverdueDismissed(dismissedOverdueIds, n.id, n.schedDate);
+      // Overdue and reminders are the exception: dismissing one stops the nag
+      // PERMANENTLY (no re-nag), persisted in settings.dismissedOverdueIds keyed
+      // to the schedule date / fire time, so a reschedule (or a moved remindAt)
+      // re-arms it. Without this a reminder would resurrect every minute forever.
+      // alert/update re-nag is unchanged.
+      if (n.kind === 'overdue' || n.kind === 'reminder') return !isOverdueDismissed(dismissedOverdueIds, n.id, n.schedDate);
       const readAt = notifReads[n.id];
       return !readAt || (now - readAt) >= renagMs;
     });
-  }, [orders, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
-  // Click a notification: WO items open the command center; capture items open
-  // their review modal; the update item installs.
+  }, [orders, entries, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
+  // Click a notification: WO items open the command center; a WO-less reminder
+  // opens the Schedule module; capture items open their review modal; the update
+  // item installs.
   const onNotifClick = React.useCallback((n) => {
     if (!n) return;
     // Mark read so it drops off the counter. Capture events are removed outright
@@ -4807,6 +4813,7 @@ function App() {
     dismissOverdue([n]);
     if (String(n.id).startsWith('ev-')) dismissNotif(n.id);
     if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
+    else if (n.kind === 'reminder') setCurrentModule('itinerary');
     else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
     else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
     else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
