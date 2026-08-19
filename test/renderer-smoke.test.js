@@ -14,11 +14,20 @@ function ok(label, cond, extra) {
   else { fails++; console.log('  FAIL ' + label + (extra ? ': ' + extra : '')); }
 }
 
+// Every window this test opens, so they can all be closed before exit. pretendToBeVisual
+// runs a requestAnimationFrame loop per window on a libuv handle; leaving several of them
+// open and then calling process.exit() raced libuv's teardown and aborted the process with
+// "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c" AFTER every
+// assertion had already printed ok. The runner saw a non-zero status and reported FAIL on
+// a test that passed.
+const doms = [];
+
 // Fresh jsdom + globals before each mount. app.jsx reads global document at
 // module-eval time, so this must run BEFORE loadEsm.
 function freshDom(storageSeed) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>',
     { url: 'http://localhost/', pretendToBeVisual: true });
+  doms.push(dom);
   global.window = dom.window;
   global.document = dom.window.document;
   global.HTMLElement = dom.window.HTMLElement;
@@ -137,5 +146,22 @@ async function mountCase(label, seed) {
 
   console.log('');
   console.log(fails ? (fails + ' FAILURES') : 'ALL PASS');
-  process.exit(fails ? 1 : 0);
+
+  // Close every window (stops its rAF loop), then let the loop turn so the handles
+  // finish closing before the process goes away.
+  for (const d of doms) { try { d.window.close(); } catch (_) {} }
+  await new Promise(r => setTimeout(r, 0));
+  await new Promise(r => setTimeout(r, 0));
+
+  // exitCode, NOT process.exit(): exit() tears the process down mid-teardown, which is
+  // the race above. Setting the code lets node leave once the loop is genuinely idle.
+  process.exitCode = fails ? 1 : 0;
+
+  // Watchdog for the opposite failure: if some handle still holds the loop open, this
+  // test would hang the whole runner. unref'd, so it never keeps the process alive on
+  // its own and only fires if we are still here 5s later.
+  setTimeout(() => {
+    console.log('renderer-smoke: event loop still busy after tests; forcing exit');
+    process.exit(fails ? 1 : 0);
+  }, 5000).unref();
 })();
