@@ -10,7 +10,7 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
-  isLiveSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
+  isLiveSchedule, isUpcomingSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
   itinTodayStr, itinShiftDay, getReminderNotificationItems,
 } from './orders-logic.js';
@@ -343,7 +343,7 @@ export function splitAddress(o) {
   return { addr: full, city: '' };
 }
 
-// statusTags feeds isLiveSchedule: schedules persist past completion now, so the
+// statusTags feeds isUpcomingSchedule: schedules persist past completion now, so the
 // `◷` chip must gate on live-and-not-past rather than on "has a schedule".
 function toDisplayRow(o, statusTags) {
   const { addr, city } = splitAddress(o);
@@ -369,7 +369,7 @@ function toDisplayRow(o, statusTags) {
     ageLevel: ageLevelForDays(ageDays),
     status: o.status || 'Open',
     tab: o.tab || 'active',
-    scheduled: isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr(),
+    scheduled: isUpcomingSchedule(o, statusTags),
     schedDate: o.schedule ? o.schedule.date : null,
     schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
@@ -506,7 +506,11 @@ export function nextWOId(orders, customId) {
 // Mechanism ported from legacy formatPhone().
 // formatPhone moved to ./utils.js (imported at top).
 
-export function toDetailData(o) {
+// statusTags is OPTIONAL: clearsScheduleOnSet (orders-logic.js) already does
+// `const tags = statusTags || {}`, so a missing map degrades to "no visited tag"
+// and never crashes, and the notes-only caller (maps.jsx NotesViewModal) never
+// reads `scheduled`.
+export function toDetailData(o, statusTags) {
   if (!o) return null;
   const { addr, city } = splitAddress(o);
   const flags = [];
@@ -560,6 +564,9 @@ export function toDetailData(o) {
     nextAction,
     tab: o.tab || 'active',
     schedule: o.schedule || null,
+    // Retention (S1): "has a schedule" is not "is upcoming" -- detail.jsx's
+    // context-menu row reads this instead of deriving from `schedule`.
+    scheduled: isUpcomingSchedule(o, statusTags),
     raw: o,
   };
 }
@@ -3504,8 +3511,7 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOr
     const gc = geocache || {};
     const anchorGeo = gc[order.id] && gc[order.id].lat != null ? gc[order.id] : null;
     // Retention (S1): a stale past date is not "already scheduled" any more.
-    const today = itinTodayStr();
-    const scheduledIds = new Set((activeOrders || []).filter(o => isLiveSchedule(o, statusTags) && o.schedule.date >= today).map(o => o.id));
+    const scheduledIds = new Set((activeOrders || []).filter(o => isUpcomingSchedule(o, statusTags)).map(o => o.id));
     const cityCounts = {};
     for (const o of (activeOrders || [])) {
       if (scheduledIds.has(o.id)) continue;
@@ -5077,7 +5083,7 @@ function App() {
     () => selectedWO ? orders.find(o => o.id === selectedWO) : null,
     [orders, selectedWO]
   );
-  const detailData = toDetailData(selectedRecord);
+  const detailData = toDetailData(selectedRecord, statusTags);
 
   // change11: sendToInvoice is only valid from tab='complete'. Auto-unschedule
   // and emit a clear history entry. Active WOs cannot be invoiced anymore — the

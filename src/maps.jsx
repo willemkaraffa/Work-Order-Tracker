@@ -10,7 +10,7 @@ import {
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
-import { orderNumberMatches, phoneMatches, isLiveSchedule } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches, isUpcomingSchedule } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
@@ -25,7 +25,7 @@ export function woMarkerIcon(L, o, g, cfg) {
   const suspect = !!(g && g.suspect);
   // Retention (S1): schedules survive completion, so gold/overdue must gate on
   // live-and-today-or-later, not on "has a schedule".
-  const isScheduled = isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr();
+  const isScheduled = isUpcomingSchedule(o, statusTags);
   const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
   const tag = statusTags[o.status];
   const statusPill = statusColors && statusColors[o.status];
@@ -845,7 +845,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
               {o && item('View notes', () => setNotesWO(o.id))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
-              {onWoAction && item(o && isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr() ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
+              {onWoAction && item(o && isUpcomingSchedule(o, statusTags) ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
               {onWoAction && statuses && statuses.length > 0 && (
                 <div onClick={(e) => { e.stopPropagation(); setCtxStatus(true); }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}

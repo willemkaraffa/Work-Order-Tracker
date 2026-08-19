@@ -346,8 +346,8 @@ export function clearsScheduleOnSet(status, statusTags) {
 // persist through complete/sent/visited/past dates (S1 retention), so
 // "has a schedule" no longer implies "is upcoming". Deliberately NO date
 // comparison inside, so callers compose it:
-//   chip / marker = isLiveSchedule(o, tags) && o.schedule.date >= itinTodayStr()
-//   overdue       = isLiveSchedule(o, tags) && isOverdueSched(date, start)
+//   upcoming = isUpcomingSchedule(o, tags)  -- defined below, adds the date test
+//   overdue  = isLiveSchedule(o, tags) && isOverdueSched(date, start)
 // The status test REUSES clearsScheduleOnSet -- exactly the statuses that used
 // to delete the schedule (visited-tagged OR "Job Complete") now just read as
 // not-live, so behavior is preserved without the data loss.
@@ -358,6 +358,13 @@ export function isLiveSchedule(o, statusTags) {
   if (!o || !o.schedule || !o.schedule.date) return false;
   if (o.deleted || (o.tab || 'active') !== 'active') return false;
   return !clearsScheduleOnSet(o.status, statusTags);
+}
+
+// The "is upcoming" composition, hoisted out of the four callers that used to
+// hand-write it (display-row chip, schedule form's already-scheduled set, map
+// marker, map context menu). `>=` so a job scheduled for TODAY still counts.
+export function isUpcomingSchedule(o, statusTags) {
+  return isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr();
 }
 
 // Is this overdue notification suppressed? Dismissals persist in

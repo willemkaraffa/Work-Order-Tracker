@@ -27,7 +27,7 @@ const { loadEsm } = require('./_load.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const { weekStart, weekDays, monthGrid, groupByScheduleDate, itinShiftDay, itinTodayStr,
-        normalizeEntry, groupEntriesByDate, backlogEntries } = loadEsm('src/orders-logic.js');
+        normalizeEntry, groupEntriesByDate, backlogEntries, isUpcomingSchedule } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -244,6 +244,48 @@ test('backlogEntries: undated tasks only, open before done, oldest first', () =>
     { id: 'event', kind: 'event', date: null, created: 5 },
   ]);
   assert.deepStrictEqual(list.map(e => e.id), ['open-old', 'open-new', 'done-old']);
+});
+
+// ─── isUpcomingSchedule ──────────────────────────────────────────────────────
+// The composition four call sites used to hand-write (chip, schedule form, map
+// marker, map context menu). Dates are derived from itinTodayStr() so these
+// never rot. LIVE_TAGS mirrors the settings.statusTags shape.
+
+const UP_TAGS = { 'Visited': 'visited', 'On Site': 'onsite' };
+const upOrder = (over) => ({ tab: 'active', status: 'Open', schedule: { date: itinTodayStr(), start: '09:00' }, ...over });
+
+test('isUpcomingSchedule: past date → false (S1 retention: a kept schedule is not upcoming)', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ schedule: { date: itinShiftDay(itinTodayStr(), -1), start: '09:00' } }), UP_TAGS), false);
+});
+
+test('isUpcomingSchedule: today → true (comparison is >=)', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder(), UP_TAGS), true);
+});
+
+test('isUpcomingSchedule: future date → true', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ schedule: { date: itinShiftDay(itinTodayStr(), 7), start: '09:00' } }), UP_TAGS), true);
+});
+
+test('isUpcomingSchedule: complete tab → false', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ tab: 'complete' }), UP_TAGS), false);
+});
+
+test('isUpcomingSchedule: visited-tagged status → false', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ status: 'Visited' }), UP_TAGS), false);
+});
+
+test('isUpcomingSchedule: "Job Complete" status → false', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ status: 'Job Complete - Enter Bid' }), UP_TAGS), false);
+});
+
+test('isUpcomingSchedule: deleted → false', () => {
+  assert.strictEqual(isUpcomingSchedule(upOrder({ deleted: true }), UP_TAGS), false);
+});
+
+test('isUpcomingSchedule: no schedule at all → false (no throw on o.schedule.date)', () => {
+  assert.strictEqual(isUpcomingSchedule({ tab: 'active', status: 'Open' }, UP_TAGS), false);
+  assert.strictEqual(isUpcomingSchedule({ tab: 'active', status: 'Open', schedule: {} }, UP_TAGS), false);
+  assert.strictEqual(isUpcomingSchedule(null, UP_TAGS), false);
 });
 
 // ─── Mounted ScheduleModule (jsdom) ──────────────────────────────────────────
