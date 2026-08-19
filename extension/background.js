@@ -86,12 +86,16 @@ async function postFound(items, source) {
 async function backgroundFindNew() {
   const { tab, matches } = await pickMsrTab();
   if (!tab && !matches.length) {
+    // LOG BEFORE RETURNING. This bail printed nothing, so a Chrome restart (whose
+    // restored tabs materialize late) produced an unexplainable empty console.
+    console.log('[wo] find-new: BAIL, chrome.tabs.query found 0 amherst tabs');
     const msg = 'Open an MSR list page (amherst.my.site.com) first.';
     notify('Find new MSR WOs', msg);
     await postFound([], { error: msg, tabCount: 0 });
     return;
   }
   if (!tab) {
+    console.log('[wo] find-new: BAIL, ' + matches.length + ' amherst tabs, none active');
     const msg = matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.';
     notify('Find new MSR WOs', msg);
     await postFound([], { error: msg, tabCount: matches.length });
@@ -347,6 +351,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // Start headless MSR capture in an open MSR tab (from popup or app trigger).
+  if (msg.action === 'woDiag') {
+    woDiag().then(sendResponse).catch(e => sendResponse({ error: String(e && e.message || e) }));
+    return true;
+  }
+
   if (msg.action === 'captureMsrAll') {
     backgroundStartMsr().then(sendResponse);
     return true;
@@ -387,6 +396,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 });
+
+// ── One-shot diagnosis ────────────────────────────────────────────────────────
+// Returns EVERY fact a find-new failure depends on, in one pass, as plain text.
+//
+// Why: MSR faults live in browser state, not in the repo (which tab exists, whether a
+// content script answers, whether the bridge is up, whether the list renders). Each of
+// those facts used to cost one round trip of screenshots and theories; one session burned
+// ~4M tokens on twelve such trips. Read-only: no import, no WO writes, and it must NOT
+// GET /command (that queue is one-shot and consuming it breaks a real run).
+async function woDiag() {
+  const out = { version: chrome.runtime.getManifest().version, ts: new Date().toISOString() };
+  const tabs = await chrome.tabs.query({ url: MSR_TAB_MATCH });
+  out.tabCount = tabs.length;
+  out.tabs = tabs.map(t => ({ id: t.id, url: (t.url || '').slice(0, 120), status: t.status, discarded: !!t.discarded, active: !!t.active }));
+  const picked = await pickMsrTab();
+  out.picked = picked.tab ? { id: picked.tab.id, url: (picked.tab.url || '').slice(0, 120) } : null;
+  out.bridge = await pingTracker();
+
+  if (picked.tab) {
+    // One try, not the 5-try retry: the point is to observe whether the script is
+    // alive RIGHT NOW, not to paper over it.
+    let ack = await sendTabMsg(picked.tab.id, { action: 'ping' });
+    out.ack = ack ? { ok: true, url: (ack.url || '').slice(0, 120), onList: !!ack.onList } : false;
+    if (!ack) {
+      out.revived = await reviveContentScript(picked.tab);
+      ack = out.revived ? await sendTabMsgRetry(picked.tab.id, { action: 'ping' }, 3, 1000) : null;
+      out.ackAfterRevive = ack ? { ok: true, onList: !!ack.onList } : false;
+    }
+    // NO scanMsrList HERE. Triggering a scan is not read-only: the content script
+    // posts foundWosResult, which postFound sends to the tracker and the app turns
+    // into a "new MSR WOs" notification. A diagnosis must not manufacture one. The
+    // scan path is observed from a REAL run instead, which logs
+    // "[wo] find-new: via=<live tab|iframe> items=N".
+  } else {
+    out.ack = 'skipped (no tab)';
+  }
+  console.log('[wo] diag', JSON.stringify(out, null, 2));
+  return out;
+}
 
 // Desktop notification (best-effort; ignored if permission/icon unavailable).
 function notify(title, message) {
