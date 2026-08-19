@@ -17,6 +17,7 @@ env   : AMH_EMAIL / AMH_PASSWORD (required for fresh login)
 """
 from __future__ import annotations
 import datetime, json, os, re, subprocess, sys, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -512,6 +513,45 @@ def extract_issues(issue_instances: dict):
     return wo_type, "\n\n".join(note_blocks)
 
 
+def hydrate_customers(token: str, items: list, workers: int = 8) -> int:
+    """Fill in `customers` from the single-WO endpoint. THE LIST FEED HAS NO CONTACTS.
+
+    Proven live 2026-08-19: POST Order/VendorAdminOrders returns customers:[] for EVERY
+    order, while GET Order/{guid} on the SAME order returns the real customers with their
+    phone numbers. Every other field build_wo reads (order.*, condititionIssueInstances,
+    remedyInstances, bids, property.address) is byte-identical between the two, so ONLY
+    customers needs the extra call -- but without it every bulk-captured WO was written
+    with phone="", contactName="" and contacts=[], silently.
+
+    Threaded: an open set is ~56 WOs at ~2s per call, which is ~2 min sequential.
+    Skips any envelope that already has customers, so the GUID path pays nothing.
+    Best effort -- a failed lookup leaves that WO contactless rather than failing capture.
+    Returns the number of WOs that gained contacts."""
+    todo = [it for it in items
+            if not (it.get("customers") or []) and (it.get("order") or it).get("id")]
+    if not todo:
+        return 0
+    today = today_api_value()
+
+    def one(item):
+        oid = (item.get("order") or item).get("id")
+        try:
+            env = api_get("Order/" + oid, token, {"today": today})
+        except Exception as exc:
+            print(f"[API] contacts lookup {oid} failed ({exc}).", file=sys.stderr)
+            return 0
+        cust = (env or {}).get("customers") or []
+        if not cust:
+            return 0
+        item["customers"] = cust
+        return 1
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        filled = sum(pool.map(one, todo))
+    print(f"[API] contacts: filled {filled}/{len(todo)} WO(s) from Order/{{id}}.", file=sys.stderr)
+    return filled
+
+
 def extract_contacts(customers: list):
     contacts = []
     for c in (customers or []):
@@ -542,6 +582,15 @@ def build_wo(item: dict) -> dict:
     bid_items, bid_total = extract_bids(order, item.get("remedyInstances"))
 
     warnings = []
+    # FAIL LOUD ON AN EMPTY REQUIRED FIELD. The AMH list feed returns customers:[] for
+    # every order, so bulk capture wrote phone=""/contactName="" on every WO and still
+    # reported success (2026-08-19). hydrate_customers fixes the cause; this makes the
+    # NEXT such silent field loss visible instead of invisible. `warnings` is already
+    # surfaced by the app (toast on single capture, count in the bulk review modal).
+    if not contacts:
+        warnings.append("no contact (phone/name) on this WO")
+    if not normalize_text(addr.get("street")):
+        warnings.append("no street address")
     if not bid_items:
         statuses = sorted({normalize_text(b.get("statusName")) for b in (order.get("bids") or [])})
         if statuses:
@@ -632,10 +681,12 @@ def main():
     results = {}
     if all_open:
         # Every "All Open" WO that is not Completed/Canceled, keyed by WO number.
-        for name, item in order_map.items():
-            o = item.get("order") or item
-            if normalize_text(o.get("statusName")).lower() in _CLOSED_STATUSES:
-                continue
+        # Filter FIRST, then hydrate: no contact lookup is spent on a WO we skip.
+        live = [(name, item) for name, item in order_map.items()
+                if normalize_text((item.get("order") or item).get("statusName")).lower()
+                not in _CLOSED_STATUSES]
+        hydrate_customers(token, [it for _, it in live])
+        for name, item in live:
             try:
                 results[name] = build_wo(item)
             except Exception as exc:
@@ -651,6 +702,9 @@ def main():
                 results[wo_num] = {"ok": False,
                                    "error": f"WO {stripped} not found in AMH active or admin (Posted) orders."}
                 continue
+            # Both sources here are LIST envelopes (order_map / fetch_admin_order), so
+            # neither carries customers. Same lookup as the bulk path, one WO wide.
+            hydrate_customers(token, [item])
             try:
                 results[wo_num] = build_wo(item)
                 w = results[wo_num]["wo"]

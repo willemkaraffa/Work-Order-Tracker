@@ -8,6 +8,7 @@
     "watch:renderer": "npm run build:renderer -- --watch",
     "amh:login": "node amh-pw-login.js",
     "amh:health": "node amh-health.js",
+    "probe:amh": "node scripts/amh-envelope-probe.js",
     "test": "node test/run.js",
     "test:logic": "node test/run.js --logic",
     "lint": "eslint \"src/**/*.{js,jsx}\" \"test/**/*.js\" \"extension/**/*.js\"",
