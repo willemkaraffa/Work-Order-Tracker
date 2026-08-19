@@ -21,8 +21,35 @@ chrome.runtime.onInstalled.addListener(() => {
 // ── Command polling (app-triggered capture) ───────────────────────────────────
 // The tracker app queues commands at GET /command (e.g. "Capture all MSR" button).
 // Poll on a chrome.alarm so the service worker wakes to check even after idle.
-chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
-chrome.runtime.onStartup.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
+// ARM THE ALARM AT TOP LEVEL, ON EVERY WORKER SPAWN. This was the "find new does not
+// see my open Pending tab" failure, and it is not a detection bug at all: backgroundFindNew
+// has exactly ONE caller (pollCommand), pollCommand has exactly ONE trigger (this alarm),
+// and the alarm used to be created ONLY from onInstalled/onStartup.
+//
+// Reloading the extension CLEARS its alarms, and neither of those events fires on a plain
+// reload (Chrome did not start; nothing was installed or updated). So after a reload the
+// poll was dead: the app queued findNewMsr at /command, nothing ever dequeued it, and the
+// app just spun until its 2-minute banner timeout. It stayed dead until Chrome restarted
+// or the extension updated, which is why this came back day after day.
+//
+// A service worker respawns constantly and event listeners fire only in their own narrow
+// circumstances, so alarm state must never depend on them. create() with an existing name
+// overwrites, so this is idempotent.
+// GET-THEN-CREATE, never a bare create: create() on an existing alarm RESETS its
+// scheduled time, and this runs on every worker spawn, so a bare create would let
+// frequent spawns postpone the alarm forever. Same bug class, opposite direction.
+// Chrome CLAMPS alarm periods to a 1-minute floor in a released extension, so a smaller
+// number is silently ignored rather than honoured. Stating the real floor keeps the
+// worst-case latency of an app-queued command honest: up to ~60s, inside the app's
+// 2-minute banner timeout. The spawn-time drain below covers the common case, since any
+// worker wake (popup, content-script message) picks a queued command up at once.
+const POLL_MINUTES = 1;
+
+chrome.alarms.get('woCommandPoll').then(a => {
+  if (!a) chrome.alarms.create('woCommandPoll', { periodInMinutes: POLL_MINUTES });
+});
+chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: POLL_MINUTES }));
+chrome.runtime.onStartup.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: POLL_MINUTES }));
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'woCommandPoll') pollCommand(); });
 
 let commandRunning = false;
@@ -43,6 +70,10 @@ async function pollCommand() {
     commandRunning = false;
   }
 }
+
+// Drain any command already queued when this worker spawned. Without it a reload
+// stranded a waiting command for up to a full alarm period.
+pollCommand();
 
 // Scan the open MSR list tab for WO numbers and POST them to the tracker, which
 // diffs them and lists the ones not yet added. (Replaces the unreliable
@@ -219,13 +250,22 @@ async function reviveContentScript(tab) {
   }
 }
 
-let msrInFlight = false;
-let msrInFlightTimer = null;
+// PERSISTED, NOT IN MEMORY. An MV3 service worker terminates when idle, so a module
+// variable and a setTimeout both die mid-capture: the guard silently cleared itself and
+// the 12-minute safety timer never fired. Stored as a START TIMESTAMP with a TTL, which
+// needs no timer at all -- an expired stamp simply stops counting as in flight.
+const MSR_INFLIGHT_KEY = 'wo_msr_inflight_at';
+const MSR_INFLIGHT_MS = 12 * 60 * 1000;
+
+async function msrInFlight() {
+  const at = (await chrome.storage.local.get(MSR_INFLIGHT_KEY))[MSR_INFLIGHT_KEY];
+  return !!at && (Date.now() - at) < MSR_INFLIGHT_MS;
+}
 
 // Find an open MSR tab and tell its content script to start the headless
 // capture. `one` = { url, woId } captures just that WO; null = the full list.
 async function backgroundStartMsr(one) {
-  if (msrInFlight) return { ok: false, error: 'An MSR capture is already running.' };
+  if (await msrInFlight()) return { ok: false, error: 'An MSR capture is already running.' };
   const tabs = await chrome.tabs.query({ url: '*://amherst.my.site.com/*' });
   const tab = tabs && tabs[0];
   if (!tab) {
@@ -241,10 +281,9 @@ async function backgroundStartMsr(one) {
     notify('MSR capture', 'Could not start — make sure an MSR page is fully loaded.');
     return { ok: false, error: (r && r.error) || 'content script not ready' };
   }
-  msrInFlight = true;
-  // Safety: clear the guard if no result arrives (e.g. user navigated the tab).
-  if (msrInFlightTimer) clearTimeout(msrInFlightTimer);
-  msrInFlightTimer = setTimeout(() => { msrInFlight = false; }, 12 * 60 * 1000);
+  // Stamp the start. If no result ever arrives (user navigated the tab, worker died),
+  // the stamp ages out after MSR_INFLIGHT_MS instead of needing a timer to survive.
+  await chrome.storage.local.set({ [MSR_INFLIGHT_KEY]: Date.now() });
   return { ok: true, started: true };
 }
 
@@ -312,7 +351,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const list = res.wo_saved_list || [];
       if (!list.length) { sendResponse({ ok: false, error: 'No saved work orders.' }); return; }
       const result = await sendOrdersToTracker(list);
-      if (result.ok) chrome.storage.local.set({ wo_saved_list: [] });
+      if (result.ok) {
+        // REMOVE WHAT WAS SENT, never blank the list. A capture made while the POST was
+        // in flight lands in wo_saved_list after this handler read it, and a blanket
+        // reset silently threw that work order away. Re-read and subtract by id.
+        const sent = new Set(list.map(o => o.id));
+        const fresh = (await chrome.storage.local.get(['wo_saved_list'])).wo_saved_list || [];
+        await chrome.storage.local.set({ wo_saved_list: fresh.filter(o => !sent.has(o.id)) });
+      }
       sendResponse(result);
     });
     return true;
@@ -361,11 +407,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Result posted back by the content script after the iframe capture finishes.
+  // RETURN TRUE AND ANSWER WHEN DONE, even though the sender wants no reply. Returning
+  // false closes the message channel at once, and an MV3 worker with no open channel and
+  // no pending event may be terminated mid-flight -- killing the storage write, the
+  // tracker POST, or the progress fetch these handlers depend on. The ack is what keeps
+  // the worker alive until the work finishes.
   if (msg.action === 'msrCaptureResult') {
-    msrInFlight = false;
-    if (msrInFlightTimer) { clearTimeout(msrInFlightTimer); msrInFlightTimer = null; }
     (async () => {
+      await chrome.storage.local.remove(MSR_INFLIGHT_KEY);
       const orders = Array.isArray(msg.orders) ? msg.orders : [];
       if (!orders.length) {
         notify('MSR capture', msg.error ? ('Failed: ' + msg.error) : 'No work orders captured.');
@@ -375,15 +424,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       notify('MSR capture complete',
         result.ok ? `${orders.length} work order(s) sent to the tracker.`
                   : `Import failed: ${result.error || 'tracker not running'}.`);
-    })();
-    return false; // no response expected
+    })().finally(() => sendResponse({ ok: true }));
+    return true;
   }
 
   // Result posted back by the content script after the hidden find-new list scan.
   if (msg.action === 'foundWosResult') {
     console.log('[wo] find-new: foundWosResult items=' + ((msg.items && msg.items.length) || 0) + ' error=' + (msg.error || ''));
-    postFound(Array.isArray(msg.items) ? msg.items : [], { error: msg.error || '' });
-    return false; // no response expected
+    postFound(Array.isArray(msg.items) ? msg.items : [], { error: msg.error || '' })
+      .finally(() => sendResponse({ ok: true }));
+    return true;
   }
 
   // Per-WO progress from the content loop -> forward to the tracker for its banner.
@@ -392,8 +442,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ done: msg.done, total: msg.total }),
       signal: AbortSignal.timeout(2000),
-    }).catch(() => {});
-    return false;
+    }).catch(() => {}).finally(() => sendResponse({ ok: true }));
+    return true;
   }
 });
 
@@ -413,6 +463,10 @@ async function woDiag() {
   const picked = await pickMsrTab();
   out.picked = picked.tab ? { id: picked.tab.id, url: (picked.tab.url || '').slice(0, 120) } : null;
   out.bridge = await pingTracker();
+  // THE load-bearing fact: no alarm means pollCommand never runs, which means find-new
+  // never runs at all, no matter how healthy the tabs and the content script look.
+  const alarm = await chrome.alarms.get('woCommandPoll');
+  out.pollAlarm = alarm ? { periodInMinutes: alarm.periodInMinutes, scheduledIn: Math.round((alarm.scheduledTime - Date.now()) / 1000) + 's' } : 'MISSING (find-new cannot fire)';
 
   if (picked.tab) {
     // One try, not the 5-try retry: the point is to observe whether the script is
