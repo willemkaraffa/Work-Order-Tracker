@@ -512,6 +512,31 @@ def extract_issues(issue_instances: dict):
     return wo_type, "\n\n".join(note_blocks)
 
 
+def hydrate_customers(token: str, item: dict) -> dict:
+    """The VendorAdminOrders LIST feed returns customers as an EMPTY array on every
+    envelope (proven live 2026-08-21: list customers=arr0, GET Order/{guid} customers=arr2
+    for the same WO). Every other sub-collection matches, so customers is the one hole --
+    which silently blanked wo.phone/contactName on the whole bulk path while the single-WO
+    GUID path stayed correct. Refill from the detail endpoint when the list left it empty.
+    Best effort: on failure the WO still imports, just without a contact."""
+    if not isinstance(item, dict) or (item.get("customers") or []):
+        return item
+    order = item.get("order") or item
+    oid = normalize_text(order.get("id"))
+    if not oid:
+        return item
+    try:
+        detail = api_get("Order/" + oid, token, {"today": today_api_value()})
+    except Exception as exc:
+        print(f"[API] customer hydrate failed for {normalize_text(order.get('name'))} ({exc}).",
+              file=sys.stderr)
+        return item
+    cust = (detail or {}).get("customers") or []
+    if cust:
+        item["customers"] = cust
+    return item
+
+
 def extract_contacts(customers: list):
     contacts = []
     for c in (customers or []):
@@ -637,7 +662,7 @@ def main():
             if normalize_text(o.get("statusName")).lower() in _CLOSED_STATUSES:
                 continue
             try:
-                results[name] = build_wo(item)
+                results[name] = build_wo(hydrate_customers(token, item))
             except Exception as exc:
                 results[name] = {"ok": False, "error": f"extract failed: {exc}"}
         print(f"  all-open: {len(results)} WO(s)", file=sys.stderr)
@@ -652,7 +677,7 @@ def main():
                                    "error": f"WO {stripped} not found in AMH active or admin (Posted) orders."}
                 continue
             try:
-                results[wo_num] = build_wo(item)
+                results[wo_num] = build_wo(hydrate_customers(token, item))
                 w = results[wo_num]["wo"]
                 print(f"  {wo_num}: type={w['type']} items={len(w['bidItems'])} ${w['bidAmount']}",
                       file=sys.stderr)
