@@ -6729,5 +6729,44 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+// Last-resort error boundary. Without one, a single render throw unmounts the
+// WHOLE tree: the window keeps its last paint but every focusable node is gone,
+// so keystrokes go nowhere and it reads exactly like the modal-flag input lock
+// (see search-hook.js). Catching keeps a mounted, focusable tree plus a way out.
+// Exported so test/admin-s0-hardening.test.js can drive it directly.
+// CSS vars carry literal fallbacks: a crash on the first render happens before
+// the theme effect writes them.
+export class RootErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) {
+    // eslint-disable-next-line no-console
+    console.error('[RootErrorBoundary]', err, info && info.componentStack);
+  }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const msg = String((this.state.err && this.state.err.message) || this.state.err);
+    return (
+      <div data-error-boundary="1" style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'var(--bg-canvas, #1c1c1e)', color: 'var(--text-1, #f2f2f7)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        gap: 12, padding: 24, textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 20, fontWeight: 700 }}>Something broke while drawing this screen.</div>
+        <div style={{ fontSize: 13, color: 'var(--text-3, #98989d)', maxWidth: 640, whiteSpace: 'pre-wrap' }}>{msg}</div>
+        <button onClick={() => window.location.reload()} style={{
+          padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border-1, #3a3a3c)',
+          background: 'var(--bg-surface, #2c2c2e)', color: 'var(--text-1, #f2f2f7)',
+          fontFamily: 'inherit', fontSize: 14, cursor: 'pointer',
+        }}>Reload</button>
+        <div style={{ fontSize: 12, color: 'var(--text-3, #98989d)' }}>Your saved work orders are untouched.</div>
+      </div>
+    );
+  }
+}
+
+createRoot(document.getElementById('root')).render(
+  <RootErrorBoundary><App /></RootErrorBoundary>
+);
 

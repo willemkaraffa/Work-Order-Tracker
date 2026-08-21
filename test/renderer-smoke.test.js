@@ -60,6 +60,11 @@ async function mountCase(label, seed) {
   const root = dom.window.document.getElementById('root');
   ok(label + ' mounts without throwing', !threw, threw && (threw.message + '\n' + String(threw.stack).split('\n').slice(1, 4).join('\n')));
   ok(label + ' root has rendered children', !!root && root.children.length > 0);
+  // App now mounts inside RootErrorBoundary, so a render throw no longer empties
+  // #root -- it paints the fallback. Without this assert the two checks above go
+  // false-green on exactly the crash they exist to catch.
+  const caught = dom.window.document.querySelector('[data-error-boundary]');
+  ok(label + ' error boundary did not catch', !caught, caught && caught.textContent);
 }
 
 (async () => {
