@@ -159,11 +159,18 @@ app-level:
 
 - `window.__modalOpen` is hand-incremented and hand-decremented
   (`src/search-hook.js:22`). Any unmount path that skips cleanup leaks it above
-  zero forever, and the global key handler then swallows every keystroke.
+  zero forever. CORRECTED after S0 shipped: this one never blocked typing. The
+  handler returns WITHOUT `preventDefault`, so keys still reach the page and only
+  type-to-search dies. The original wording here overstated it.
 - A render throw unmounts the React tree, so focus falls to `BODY` and no
   focusable node remains. `rootChildren: 0` in a snapshot distinguishes this.
+  This is the mechanism that makes ALL text entry impossible, and so it is the
+  better explanation of what the user actually experiences.
 
 Neither lives in note rendering. **Rebuilding the note editor would inherit both.**
+
+Both were closed structurally in S0 (`1b563ca`). If a lock still happens after
+that, a third mechanism exists and the watchdog snapshot is the only evidence.
 
 ---
 
@@ -251,11 +258,22 @@ Existing `data.pms` records migrate into this: `{name, fullName, color}` plus
 Each slice ends at `npm run verify` green plus, where the change is observable, a
 live Electron check.
 
-**S0 — Harden the renderer.** Error boundary around the app tree. Replace the
-hand-counted `window.__modalOpen` with a derived count or an auto-heal to zero
-when no modal is in the DOM. Kills both candidate mechanisms of the text lock-out
-without waiting for it to reproduce. The existing watchdog stays armed, so if a
-lock survives both, it still gets captured.
+**S0 — Harden the renderer. DONE, `1b563ca`.** `RootErrorBoundary` wraps App at
+the mount point. `window.__modalOpen` became a mirror; the gate is now a
+proof-of-render token registry in `src/search-hook.js`, where a token counts only
+while the component that registered it can still be re-rendered, so an orphaned
+token is proven dead before it is pruned. No timed reset. Every diagnostic stays
+armed. Tests in `test/admin-s0-hardening.test.js`.
+
+Found while doing it, and NOT fixed: `test/renderer-smoke.test.js`,
+`test/schedule.test.js` and `test/entries-store.test.js` all build JSDOMs with
+`pretendToBeVisual: true`, which runs a per-window rAF loop on a libuv handle,
+and renderer-smoke then calls `process.exit()`. That races into
+`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` on Windows: every
+assertion passes, the process aborts, and the runner scores it FAIL. Intermittent,
+so it reads as flakiness. The S0 test avoids it by dropping `pretendToBeVisual`,
+closing every JSDOM, turning the loop twice, setting `process.exitCode`, and
+arming an unref'd 5s watchdog. Those three files still carry it.
 
 **S1 — One note record.** Introduce the note shape above. Migrate `o.noteCards`
 and `wo_data.entries` into it. Keep reminders working through the existing bell
