@@ -16,9 +16,19 @@ function ok(label, cond, extra) {
 
 // Fresh jsdom + globals before each mount. app.jsx reads global document at
 // module-eval time, so this must run BEFORE loadEsm.
+// every jsdom we mint is kept here so teardown can close it (see the bottom of
+// this file); nothing else closes them. openIntervals is the companion for the
+// App's timers: the bundle's bare setInterval resolves to NODE's global, not the
+// jsdom window, so window.close() cannot reap them. wrap setInterval ONLY --
+// wrapping setTimeout abandons this file's own await/flush timers and the run
+// exits before a single assertion, printing a false clean pass.
+const openDoms = [];
+const openIntervals = [];
+const realSetInterval = global.setInterval;
 function freshDom(storageSeed) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>',
     { url: 'http://localhost/', pretendToBeVisual: true });
+  openDoms.push(dom);
   global.window = dom.window;
   global.document = dom.window.document;
   global.HTMLElement = dom.window.HTMLElement;
@@ -26,6 +36,22 @@ function freshDom(storageSeed) {
   global.getComputedStyle = dom.window.getComputedStyle;
   global.requestAnimationFrame = dom.window.requestAnimationFrame || ((cb) => setTimeout(() => cb(Date.now()), 0));
   global.cancelAnimationFrame = dom.window.cancelAnimationFrame || clearTimeout;
+  global.setInterval = (...args) => {
+    const id = realSetInterval(...args);
+    openIntervals.push(id);
+    return id;
+  };
+  // fetch stub. mounting the real App fires live geocoding requests (nominatim,
+  // photon, census), and a smoke test must not depend on a third-party endpoint's
+  // availability; stubbing keeps the run fast and offline-safe. this does NOT fix
+  // the exit bug -- the interval cleanup in teardown does that. every consumer
+  // (parseOne, evaluate) guards with Array.isArray + length, so an empty array
+  // carrying an empty .features reads as 'no result' on all provider branches.
+  const emptyGeo = [];
+  emptyGeo.features = [];
+  const fetchStub = async () => ({ ok: true, status: 200, json: async () => emptyGeo });
+  global.fetch = fetchStub;
+  dom.window.fetch = fetchStub;
   // window.storage is the electron bridge useWorkOrders reads. Absent => empty
   // default data path. Seeded => exercises the real data/migration load path.
   if (storageSeed !== undefined) {
@@ -142,5 +168,21 @@ async function mountCase(label, seed) {
 
   console.log('');
   console.log(fails ? (fails + ' FAILURES') : 'ALL PASS');
-  process.exit(fails ? 1 : 0);
+  // teardown, in two parts, for two separate reasons.
+  // 1. the App registers its timers on Node's global setInterval, not on the
+  //    jsdom window, so closing the windows cannot reap them and the loop never
+  //    drains. clear the recorded ids or this file hangs forever.
+  // 2. the old hard process.exit aborted the process in win\async.c
+  //    (!(handle->flags & UV_HANDLE_CLOSING)) because it tore down esbuild's
+  //    still-live worker MessagePort, a uv_async_t, mid-close. that is why a
+  //    PASSING test reported FAIL under full-suite load, which shifted the
+  //    timing. letting node drain naturally removes the race instead of
+  //    narrowing it, so set exitCode and never exit hard.
+  for (const id of openIntervals) {
+    try { global.clearInterval(id); } catch { /* already cleared */ }
+  }
+  for (const d of openDoms) {
+    try { d.window.close(); } catch { /* already torn down */ }
+  }
+  process.exitCode = fails ? 1 : 0;
 })();

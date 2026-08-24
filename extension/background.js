@@ -21,6 +21,15 @@ chrome.runtime.onInstalled.addListener(() => {
 // ── Command polling (app-triggered capture) ───────────────────────────────────
 // The tracker app queues commands at GET /command (e.g. "Capture all MSR" button).
 // Poll on a chrome.alarm so the service worker wakes to check even after idle.
+// SELF-HEALING: armed at TOP LEVEL, which runs on every service-worker wake, not just on
+// install/startup. MV3 alarms are persistent so the two listeners below normally suffice,
+// but a LOST alarm could not re-arm until a browser restart -- a failure this project has
+// already hit once, and one that silently kills "Find new MSR WOs" with no error anywhere.
+// GUARDED with get(): create() on an existing name REPLACES it and RESETS its schedule, and the
+// worker wakes on many events (content-script messages, menu clicks, the alarm itself). An
+// unguarded top-level create would push the next fire back on every wake, so a busy worker would
+// starve the very alarm this is meant to protect. Only re-arm when the alarm is actually gone.
+chrome.alarms.get('woCommandPoll', (a) => { if (!a) chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }); });
 chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
 chrome.runtime.onStartup.addListener(() => chrome.alarms.create('woCommandPoll', { periodInMinutes: 0.5 }));
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'woCommandPoll') pollCommand(); });

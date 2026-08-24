@@ -1338,6 +1338,14 @@ function spawnRelogin() {
     : path.join(__dirname, 'amh-pw-login.js');
   const env = { ...process.env };
   delete env.CHROME_CRASHPAD_PIPE_NAME;   // leaks into the child msedge and crashes it
+  // Same packaged-resolution fix as amh-runner's mintToken (see the long WHY there): the
+  // script lives at resourcesPath, outside app.asar, so it cannot see the packed playwright.
+  // build.asarUnpack ships playwright unpacked and NODE_PATH aims the child at it. Interpreter
+  // stays system node: playwright-core's bootstrap process.exit(1)s below Node 20 and Electron
+  // 28 bundles Node 18, so ELECTRON_RUN_AS_NODE is not an option here (measured 2026-08-24).
+  env.NODE_PATH = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
+    : path.join(__dirname, 'node_modules');
   return new Promise((resolve) => {
     let proc;
     try {

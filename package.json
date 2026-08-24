@@ -53,9 +53,16 @@
       "preload.js",
       "amh-runner.js",
       "library_io.js",
+      "remittance-runner.js",
+      "bid-select.js",
+      "text-normalize.js",
       "index.html",
       "bundle/**",
       "assets/**"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**"
     ],
     "extraResources": [
       "scrape_amh.py",

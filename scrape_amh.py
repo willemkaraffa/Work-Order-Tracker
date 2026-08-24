@@ -347,11 +347,29 @@ OPEN_BUCKETS = ["AllOpen", "SchedulingRequired", "Scheduled", "InProgress",
                 "ActionRequired", "PendingAMHAction"]
 
 
+BUCKET_ROW_CAP = 50   # rows the server actually returns per tab, measured (see below)
+
+
 def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> list:
-    """One VendorAdminOrders tab, paginated. Loop pageIndex while hasNextPage is true,
-    accumulating envelopes -- this also fixes the ~100-most-recent age-out the retired
-    GET Order/Query had. Guards: stop on an empty batch and cap at max_pages so a stuck
-    hasNextPage cannot spin forever."""
+    """One VendorAdminOrders tab. THE PAGINATION DOES NOT WORK AND CANNOT BE MADE TO --
+    the server hard-caps a tab at BUCKET_ROW_CAP rows and offers no way past it. Measured
+    live 2026-08-24 against the real API:
+      * pageSize 50, 100 and 200 all return 50 rows
+      * hasNextPage is ALWAYS false, so the loop always breaks after page 0
+      * pageIndex 1 returns an empty list
+      * sortBy / sortAscending are ignored (ascending and descending return the same 50)
+    The loop is kept ONLY so that a server which later starts honouring hasNextPage is
+    picked up for free; today it is one request.
+
+    So this did NOT fix the ~100-most-recent age-out the retired GET Order/Query had, it
+    HALVED it (100 -> 50). The only reason nothing is lost today is that fetch_open_orders
+    unions the NARROW status tabs, which sit far under the cap (AllOpen burns 37 of its 50
+    slots on Completed rows that _CLOSED_STATUSES discards immediately). A tab returning
+    exactly BUCKET_ROW_CAP rows is indistinguishable from a truncated one -- hence the
+    warning below, which is the only signal that open WOs went missing.
+
+    Guards: stop on an empty batch and cap at max_pages so a stuck hasNextPage cannot spin
+    forever."""
     out: list = []
     page = 0
     while page < max_pages:
@@ -361,6 +379,10 @@ def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> li
         resp = api_post("Order/VendorAdminOrders", token, body)
         batch = as_order_list(resp)
         out.extend(batch)
+        if len(batch) >= BUCKET_ROW_CAP:
+            print(f"[API] WARNING: bucket {bucket} returned {len(batch)} rows, at the "
+                  f"{BUCKET_ROW_CAP}-row server cap. Rows past it are UNREACHABLE, so "
+                  f"open WOs may be missing from this run.", file=sys.stderr)
         has_next = bool(resp.get("hasNextPage")) if isinstance(resp, dict) else False
         if not has_next or not batch:
             break

@@ -803,6 +803,24 @@
   // iframes, scrapes their rendered documents, and never opens a window or tab.
   const MSR_ASSESSMENT_URL = 'https://amherst.my.site.com/partner/s/work-orders-in-assessment';
 
+  // WHICH lists "Find new MSR WOs" scans. Scanning ONLY the assessment list is the same bug
+  // AMH had when it queried only its AllOpen bucket: a WO that lives in another list can
+  // never be found (measured 2026-08-24 -- the user works several MSR list pages). The fix
+  // ports the AMH MECHANISM (OPEN_BUCKETS / fetch_open_orders in scrape_amh.py): load each
+  // list, merge, dedup by WO number, first occurrence wins.
+  //
+  // /partner/s/all-work-orders is DELIBERATELY absent. The user confirmed it is a superset of
+  // these three, but it also carries invoiced (historical) WOs, which would flood the new-WO
+  // review with finished work. These three are the ACTIVE work.
+  //
+  // MSR_ASSESSMENT_URL above stays the single list for the FULL capture and the single-WO
+  // path; only new-WO discovery scans the union.
+  const MSR_LIST_URLS = [
+    'https://amherst.my.site.com/partner/s/work-orders-in-assessment',
+    'https://amherst.my.site.com/partner/s/work-orders-to-approve',
+    'https://amherst.my.site.com/partner/s/work-orders-ready-to-work-on',
+  ];
+
   // Detail wins; list stub fills gaps. Mirrors the tracker merge expectations.
   function mergeMsr(stub, detail) {
     const pick = (a, b) => (a && String(a).trim()) ? a : b;
@@ -844,7 +862,8 @@
       // Tall viewport so most content is "in view" and rendered without scrolling.
       f.style.cssText = 'position:fixed;left:-99999px;top:0;width:1280px;height:3000px;opacity:0;border:0';
       let settled = false;
-      const finish = (doc) => { if (settled) return; settled = true; try { f.remove(); } catch (_) {} resolve(doc); };
+      let hardTimer = null;
+      const finish = (doc) => { if (settled) return; settled = true; clearTimeout(hardTimer); try { f.remove(); } catch (_) {} resolve(doc); };
       f.onload = () => {
         let n = 0;
         (function poll() {
@@ -862,7 +881,7 @@
           setTimeout(poll, 500);
         })();
       };
-      setTimeout(() => finish(null), 35000); // hard timeout
+      hardTimer = setTimeout(() => finish(null), 35000); // hard timeout
       f.src = url;
       document.body.appendChild(f);
     });
@@ -918,12 +937,35 @@
     // startMsrCapture/msrCaptureResult: ack now, post the result via a fresh message.
     sendResponse({ ok: true, started: true });
     (async () => {
-      console.log('[wo] find-new: loading hidden assessment list iframe');
-      const doc = await loadInIframe(MSR_ASSESSMENT_URL);
-      const items = scanMsrList(doc || document);
-      console.log('[wo] find-new: iframe doc=' + (!!doc) + ' items=' + items.length);
+      // SEQUENTIAL, not parallel: several hidden Aura iframes alive in one tab contend for
+      // the host page's resources and that was never proven to work. Slow and correct wins.
+      console.log('[wo] find-new: scanning ' + MSR_LIST_URLS.length + ' hidden list iframes');
+      const byNum = new Map();
+      let rendered = 0;
+      for (const url of MSR_LIST_URLS) {
+        const doc = await loadInIframe(url);
+        // NO host-document fallback. Scanning `document` when the iframe failed reads the
+        // HOST tab, which may be a WO DETAIL page, and reports a handful of wrong WOs as a
+        // clean scan. A list that did not render contributes nothing.
+        const items = doc ? scanMsrList(doc) : [];
+        if (doc) rendered++;
+        // Per-list outcome to the console: foundWosResult has no field for a PARTIAL failure
+        // (and its shape is consumed by the worker + app, so it must not change), so this log
+        // is the only place a single failing list can be named.
+        console.log('[wo] find-new: ' + url + ' doc=' + (!!doc) + ' items=' + items.length);
+        for (const it of items) {
+          // Normalise for dedup only (strip non-digits, drop leading zeros); the emitted item
+          // keeps its original num/url/address. First list to carry a WO wins.
+          const key = String(it.num || '').replace(/\D/g, '').replace(/^0+/, '');
+          if (!key || byNum.has(key)) continue;
+          byNum.set(key, it);
+        }
+      }
+      const items = Array.from(byNum.values());
+      console.log('[wo] find-new: rendered ' + rendered + '/' + MSR_LIST_URLS.length + ' lists, merged items=' + items.length);
+      // Error ONLY when every list failed. One list rendering is a successful scan.
       chrome.runtime.sendMessage({ action: 'foundWosResult', items,
-        error: (!doc && !items.length) ? 'MSR list did not render (keep an amherst tab open and loaded, then try again).' : '' });
+        error: rendered ? '' : 'MSR lists did not render (keep an amherst tab open and loaded, then try again).' });
     })();
     // no async sendResponse; do NOT return true.
   });
