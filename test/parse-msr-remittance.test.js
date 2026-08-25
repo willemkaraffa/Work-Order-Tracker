@@ -22,7 +22,21 @@ const TEXT = [
   '(08/26) Meadows Pl',
   'Invoice Notes : 03381381',
   'Total For p1726269 5.68',
-  'Statement Total 323.18',
+  // Bug 3: a RazorSync GUID in Invoice Notes. The old (\d+) read its LEADING digit run and
+  // emitted woId "3", which matched the minted order id WO-003 (315 W Barnes St) -- this
+  // 110 Margaret Dr payment reconciled against the wrong WO with no verify flag.
+  '3502 (bf2rsv03) - Gamble Plumbing (v0050419) - 08/13/26 110 Margaret p5036758 696.27 08/13/2026 PI000376562',
+  '(08/26) Dr',
+  'Invoice Notes : 3da7f30a-314e-41be-9203-d084ae85744b',
+  'Total For p5036758 696.27',
+  // Bug 4: a BARE-numeric property code (no p prefix) survived the p-code strip and stayed
+  // wedged in the wrapped street -> "129 Awesome 10003006 Ridge" (live junk order
+  // "82 | 19 Labradoodle 10002980 Court"), killing the address fallback.
+  '1398 (mrmrsv11) - Gamble Plumbing (v0050419) - 08/13/26 129 Awesome 10003006 449.07 08/13/2026 PI000375096',
+  '(08/26) Ridge',
+  'Invoice Notes : 04063139',
+  'Total For 10003006 449.07',
+  'Statement Total 1468.52',
 ].join('\n');
 
 let out;
@@ -40,8 +54,8 @@ const rows = res.rows || [];
 let fail = 0;
 const check = (name, fn) => { try { fn(); console.log('  ok   ' + name); } catch (e) { fail++; console.log('  FAIL ' + name + '\n       ' + e.message); } };
 
-check('emits one row PER INVOICE LINE (3 rows, not 2 properties)', () => {
-  assert.strictEqual(rows.length, 3);
+check('emits one row PER INVOICE LINE (5 rows, not 4 properties)', () => {
+  assert.strictEqual(rows.length, 5);
 });
 check('p1726269 yields BOTH invoice lines, not one collapsed row', () => {
   assert.strictEqual(rows.filter(r => r.propCode === 'p1726269').length, 2);
@@ -57,6 +71,22 @@ check('the credit is preserved as -225.00 / WO 03381381', () => {
   assert.ok(r, 'credit row missing');
   assert.strictEqual(r.amount, -225);
   assert.strictEqual(r.woId, '03381381');
+});
+check('a GUID Invoice Note yields NO woId, not its leading digit "3"', () => {
+  const r = rows.find(x => x.invoiceNum === 'PI000376562');
+  assert.ok(r, 'GUID-note row missing');
+  assert.strictEqual(r.woId, '');
+  assert.strictEqual(r.amount, 696.27);
+});
+check('the GUID row still parses its address 110 Margaret Dr', () => {
+  const r = rows.find(x => x.invoiceNum === 'PI000376562');
+  assert.strictEqual(r.addressRaw, '110 Margaret Dr');
+});
+check('a bare-numeric property code is stripped out of the address', () => {
+  const r = rows.find(x => x.invoiceNum === 'PI000375096');
+  assert.ok(r, 'bare-propCode row missing');
+  assert.ok(!/10003006/.test(r.addressRaw), 'propCode leaked: ' + r.addressRaw);
+  assert.strictEqual(r.addressRaw, '129 Awesome Ridge');
 });
 check('rows still reconcile to the statement total', () => {
   const s = rows.reduce((a, r) => a + r.amount, 0);

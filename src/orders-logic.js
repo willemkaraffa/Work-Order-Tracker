@@ -982,7 +982,14 @@ export function normAddress(v) {
 export function matchMsrRow(row, orders) {
   const list = Array.isArray(orders) ? orders : [];
   const rn = normWoNum(row && row.woId);
-  if (rn) {
+  // A real portal WO number is 7-8 digits. A 1-3 digit token is a PARSE ARTIFACT, and it
+  // collides with the minted sequential ids checked below: the GUID note that parsed to
+  // "3" matched WO-003 (normWoNum -> "3") and reconciled the 110 Margaret Dr payment
+  // against 315 W Barnes St as a confident woId match, no verify flag. Live data has 8
+  // orders whose normalized id is under 4 digits. Short token -> skip this branch only;
+  // the address fallback and the none path still run. matchAmhRow is an alias of this
+  // function, so AMH gets the same guard.
+  if (rn && rn.length >= 4) {
     for (const o of list) {
       if (!o) continue;
       if (normWoNum(o.woId) === rn || normWoNum(o.id) === rn) return { order: o, matchBy: 'woId' };

@@ -51,9 +51,16 @@ def parse_text(text):
         block = text[prev_end:m.start()]
         prev_end = m.end()
         prop_code = m.group(1)
-        addr = _address_in_block(block)
+        addr = _address_in_block(block, prop_code)
         invoices = re.findall(r'(-?[\d,]+\.\d{2})\s+\d{2}/\d{2}/\d{4}\s+(PI\d+)', block)
-        notes = re.findall(r'Invoice Notes\s*:\s*(\d+)', block)
+        # READ THE WHOLE NOTE TOKEN, then keep it ONLY if it is all digits. The old
+        # (\d+) matched a LEADING digit run anywhere in the token, so the RazorSync GUID
+        # note "3da7f30a-314e-41be-9203-d084ae85744b" (110 Margaret Dr, PI000376562)
+        # emitted woId "3", which then matched the minted order id WO-003 = 315 W Barnes
+        # St as a confident woId match -- a payment reconciled against the wrong WO.
+        # A non-numeric note keeps its SLOT as '' (notes[i] aligns a note to its invoice
+        # line below); dropping it would shift every later line onto the wrong WO.
+        notes = [t if t.isdigit() else '' for t in re.findall(r'Invoice Notes\s*:\s*(\S+)', block)]
         if not invoices:
             pi = re.search(r'(PI\d+)', block)
             rows.append({
@@ -79,7 +86,7 @@ def parse_text(text):
     return rows, statement_total
 
 
-def _address_in_block(block):
+def _address_in_block(block, prop_code=''):
     # Best-effort street address. The transaction line wraps and INTERLEAVES the
     # street with code/amount/date/PI/(MM/YY) noise (e.g. "4102 Lady p5036818 85.00
     # 05/04/2026 PI000221373 (05/26) Slipper Ln"). Take everything after the vendor
@@ -95,6 +102,14 @@ def _address_in_block(block):
         return ''
     seg = m.group(1)
     seg = re.sub(r'\bp\d{6,}\b', ' ', seg)            # repeated property code
+    # Not every property code is p-prefixed: a BARE-numeric one (e.g. 10003006) survived
+    # the sub above and stayed wedged in the wrapped street, so "129 Awesome Ridge" parsed
+    # as "129 Awesome 10003006 Ridge" -- that leak is the live junk order
+    # "82 | 19 Labradoodle 10002980 Court", and it silently kills the address FALLBACK at
+    # the one moment it matters (the WO-number path already failed). Strip this block's
+    # OWN code as an exact literal, never a generic \d{7,}, which could eat a street number.
+    if prop_code:
+        seg = re.sub(r'\b' + re.escape(prop_code) + r'\b', ' ', seg)
     seg = re.sub(r'\d{1,3}(?:,\d{3})*\.\d{2}', ' ', seg)  # amounts
     seg = re.sub(r'\d{2}/\d{2}/\d{4}', ' ', seg)      # full dates
     seg = re.sub(r'\bPI\d+\b', ' ', seg)              # invoice #

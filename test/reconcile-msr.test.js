@@ -57,6 +57,25 @@ test('matchMsrRow: no WO id, no address match -> none', () => {
   assert.strictEqual(m.order, null);
 });
 
+// A GUID Invoice Note used to parse to the short token "3", which matched the MINTED id
+// WO-003 and reconciled a 110 Margaret Dr payment against 315 W Barnes St as a confident
+// woId match. The WO-number branch now requires >= 4 digits.
+test('matchMsrRow: a short parse-artifact token cannot match a minted sequential id', () => {
+  const m = matchMsrRow(row({ woId: '3' }), [{ id: 'WO-003', woId: '', pm: 'MSR', address: '315 W Barnes St' }, ...ORDERS]);
+  assert.strictEqual(m.matchBy, 'none');
+  assert.strictEqual(m.order, null);
+});
+
+test('matchMsrRow: short token + a real address still resolves by address', () => {
+  const m = matchMsrRow(row({ woId: '3', addressRaw: '110 Margaret Dr' }), [
+    { id: 'WO-003', woId: '', pm: 'MSR', address: '315 W Barnes St' },
+    { id: '04017255', woId: '04017255', pm: 'MSR', address: '110 Margaret Dr' },
+    ...ORDERS,
+  ]);
+  assert.strictEqual(m.matchBy, 'address');
+  assert.strictEqual(m.order.id, '04017255');
+});
+
 test('normAddress collapses token order + punctuation', () => {
   assert.strictEqual(normAddress('639 Commander Dr'), normAddress('DR, COMMANDER 639'));
 });
