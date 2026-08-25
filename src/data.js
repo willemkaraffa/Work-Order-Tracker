@@ -9,7 +9,9 @@ import {
   DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, isCompletionStatusName,
 } from './constants.js';
 import { formatPhone, composeNotes } from './utils.js';
-import { isTrashedReimport, normalizeEntry } from './orders-logic.js';
+import {
+  isTrashedReimport, normalizeNote, migrateNoteCardsToNotes, migrateEntriesToNotes,
+} from './orders-logic.js';
 import { nextWOId, DEFAULT_STATUSES } from './app.jsx';
 
 // Returns [data, updateOrder]; data is null while loading.
@@ -22,7 +24,7 @@ export function useWorkOrders() {
     let cancelled = false;
     (async () => {
       const fresh = () => ({
-        orders: [], presets: [], inboxes: [], entries: [],
+        orders: [], presets: [], inboxes: [], notes: [],
         statuses: DEFAULT_STATUSES.slice(),
         phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
@@ -55,9 +57,15 @@ export function useWorkOrders() {
         }
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
         if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
-        // Schedule entries (tasks / events / reminders). Absent on every pre-S3
-        // blob; no migration, they simply start empty.
-        if (!Array.isArray(parsed.entries))  parsed.entries  = [];
+        // Admin S1: ONE flat notes array is the store. Every WO note card moves
+        // off its order and every schedule entry folds in, both keyed by id, so
+        // a second load finds nothing left to move (idempotent). wo_data.entries
+        // is dropped once emptied.
+        if (!Array.isArray(parsed.notes))    parsed.notes    = [];
+        const movedCards = migrateNoteCardsToNotes(parsed.orders, parsed.notes);
+        parsed.orders = movedCards.orders;
+        parsed.notes  = migrateEntriesToNotes(parsed.entries, movedCards.notes);
+        delete parsed.entries;
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         // change11: do NOT strip the legacy `complete` flag here — the
@@ -177,7 +185,9 @@ export function useWorkOrders() {
     const cur = dataRef.current;
     if (!cur) return;
     const orders = cur.orders.filter(o => o.id !== id);
-    const next = { ...cur, orders };
+    // Hard delete takes the WO's notes with it (a WO in Trash keeps its own).
+    const notes = (cur.notes || []).filter(n => n.woId !== id);
+    const next = { ...cur, orders, notes };
     dataRef.current = next;
     setData(next);
     if (window.storage && window.storage.set) {
@@ -258,32 +268,33 @@ export function useWorkOrders() {
     persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, woIds } : b));
   }, []);
 
-  // --- Schedule entries (tasks / events / reminders) ---
+  // --- Notes (Admin S1: WO notes, tasks, events, reminders -- one array) ---
   // Same shape as the inbox mutators: one persist helper, one write path.
-  // normalizeEntry (orders-logic) owns the field rules, so a bad form submit
-  // cannot store an undated event or an undefined field.
-  const persistEntries = (cur, entries) => {
-    const next = { ...cur, entries };
+  // normalizeNote (orders-logic) owns the field rules, so a bad form submit
+  // cannot store an undated event or an undefined field. Date.now() is passed
+  // as the write clock, which is what moves `updated`.
+  const persistNotes = (cur, notes) => {
+    const next = { ...cur, notes };
     dataRef.current = next; setData(next);
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   };
-  const addEntry = React.useCallback((record) => {
+  const addNote = React.useCallback((record) => {
     const cur = dataRef.current;
     if (!cur) return null;
-    const id = 'e-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    persistEntries(cur, [...(cur.entries || []), normalizeEntry(record, id)]);
+    const id = 'n-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    persistNotes(cur, [...(cur.notes || []), normalizeNote(record, id, Date.now())]);
     return id;
   }, []);
-  const updateEntry = React.useCallback((id, patch) => {
+  const updateNote = React.useCallback((id, patch) => {
     const cur = dataRef.current;
     if (!cur) return;
-    persistEntries(cur, (cur.entries || []).map(e =>
-      e.id === id ? normalizeEntry({ ...e, ...patch }, id) : e));
+    persistNotes(cur, (cur.notes || []).map(n =>
+      n.id === id ? normalizeNote({ ...n, ...patch }, id, Date.now()) : n));
   }, []);
-  const deleteEntry = React.useCallback((id) => {
+  const deleteNote = React.useCallback((id) => {
     const cur = dataRef.current;
     if (!cur) return;
-    persistEntries(cur, (cur.entries || []).filter(e => e.id !== id));
+    persistNotes(cur, (cur.notes || []).filter(n => n.id !== id));
   }, []);
 
   const deleteOrdersHard = React.useCallback((ids) => {
@@ -291,7 +302,9 @@ export function useWorkOrders() {
     if (!cur) return;
     const set = new Set(ids);
     const orders = cur.orders.filter(o => !set.has(o.id));
-    const next = { ...cur, orders };
+    // Hard delete takes each WO's notes with it (a WO in Trash keeps its own).
+    const notes = (cur.notes || []).filter(n => !set.has(n.woId));
+    const next = { ...cur, orders, notes };
     dataRef.current = next; setData(next);
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
@@ -498,5 +511,5 @@ export function useWorkOrders() {
 
   return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
           addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
-          addEntry, updateEntry, deleteEntry];
+          addNote, updateNote, deleteNote];
 }

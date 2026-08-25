@@ -13,6 +13,7 @@ import {
   isLiveSchedule, isUpcomingSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
   itinTodayStr, itinShiftDay, getReminderNotificationItems,
+  notesForOrder, lastNoteTsFor, migrateNoteCardsToNotes,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js, maps.jsx, schedule.jsx)
 // keep importing these from here.
@@ -345,7 +346,7 @@ export function splitAddress(o) {
 
 // statusTags feeds isUpcomingSchedule: schedules persist past completion now, so the
 // `◷` chip must gate on live-and-not-past rather than on "has a schedule".
-function toDisplayRow(o, statusTags) {
+function toDisplayRow(o, statusTags, notes) {
   const { addr, city } = splitAddress(o);
   const flags = [];
   if (o.emergency) flags.push('emergency');
@@ -373,19 +374,19 @@ function toDisplayRow(o, statusTags) {
     schedDate: o.schedule ? o.schedule.date : null,
     schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
-    lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
+    lastNoteTs: lastNoteTsFor(notes, o.id),
     // Change indicator: { kind:'new' } or { kind:'changed', fields:[...] }. Set by
     // import/capture, cleared when the WO's command center is opened.
     unseen: o.unseen || null,
   };
 }
 
-function groupByPhase(orders, phases, statusTags) {
+function groupByPhase(orders, phases, statusTags, notes) {
   const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
   const buckets = {};
   for (const o of orders) {
     const name = phaseForOrder(o, list);
-    (buckets[name] = buckets[name] || []).push(toDisplayRow(o, statusTags));
+    (buckets[name] = buckets[name] || []).push(toDisplayRow(o, statusTags, notes));
   }
   const groups = [];
   for (const p of list) {
@@ -510,7 +511,7 @@ export function nextWOId(orders, customId) {
 // `const tags = statusTags || {}`, so a missing map degrades to "no visited tag"
 // and never crashes, and the notes-only caller (maps.jsx NotesViewModal) never
 // reads `scheduled`.
-export function toDetailData(o, statusTags) {
+export function toDetailData(o, statusTags, notes) {
   if (!o) return null;
   const { addr, city } = splitAddress(o);
   const flags = [];
@@ -547,17 +548,13 @@ export function toDetailData(o, statusTags) {
     phone: o.phone || '—',
     contactName: o.contactName || '',
     contacts: Array.isArray(o.contacts) ? o.contacts : [],
-    notes: (() => {
-      const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
-      // Stable sort: pinned first, then newest ts first.
-      cards.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.ts || 0) - (a.ts || 0));
-      const list = cards.map(n => ({
-        id: n.id, type: n.type || 'Note',
-        time: fmtNoteTime(n.ts), body: n.body || '',
-        pinned: !!n.pinned, edited: !!n.edited,
-      }));
-      return list;
-    })(),
+    // Admin S1: the WO's slice of the flat notes array, pinned first then
+    // newest-written first (notesForOrder owns that order).
+    notes: notesForOrder(notes, o.id).map(n => ({
+      id: n.id, type: n.type || 'Note',
+      time: fmtNoteTime(n.ts), body: n.body || '',
+      pinned: !!n.pinned, edited: !!n.edited,
+    })),
     activity: (Array.isArray(o.history) ? o.history : [])
       .slice().reverse()
       .map(h => fmtHistTime(h.ts) + ' — ' + (h.action || '') + (h.detail ? ': ' + h.detail : '')),
@@ -3821,11 +3818,12 @@ function App() {
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
          addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
-         addEntry, updateEntry, deleteEntry] = useWorkOrders();
+         storeAddNote, storeUpdateNote, storeDeleteNote] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
-  // Schedule entries (tasks / events / reminders) — Schedule module only.
-  const entries = data?.entries || [];
+  // Admin S1: ONE flat notes array -- WO note cards, tasks, events, reminders.
+  // A WO note carries woId; an Admin note has woId null.
+  const notes   = data?.notes   || [];
   // search-ux Part 4: jump to a WO in whatever tab/module it lives (used by the
   // "In other tabs" search list). active/complete/trash -> Work Orders module;
   // sent -> Invoices module. Select + scroll, no forced command center.
@@ -4147,13 +4145,17 @@ function App() {
     // complete-marked phases and flip them to tab='complete'.
     const storedPhases = (data && data.phases) || DEFAULT_PHASES;
     const migratedOrders = migrateOrders(orders, storedPhases);
+    // Admin S1: migrateOrders can still mint a note card (imported priority);
+    // route it into the flat notes array so nothing lands back on o.noteCards.
+    const moved = migrateNoteCardsToNotes(migratedOrders, notes);
     const settingsPatch = migrateSettingsForChange11(data || {});
     updateData({
-      orders: migratedOrders,
+      orders: moved.orders,
+      notes: moved.notes,
       ...settingsPatch,
       settings: { ...settings, migrationApplied: MIGRATION_VERSION },
     });
-  }, [orders, settings, data, updateData, backupBeforeApply]);
+  }, [orders, notes, settings, data, updateData, backupBeforeApply]);
   const skipMigration  = React.useCallback(() => { updateSettings({ migrationApplied: MIGRATION_VERSION }); }, [updateSettings]);
 
   // change11 self-healing reconciler (v3). Runs once when settings.change11Reconciled_v3 !== '1'.
@@ -4782,7 +4784,7 @@ function App() {
     }
     // S4: schedule entries whose remindAt has arrived. Derived like overdue,
     // so the existing minute tick (overdueTick) re-evaluates them; no timer.
-    if (!loading) for (const r of getReminderNotificationItems(entries, dismissedOverdueIds)) out.push(r);
+    if (!loading) for (const r of getReminderNotificationItems(notes, dismissedOverdueIds)) out.push(r);
     for (const a of alerts) out.push({ id: 'alert-' + (a.wo || a.kind), kind: a.kind, title: (a.wo || a.kind), sub: a.blurb, wo: a.wo });
     // Status vocab must match main.js update-status: available -> downloading -> ready.
     // ('downloaded' is never emitted; using it dropped the notif mid-download and
@@ -4807,7 +4809,7 @@ function App() {
       const readAt = notifReads[n.id];
       return !readAt || (now - readAt) >= renagMs;
     });
-  }, [orders, entries, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
+  }, [orders, notes, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
   // Click a notification: WO items open the command center; a WO-less reminder
   // opens the Schedule module; capture items open their review modal; the update
   // item installs.
@@ -4993,9 +4995,9 @@ function App() {
   }, [selectedIds, batchUpdate, toast, clearSelection]);
 
   const VIEW_BUILDERS = {
-    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases, statusTags) }),
-    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases, statusTags) }),
-    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases, statusTags) }),
+    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases, statusTags, notes) }),
+    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases, statusTags, notes) }),
+    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases, statusTags, notes) }),
   };
 
   const activePresetId = (typeof currentView === 'string' && currentView.startsWith('sv:')) ? currentView.slice(3) : null;
@@ -5019,7 +5021,7 @@ function App() {
     // Curated, manually-ordered list: resolve woIds against live (non-trashed)
     // orders, preserve the inbox's order, drop ids that no longer resolve.
     const byId = new Map(orders.filter(o => !o.deleted).map(o => [o.id, o]));
-    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(o => toDisplayRow(o, statusTags));
+    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(o => toDisplayRow(o, statusTags, notes));
     viewData = {
       title: activeInbox.name || 'Inbox',
       total: rows.length,
@@ -5083,7 +5085,7 @@ function App() {
     () => selectedWO ? orders.find(o => o.id === selectedWO) : null,
     [orders, selectedWO]
   );
-  const detailData = toDetailData(selectedRecord, statusTags);
+  const detailData = toDetailData(selectedRecord, statusTags, notes);
 
   // change11: sendToInvoice is only valid from tab='complete'. Auto-unschedule
   // and emit a clear history entry. Active WOs cannot be invoiced anymore — the
@@ -5474,30 +5476,27 @@ function App() {
     toast('Work order updated');
   }, [updateOrder, toast]);
 
-  const addNote = React.useCallback((id, { type, body }) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      const note = { id: 'n_' + Date.now().toString(36), ts: Date.now(), type, body, pinned: false, edited: false };
-      return {
-        ...cur,
-        noteCards: [...cards, note],
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note added', detail: type }],
-      };
-    });
+  // Admin S1: the note itself lands in the flat notes array (store mutator);
+  // the WO keeps its own audit trail, so each handler ALSO patches o.history.
+  // Both writes are synchronous against dataRef, so neither clobbers the other.
+  const noteHistory = React.useCallback((id, action, detail) => {
+    if (!id) return;
+    updateOrder(id, cur => ({
+      ...cur,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action, detail: detail || '' }],
+    }));
   }, [updateOrder]);
 
+  const addNote = React.useCallback((id, { type, body }) => {
+    storeAddNote({ type, body, woId: id });
+    noteHistory(id, 'note added', type);
+  }, [storeAddNote, noteHistory]);
+
   const editNote = React.useCallback((id, noteId, newBody) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      return {
-        ...cur,
-        noteCards: cards.map(c => c.id === noteId ? { ...c, body: newBody, edited: true } : c),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note edited', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    storeUpdateNote(noteId, { body: newBody, edited: true });
+    noteHistory(id, 'note edited');
+  }, [storeUpdateNote, noteHistory]);
 
   const setMisc = React.useCallback((id, text) => {
     updateOrder(id, cur => ({
@@ -5517,30 +5516,16 @@ function App() {
   }, [updateOrder]);
 
   const deleteNote = React.useCallback((id, noteId) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      return {
-        ...cur,
-        noteCards: cards.filter(c => c.id !== noteId),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note deleted', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    storeDeleteNote(noteId);
+    noteHistory(id, 'note deleted');
+  }, [storeDeleteNote, noteHistory]);
 
   const togglePinNote = React.useCallback((id, noteId) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      const target = cards.find(c => c.id === noteId);
-      const willPin = target && !target.pinned;
-      return {
-        ...cur,
-        noteCards: cards.map(c => c.id === noteId ? { ...c, pinned: !c.pinned } : c),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: willPin ? 'note pinned' : 'note unpinned', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    const target = notes.find(n => n.id === noteId);
+    const willPin = !(target && target.pinned);
+    storeUpdateNote(noteId, { pinned: willPin });
+    noteHistory(id, willPin ? 'note pinned' : 'note unpinned');
+  }, [notes, storeUpdateNote, noteHistory]);
 
   // Merge a capture result ({ ok, wo, warnings }) into the record IN PLACE.
   // Returns the warnings array, or null when the result was not ok. Shared by
@@ -6419,6 +6404,7 @@ function App() {
             <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} libraryPages={libraryPages} setLibraryPages={setLibraryPages} librarySections={librarySections} setLibrarySections={setLibrarySections} />
           ) : currentModule === 'maps' ? (
             <MapsModule
+              notes={notes}
               activeOrders={mapOrders}
               geocache={geocache}
               defaultView={mapsDefaultView}
@@ -6469,10 +6455,10 @@ function App() {
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
               onOpenWO={openWO}
-              entries={entries}
-              onAddEntry={addEntry}
-              onUpdateEntry={updateEntry}
-              onDeleteEntry={deleteEntry}
+              notes={notes}
+              onAddNote={storeAddNote}
+              onUpdateNote={storeUpdateNote}
+              onDeleteNote={storeDeleteNote}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>

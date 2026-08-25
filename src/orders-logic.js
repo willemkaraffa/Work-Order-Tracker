@@ -436,68 +436,221 @@ export function groupByScheduleDate(orders) {
   return out;
 }
 
-// --- Schedule entries (S3) --------------------------------------------------
-// User-created calendar items that are NOT work orders: tasks (checkbox,
-// optional date -- undated ones sit in the backlog), events (a titled block of
-// time) and reminders (S4, a task with a fire time). ONE array with a `kind`
-// field, stored inside wo_data.entries, so persistence / backup / export stay
-// single-path. WO schedules are untouched by all of this.
+// --- The note record (Admin S1) ---------------------------------------------
+// ONE flat wo_data.notes array holds every note in the app. A WO note carries
+// woId; an Admin note has woId null. Nothing else distinguishes them, so there
+// is one write path, one backup, one journal.
+//
+//   note = { id, ts, updated, type, body, pinned, edited, flags,
+//            woId, pm, contactId, tech }
+//
+// body is the ONLY required field. `ts` is written-at and holds the journal
+// position -- editing an old note never bumps it; `updated` is edited-at and is
+// never a sort key. `type` ('Note' / 'Customer call' / ...) is carried from the
+// old WO note card; S4 maps it onto flags.
+//
+// FLAGS ARE INDEPENDENT (absent key = not set): a note can be a dated calendar
+// item AND a reminder at once. The old mutually-exclusive entry `kind` is gone
+// from storage; it survives only as a form projection (noteToEntryForm /
+// normalizeNote's legacy branch) so the Schedule editor keeps working.
+//   task: {done, due}  reminder: {at}  calendar: {date, start, end}
+//   parts: {part, status, distributor, address}  journal: true  contact: {contactId}
 export const ENTRY_KINDS = ['task', 'event', 'reminder'];
 
-// Coerce anything (a form submit, a hand-edited blob) into a storable entry.
-// Absent fields land as null, never undefined, so the JSON round-trip is
-// stable. `now` is injectable for tests. An event/reminder must be dated (it
-// occupies a day); only a task may be undated, which is what puts it in the
-// backlog.
-export function normalizeEntry(raw, id, now) {
-  const e = raw || {};
-  const ts = now || Date.now();
-  const kind = ENTRY_KINDS.indexOf(e.kind) !== -1 ? e.kind : 'task';
-  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(e.date || '')) ? e.date : null;
-  const time = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '')) ? String(v).padStart(5, '0') : null);
-  return {
-    id: id || e.id || null,
-    kind,
-    title: String(e.title || '').trim(),
-    body: e.body ? String(e.body) : '',
-    date: kind === 'task' ? day : (day || itinTodayStr()),
-    start: time(e.start),
-    end: time(e.end),
-    remindAt: typeof e.remindAt === 'number' ? e.remindAt : null,
-    done: kind === 'task' ? !!e.done : false,
-    woId: e.woId ? String(e.woId).trim() : null,
-    tech: e.tech ? String(e.tech) : null,
-    created: typeof e.created === 'number' ? e.created : ts,
-    updated: ts,
-  };
-}
+const noteDay  = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+const noteTime = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '')) ? String(v).padStart(5, '0') : null);
+const noteStr  = (v) => (v ? String(v) : null);
 
-// Within one day: timed items first in clock order, untimed after, then title.
-function entryDaySort(a, b) {
-  return String(a.start || '99:99').localeCompare(String(b.start || '99:99'))
-    || String(a.title || '').localeCompare(String(b.title || ''))
-    || String(a.id || '').localeCompare(String(b.id || ''));
-}
-
-// { 'YYYY-MM-DD': [entries] } for every dated entry. Mirrors
-// groupByScheduleDate so the calendar can zip the two maps per day.
-export function groupEntriesByDate(entries) {
+// Coerce a stored flags blob. Unknown keys are dropped; a set flag always has
+// every field present (null, never undefined) so the JSON round-trip is stable.
+function normalizeFlags(f) {
+  const src = (f && typeof f === 'object') ? f : {};
   const out = {};
-  for (const e of entries || []) {
-    if (!e || !e.date) continue;
-    (out[e.date] = out[e.date] || []).push(e);
+  if (src.task) out.task = { done: !!src.task.done, due: noteDay(src.task.due) };
+  if (src.reminder && typeof src.reminder.at === 'number') out.reminder = { at: src.reminder.at };
+  if (src.calendar) {
+    out.calendar = {
+      date: noteDay(src.calendar.date) || itinTodayStr(),
+      start: noteTime(src.calendar.start), end: noteTime(src.calendar.end),
+    };
   }
-  for (const k of Object.keys(out)) out[k].sort(entryDaySort);
+  if (src.parts) {
+    out.parts = {
+      part: noteStr(src.parts.part), status: noteStr(src.parts.status),
+      distributor: noteStr(src.parts.distributor), address: noteStr(src.parts.address),
+    };
+  }
+  if (src.journal) out.journal = true;
+  if (src.contact && src.contact.contactId) out.contact = { contactId: String(src.contact.contactId) };
   return out;
 }
 
-// Undated tasks, open ones first, oldest first within each group. Events and
-// reminders always carry a date, so they can never reach the backlog.
-export function backlogEntries(entries) {
-  return (entries || [])
-    .filter(e => e && e.kind === 'task' && !e.date)
-    .sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0)
-      || (a.created || 0) - (b.created || 0)
+// Coerce anything (a note composer submit, a Schedule entry form, a legacy
+// entry, a hand-edited blob) into a storable note.
+//   `now` is the WRITE clock: pass it from a store mutator and `updated` moves;
+//   omit it (migrations, reads) and `updated` is preserved.
+// A raw with a `kind` string speaks the old entry language: its flat
+// title/date/start/end/done/remindAt fields rebuild the task/calendar/reminder
+// flags, and its title is folded into the body -- notes have no title field.
+// Any other flag already on the record (parts, journal, contact) survives.
+export function normalizeNote(raw, id, now) {
+  const r = raw || {};
+  const clock = typeof now === 'number' ? now : null;
+  const ts = typeof r.ts === 'number' ? r.ts
+    : typeof r.created === 'number' ? r.created
+    : (clock === null ? Date.now() : clock);
+  const flags = normalizeFlags(r.flags);
+  if (typeof r.kind === 'string') {
+    const kind = ENTRY_KINDS.indexOf(r.kind) !== -1 ? r.kind : 'task';
+    const day = noteDay(r.date), start = noteTime(r.start), end = noteTime(r.end);
+    delete flags.task; delete flags.calendar; delete flags.reminder;
+    if (kind === 'task') {
+      flags.task = { done: !!r.done, due: day };
+      // A dated task may still carry times; the locked task shape is {done,due},
+      // so the clock half lives on calendar (same day, one editor field).
+      if (day && (start || end)) flags.calendar = { date: day, start, end };
+    } else {
+      // An event/reminder occupies a day, so it can never be stored undated.
+      flags.calendar = { date: day || itinTodayStr(), start, end };
+    }
+    if (typeof r.remindAt === 'number') flags.reminder = { at: r.remindAt };
+  }
+  const title = typeof r.title === 'string' ? r.title.trim() : '';
+  const rest = r.body == null ? '' : String(r.body);
+  return {
+    id: id || r.id || null,
+    ts,
+    updated: clock === null ? (typeof r.updated === 'number' ? r.updated : ts) : clock,
+    type: r.type ? String(r.type) : 'Note',
+    body: title ? (rest ? title + '\n' + rest : title) : rest,
+    pinned: !!r.pinned,
+    edited: !!r.edited,
+    flags,
+    woId: r.woId ? String(r.woId).trim() : null,
+    pm: noteStr(r.pm),
+    contactId: noteStr(r.contactId),
+    tech: noteStr(r.tech),
+  };
+}
+
+// First non-blank line of the body. Notes have no title; this is what the
+// calendar chip and the reminder bell show in a title's place.
+export function noteTitle(note) {
+  const line = String((note && note.body) || '').split('\n').find(l => l.trim());
+  return line ? line.trim() : '';
+}
+
+// Project a note back into the flat entry-form view the Schedule module edits
+// (kind picker + title + date/start/end). The inverse of normalizeNote's legacy
+// branch, so form -> store -> form round-trips without drift.
+export function noteToEntryForm(note) {
+  const n = note || {};
+  const f = n.flags || {};
+  const lines = String(n.body || '').split('\n');
+  return {
+    id: n.id || null,
+    kind: f.task ? 'task' : f.reminder ? 'reminder' : f.calendar ? 'event' : 'task',
+    title: (lines[0] || '').trim(),
+    body: lines.slice(1).join('\n'),
+    date: (f.task && f.task.due) || (f.calendar && f.calendar.date) || '',
+    start: (f.calendar && f.calendar.start) || '',
+    end: (f.calendar && f.calendar.end) || '',
+    remindAt: f.reminder ? f.reminder.at : null,
+    done: !!(f.task && f.task.done),
+    tech: n.tech || null,
+    woId: n.woId || null,
+    type: n.type || 'Note',
+  };
+}
+
+// --- Migrations into the flat notes array (Admin S1) ------------------------
+// Both are IDEMPOTENT by id: a note already in the array is never appended
+// twice, and the source is emptied on the way out, so a second pass is a no-op.
+
+// o.noteCards -> notes (woId = the order's id), and noteCards removed from the
+// order. Returns BOTH halves; the caller writes them together.
+export function migrateNoteCardsToNotes(orders, notes) {
+  const list = Array.isArray(notes) ? notes.slice() : [];
+  const seen = new Set(list.map(n => n && n.id).filter(Boolean));
+  const nextOrders = (Array.isArray(orders) ? orders : []).map(o => {
+    if (!o || !Array.isArray(o.noteCards)) return o;
+    o.noteCards.forEach((c, i) => {
+      if (!c) return;
+      const id = c.id || ('n_mig_card_' + (o.id || 'x') + '_' + i);
+      if (seen.has(id)) return;
+      seen.add(id);
+      list.push(normalizeNote({ ...c, woId: o.id, pm: o.pm || null }, id));
+    });
+    const { noteCards: _drop, ...rest } = o;
+    return rest;
+  });
+  return { orders: nextOrders, notes: list };
+}
+
+// wo_data.entries -> notes. kind becomes flags (see normalizeNote), the entry
+// title folds into the body, and woId / tech / created(-> ts) / updated carry.
+export function migrateEntriesToNotes(entries, notes) {
+  const list = Array.isArray(notes) ? notes.slice() : [];
+  const seen = new Set(list.map(n => n && n.id).filter(Boolean));
+  (Array.isArray(entries) ? entries : []).forEach((e, i) => {
+    if (!e) return;
+    const id = e.id || ('n_mig_entry_' + i);
+    if (seen.has(id)) return;
+    seen.add(id);
+    list.push(normalizeNote(e, id));
+  });
+  return list;
+}
+
+// --- Note readers -----------------------------------------------------------
+
+// One WO's notes, pinned first then newest-written first. The detail pane and
+// the read-only Maps popup both render this order.
+export function notesForOrder(notes, woId) {
+  if (!woId) return [];
+  return (notes || [])
+    .filter(n => n && n.woId === woId)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.ts || 0) - (a.ts || 0));
+}
+
+// Newest written-at across one WO's notes; feeds the list-pane 'lastNote' sort.
+export function lastNoteTsFor(notes, woId) {
+  let max = 0;
+  for (const n of notes || []) if (n && n.woId === woId && (n.ts || 0) > max) max = n.ts;
+  return max;
+}
+
+// Within one day: timed items first in clock order, untimed after, then title.
+function noteDaySort(a, b) {
+  const startOf = (n) => (n.flags && n.flags.calendar && n.flags.calendar.start) || '99:99';
+  return String(startOf(a)).localeCompare(String(startOf(b)))
+    || noteTitle(a).localeCompare(noteTitle(b))
+    || String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+// { 'YYYY-MM-DD': [notes] } for every note that lands on a day -- a calendar
+// flag puts it there, a task's due date does too. Mirrors groupByScheduleDate
+// so the calendar can zip the two maps per day.
+export function groupNotesByDate(notes) {
+  const out = {};
+  for (const n of notes || []) {
+    const f = (n && n.flags) || {};
+    const day = (f.calendar && f.calendar.date) || (f.task && f.task.due);
+    if (!day) continue;
+    (out[day] = out[day] || []).push(n);
+  }
+  for (const k of Object.keys(out)) out[k].sort(noteDaySort);
+  return out;
+}
+
+// Undated tasks, open ones first, oldest first within each group. A note with
+// no task flag (a WO note, an Admin jotting) is not backlog, it is journal.
+export function backlogNotes(notes) {
+  return (notes || [])
+    .filter(n => n && n.flags && n.flags.task && !n.flags.task.due
+      && !(n.flags.calendar && n.flags.calendar.date))
+    .sort((a, b) => ((a.flags.task.done ? 1 : 0) - (b.flags.task.done ? 1 : 0))
+      || (a.ts || 0) - (b.ts || 0)
       || String(a.id || '').localeCompare(String(b.id || '')));
 }
 
@@ -510,29 +663,31 @@ function fmtRemindAt(ms) {
     + ' ' + (h < 12 ? 'AM' : 'PM');
 }
 
-// S4: entries whose remindAt has arrived, as header-bell notification items in
-// the same shape as the derived overdue items in app.jsx. Re-evaluated by the
+// Notes whose flags.reminder.at has arrived, as header-bell notification items
+// in the same shape as the derived overdue items in app.jsx. Re-evaluated by the
 // existing minute tick, so no timer lives here and a reminder that fired while
-// the app was shut simply appears on next launch.
+// the app was shut simply appears on next launch. A done task never nags.
 // `dismissed` is settings.dismissedOverdueIds -- ONE map for both kinds; ids are
 // namespaced ('overdue-' / 'reminder-') so they cannot collide, and reusing it
 // means the persisted-dismissal plumbing (dismissOverdue) is shared. schedDate
-// carries the fire time, so editing remindAt re-arms the reminder exactly as
+// carries the fire time, so editing the reminder re-arms it exactly as
 // rescheduling re-arms an overdue WO. `now` is injectable for tests.
-export function getReminderNotificationItems(entries, dismissed, now) {
+export function getReminderNotificationItems(notes, dismissed, now) {
   const ts = now || Date.now();
   const out = [];
-  for (const e of entries || []) {
-    if (!e || !e.id || typeof e.remindAt !== 'number' || e.remindAt > ts || e.done) continue;
-    const id = 'reminder-' + e.id;
-    const schedDate = String(e.remindAt);
+  for (const n of notes || []) {
+    const f = (n && n.flags) || {};
+    if (!n || !n.id || !f.reminder || typeof f.reminder.at !== 'number' || f.reminder.at > ts) continue;
+    if (f.task && f.task.done) continue;
+    const id = 'reminder-' + n.id;
+    const schedDate = String(f.reminder.at);
     if (isOverdueDismissed(dismissed, id, schedDate)) continue;
     const item = {
       id, kind: 'reminder', schedDate,
-      title: 'Reminder · ' + (e.title || 'Untitled'),
-      sub: fmtRemindAt(e.remindAt) + (e.woId ? ' · ' + e.woId : ''),
+      title: 'Reminder · ' + (noteTitle(n) || 'Untitled'),
+      sub: fmtRemindAt(f.reminder.at) + (n.woId ? ' · ' + n.woId : ''),
     };
-    if (e.woId) item.wo = e.woId;
+    if (n.woId) item.wo = n.woId;
     out.push(item);
   }
   return out;

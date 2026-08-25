@@ -102,9 +102,9 @@ export function MapInset({ wo, geocache, statusColors, statusTags, mapMarkerColo
 // (same notes shape as the detail pane) + NoteCard with no handlers (-> no
 // edit/pin/delete affordances). Shows the "More Information" misc note (o.notes)
 // plus every note card, so a tech can read a WO without leaving the map.
-function NotesViewModal({ order, onClose }) {
+function NotesViewModal({ order, notes, onClose }) {
   if (!order) return null;
-  const d = toDetailData(order);
+  const d = toDetailData(order, undefined, notes);
   const accent = DEFAULT_MORE_INFO_COLOR;
   const misc = (d.raw && d.raw.notes) || '';
   return (
@@ -128,7 +128,7 @@ function NotesViewModal({ order, onClose }) {
   );
 }
 
-export function MapsModule({ activeOrders, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
+export function MapsModule({ activeOrders, notes, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
   const [query, setQuery] = React.useState('');
   const searchRef = React.useRef(null);
   useTypeToSearch({ setValue: setQuery, inputRef: searchRef });
@@ -866,6 +866,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       {notesWO && (
         <NotesViewModal
           order={(activeOrders || []).find(o => o.id === notesWO)}
+          notes={notes}
           onClose={() => setNotesWO(null)}
         />
       )}

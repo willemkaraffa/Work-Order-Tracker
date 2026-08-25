@@ -275,10 +275,29 @@ so it reads as flakiness. The S0 test avoids it by dropping `pretendToBeVisual`,
 closing every JSDOM, turning the loop twice, setting `process.exitCode`, and
 arming an unref'd 5s watchdog. Those three files still carry it.
 
-**S1 — One note record.** Introduce the note shape above. Migrate `o.noteCards`
-and `wo_data.entries` into it. Keep reminders working through the existing bell
-(`getReminderNotificationItems` already exists and is pure). Decide the fate of
-`o.notes` "More Information" here.
+**S1 — One note record.** SHIPPED. The note shape above is live in
+`src/orders-logic.js` (`normalizeNote`), the store is ONE flat `wo_data.notes`
+array with `addNote` / `updateNote` / `deleteNote` mutators in `src/data.js`, and
+both migrations (`migrateNoteCardsToNotes`, `migrateEntriesToNotes`) run on load,
+idempotent by note id. `wo_data.entries` is deleted once emptied. Reminders still
+fire through the existing bell: `getReminderNotificationItems` keeps its
+signature and its `'reminder-' + id` dismissal keys, and now reads
+`flags.reminder.at`. The Schedule module keeps its kind picker as a FORM
+PROJECTION only (`noteToEntryForm` out, `normalizeNote`'s legacy branch back in);
+storage never sees a `kind` again. Three carried fields worth knowing: `type`
+('Note' / 'Customer call' / ...) rides along on the record until S4 maps it onto
+flags; `tech` rides along for the calendar's tech filter; a WO's detail pane now
+lists EVERY note carrying its `woId`, including a schedule task linked to it.
+
+The three S1 questions are answered (rulings by the user, 2026-08-25):
+1. **Store:** ONE flat `wo_data.notes` array. `o.noteCards` comes off every
+   order; each migrated record carries `woId`. An Admin note is the same record
+   with `woId` null. One write path, one backup.
+2. **`o.notes` "More Information" STAYS a distinct per-WO field.** It does not
+   fold into the note record; `composeNotes` and the scrape-merge path are
+   untouched.
+3. **`ts` is written-at and holds journal position; `updated` is edited-at,**
+   stored but never a sort key. Editing an old note does not bump it.
 
 **S2 — Debounced save.** Exempt note writes from `rotateBackups()`. Prove the
 write path does not rewrite the store per keystroke.
@@ -314,10 +333,12 @@ else the user wants to see in the morning. Own handoff.
 Deliberately not answered up front. Ask at the slice, in a multiple-choice prompt,
 not in prose.
 
-- **S1:** does `o.notes` "More Information" fold into the note record, or stay a
-  distinct per-WO field?
-- **S1:** does editing an old note bump it to the top of the journal, or does
-  `ts` hold its original position?
+- ~~**S1:** does `o.notes` "More Information" fold into the note record, or stay
+  a distinct per-WO field?~~ ANSWERED: stays distinct (ruling 2, see S1 above).
+- ~~**S1:** does editing an old note bump it to the top of the journal, or does
+  `ts` hold its original position?~~ ANSWERED: `ts` holds its position, `updated`
+  records the edit (ruling 3, see S1 above). The store question is answered by
+  ruling 1.
 - **S3:** module name and nav slot. "Admin" is the working name; the module id is
   still `itinerary` internally and renaming visible strings again is a third
   rename.

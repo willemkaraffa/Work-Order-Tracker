@@ -13,7 +13,7 @@
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
 
-const { getReminderNotificationItems, normalizeEntry } = loadEsm('src/orders-logic.js');
+const { getReminderNotificationItems, normalizeNote } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -24,8 +24,10 @@ function test(name, fn) {
 const NOW = Date.UTC(2026, 7, 18, 15, 0, 0); // fixed clock: tests never read Date.now()
 const MIN = 60000;
 
-// Build entries through the SHIPPED normalizeEntry so the stored shape is real.
-const mk = (raw, id) => normalizeEntry(raw, id, NOW);
+// Build notes through the SHIPPED normalizeNote so the stored shape is real. S1
+// folded entries into notes; normalizeNote's legacy branch still consumes these
+// {kind, title, remindAt, done, woId} raws, so every assertion below is unchanged.
+const mk = (raw, id) => normalizeNote(raw, id, NOW);
 
 test('due: a reminder whose remindAt has passed becomes one item', () => {
   const out = getReminderNotificationItems([mk({ kind: 'reminder', title: 'Call vendor', remindAt: NOW - MIN }, 'e1')], {}, NOW);

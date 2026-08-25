@@ -25,6 +25,7 @@ const {
   phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
   wasVisited, isTrashedReimport, clearsScheduleOnSet, isLiveSchedule, isOverdueDismissed,
+  migrateNoteCardsToNotes,
 } = loadEsm('src/orders-logic.js');
 const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
 const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
@@ -391,6 +392,20 @@ test('migrateOrders: priority field → archive note card, priority stripped', (
 test('migrateOrders: id-less note card gets a stable id', () => {
   const r = migrateOrders([{ id: 'A', tab: 'active', status: 'Open', noteCards: [{ body: 'hi' }] }], DEFAULT_PHASES);
   assert.ok(r[0].noteCards[0].id, 'expected an id assigned');
+});
+
+// Admin S1: migrateOrders still speaks o.noteCards (it is the pre-3.0 upgrade
+// path); app.jsx hands its output to migrateNoteCardsToNotes, so the archive
+// card it mints ends up in the ONE flat notes array, not back on the order.
+test('migrateOrders: its archive card lands in the flat notes array, not on the order', () => {
+  const r = migrateOrders([{ id: 'A', tab: 'active', status: 'Open', priority: 'High' }], DEFAULT_PHASES);
+  const moved = migrateNoteCardsToNotes(r, []);
+  assert.strictEqual('noteCards' in moved.orders[0], false);
+  const note = moved.notes.find(n => n.body === 'Imported priority: High');
+  assert.ok(note, 'archive card did not migrate');
+  assert.strictEqual(note.woId, 'A');
+  // Idempotent: a second pass over the already-migrated orders adds nothing.
+  assert.strictEqual(migrateNoteCardsToNotes(moved.orders, moved.notes).notes.length, moved.notes.length);
 });
 
 test('migrateOrders: active WO in a complete-flagged phase → tab=complete, schedule kept', () => {

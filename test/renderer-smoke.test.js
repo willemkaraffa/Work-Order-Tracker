@@ -100,8 +100,9 @@ async function mountCase(label, seed) {
   // Case 1: empty/default data (no stored WOs). Per lesson_test_empty_state.
   await mountCase('empty data', undefined);
 
-  // Case 2: one real-shaped WO with a saved note card + history. Exercises the
-  // data load + migrate path and the WO-list render on populated state.
+  // Case 2: one real-shaped WO with a saved note card + history, plus a legacy
+  // schedule entry and an already-migrated note. Exercises the data load +
+  // Admin S1 note migration path and the WO-list render on populated state.
   // TODO(note-card input-lock): this is the slot for the recurring edit-freeze
   // regression — drive open-WO -> edit saved note -> assert input stays writable
   // once jsdom interaction for the command center is wired (CLAUDE.md C3).
@@ -113,6 +114,10 @@ async function mountCase(label, seed) {
       noteCards: [{ id: 'n1', ts: Date.now(), type: 'Note', body: 'saved note', pinned: false, edited: false }],
       history: [{ ts: Date.now(), action: 'created' }],
     }],
+    // Pre-S1 array: must migrate into wo_data.notes on load, not crash the bell.
+    entries: [{ id: 'e1', kind: 'reminder', title: 'Call the PM', date: '2026-08-22', remindAt: 1, created: 1 }],
+    // Post-S1 record, already in the new shape.
+    notes: [{ id: 'n2', ts: Date.now(), body: 'flat note', pinned: true, flags: {}, woId: 'wo_smoke_1' }],
   };
   await mountCase('seeded WO', seed);
 

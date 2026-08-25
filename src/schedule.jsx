@@ -6,7 +6,7 @@ import React from 'react';
 import { statusColor } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
-  groupEntriesByDate, backlogEntries,
+  groupNotesByDate, backlogNotes, noteToEntryForm,
 } from './orders-logic.js';
 import { TypeIcon, Seg, ActionBtn } from './primitives.jsx';
 import {
@@ -129,10 +129,13 @@ function localInputToMs(v) {
   return Number.isNaN(t) ? null : t;
 }
 
-// Create / edit one schedule entry. `entry` is either an existing stored entry
-// or a draft ({ kind, date }) minted by the caller -- an id means edit, no id
-// means create. Field rules (undated tasks only, time format) are enforced by
-// normalizeEntry on the way into the store, not here; this form only collects.
+// Create / edit one schedule entry. `entry` is the entry-form VIEW of a note
+// (noteToEntryForm) or a draft ({ kind, date }) minted by the caller -- an id
+// means edit, no id means create. Field rules (undated tasks only, time format)
+// and the kind -> flags mapping are enforced by normalizeNote on the way into
+// the store, not here; this form only collects.
+// Admin S1: notes have no title field, so `title` is the body's first line;
+// normalizeNote folds the two back together.
 function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
   const [kind, setKind] = React.useState(entry.kind || 'task');
   const [title, setTitle] = React.useState(entry.title || '');
@@ -218,7 +221,7 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
 // seven stacked day columns, not an hour grid. No drag, no drop, no inline
 // reschedule: clicking a card opens the WO command center over this module.
 export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO,
-  entries, onAddEntry, onUpdateEntry, onDeleteEntry }) {
+  notes, onAddNote, onUpdateNote, onDeleteNote }) {
   const [view, setView] = React.useState('week');
   // The entry being created or edited, or null. A draft (no id) means create.
   const [editing, setEditing] = React.useState(null);
@@ -265,25 +268,28 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     return isAll ? list : list.filter(o => (o.tech || '') === tech);
   }, [byDate, isAll, tech]);
 
-  const byEntryDate = React.useMemo(() => groupEntriesByDate(entries), [entries]);
-  // Entries with no tech are admin work that belongs to nobody in particular,
-  // so they stay visible under every tech filter; a tech-tagged entry hides
+  // Admin S1: the calendar reads the flat notes array. A note lands on a day
+  // through flags.calendar.date or a task's flags.task.due; an undated task is
+  // backlog. Notes with neither flag (WO notes, Admin jottings) never show here.
+  const byEntryDate = React.useMemo(() => groupNotesByDate(notes), [notes]);
+  // Notes with no tech are admin work that belongs to nobody in particular,
+  // so they stay visible under every tech filter; a tech-tagged note hides
   // like a WO does.
   const entriesOn = React.useCallback((d) => {
     const list = byEntryDate[d] || [];
     return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
   }, [byEntryDate, isAll, tech]);
   const backlog = React.useMemo(() => {
-    const list = backlogEntries(entries);
+    const list = backlogNotes(notes);
     return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
-  }, [entries, isAll, tech]);
+  }, [notes, isAll, tech]);
 
   const saveEntry = (fields) => {
-    if (editing && editing.id) onUpdateEntry && onUpdateEntry(editing.id, fields);
-    else onAddEntry && onAddEntry(fields);
+    if (editing && editing.id) onUpdateNote && onUpdateNote(editing.id, fields);
+    else onAddNote && onAddNote(fields);
     setEditing(null);
   };
-  const removeEntry = (id) => { if (onDeleteEntry) onDeleteEntry(id); setEditing(null); };
+  const removeEntry = (id) => { if (onDeleteNote) onDeleteNote(id); setEditing(null); };
 
   const days = view === 'day' ? [anchor] : view === 'week' ? weekDays(anchor) : monthGrid(anchor);
   const total = days.reduce((n, d) => n + jobsOn(d).length, 0);
@@ -358,7 +364,10 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // Entry chip. Same "plain function returning JSX" rule as `card` above: not a
   // component defined in render. Clicking the row opens the editor; clicking a
   // task's checkbox only toggles done (stopPropagation), it must not open it.
-  const entryChip = (e, compact) => {
+  const entryChip = (note, compact) => {
+    // The module edits and renders the entry-form VIEW of a note (kind picker,
+    // title = first body line); normalizeNote maps it back to flags on save.
+    const e = noteToEntryForm(note);
     const isTask = e.kind === 'task';
     return (
       <div key={e.id} onClick={(ev) => { ev.stopPropagation(); setEditing(e); }}
@@ -372,7 +381,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         }}>
         {isTask && (
           <input type="checkbox" checked={!!e.done} onClick={(ev) => ev.stopPropagation()}
-            onChange={() => onUpdateEntry && onUpdateEntry(e.id, { done: !e.done })}
+            onChange={() => onUpdateNote && onUpdateNote(e.id, { ...e, done: !e.done })}
             style={{ margin: 0, cursor: 'pointer', flexShrink: 0 }} />
         )}
         {e.start && <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{itinFmtTime(e.start)}</span>}

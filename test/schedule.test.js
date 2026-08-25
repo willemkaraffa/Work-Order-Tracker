@@ -27,7 +27,7 @@ const { loadEsm } = require('./_load.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const { weekStart, weekDays, monthGrid, groupByScheduleDate, itinShiftDay, itinTodayStr,
-        normalizeEntry, groupEntriesByDate, backlogEntries, isUpcomingSchedule } = loadEsm('src/orders-logic.js');
+        normalizeNote, noteTitle, groupNotesByDate, backlogNotes, isUpcomingSchedule } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -176,72 +176,78 @@ test('groupByScheduleDate: empty / missing input is an empty map', () => {
   assert.deepStrictEqual(groupByScheduleDate(undefined), {});
 });
 
-// --- Schedule entries: normalizeEntry / grouping / backlog (S3) -------------
+// --- Schedule notes: normalizeNote / grouping / backlog (Admin S1) ---------
+// The Schedule module edits notes through the entry-form view (kind picker +
+// title); normalizeNote maps that onto flags. These assert the mapped result.
 
-test('normalizeEntry: defaults an unknown kind to task and keeps it undated', () => {
-  const e = normalizeEntry({ kind: 'bogus', title: '  Order parts  ' }, 'e-1', 1000);
-  assert.strictEqual(e.kind, 'task');
-  assert.strictEqual(e.title, 'Order parts');
-  assert.strictEqual(e.date, null);
-  assert.strictEqual(e.id, 'e-1');
-  assert.strictEqual(e.created, 1000);
-  assert.strictEqual(e.updated, 1000);
+test('normalizeNote: defaults an unknown kind to task and keeps it undated', () => {
+  const n = normalizeNote({ kind: 'bogus', title: '  Order parts  ' }, 'e-1', 1000);
+  assert.deepStrictEqual(n.flags.task, { done: false, due: null });
+  assert.strictEqual(noteTitle(n), 'Order parts');
+  assert.strictEqual(n.id, 'e-1');
+  assert.strictEqual(n.ts, 1000);
+  assert.strictEqual(n.updated, 1000);
 });
 
-test('normalizeEntry: an event is never undated (falls back to today)', () => {
-  const e = normalizeEntry({ kind: 'event', title: 'Meeting' }, 'e-2', 1000);
-  assert.strictEqual(e.date, itinTodayStr());
+test('normalizeNote: an event is never undated (falls back to today)', () => {
+  const n = normalizeNote({ kind: 'event', title: 'Meeting' }, 'e-2', 1000);
+  assert.strictEqual(n.flags.calendar.date, itinTodayStr());
 });
 
-test('normalizeEntry: rejects a malformed date and pads a short time', () => {
-  const e = normalizeEntry({ title: 'x', date: '8/18/2026', start: '9:30', end: 'nope' }, 'e-3', 1);
-  assert.strictEqual(e.date, null);
-  assert.strictEqual(e.start, '09:30');
-  assert.strictEqual(e.end, null);
+test('normalizeNote: rejects a malformed date and pads a short time', () => {
+  const n = normalizeNote({ kind: 'task', title: 'x', date: '8/18/2026', start: '9:30', end: 'nope' }, 'e-3', 1);
+  assert.strictEqual(n.flags.task.due, null);
+  // An undated task has nowhere to hang a clock, so the times drop with the day.
+  assert.strictEqual(n.flags.calendar, undefined);
+  const dated = normalizeNote({ kind: 'task', title: 'x', date: '2026-08-18', start: '9:30', end: 'nope' }, 'e-3', 1);
+  assert.deepStrictEqual(dated.flags.calendar, { date: '2026-08-18', start: '09:30', end: null });
 });
 
-test('normalizeEntry: only a task can be done; created survives an edit, updated moves', () => {
-  const first = normalizeEntry({ kind: 'task', title: 't', done: true }, 'e-4', 1000);
-  assert.strictEqual(first.done, true);
-  const edited = normalizeEntry({ ...first, kind: 'event', date: '2026-08-18' }, 'e-4', 2000);
-  assert.strictEqual(edited.done, false);
-  assert.strictEqual(edited.created, 1000);
+test('normalizeNote: switching a task to an event clears done; ts survives, updated moves', () => {
+  const first = normalizeNote({ kind: 'task', title: 't', done: true }, 'e-4', 1000);
+  assert.strictEqual(first.flags.task.done, true);
+  const edited = normalizeNote({ ...first, kind: 'event', date: '2026-08-18' }, 'e-4', 2000);
+  assert.strictEqual(edited.flags.task, undefined);
+  assert.strictEqual(edited.ts, 1000);
   assert.strictEqual(edited.updated, 2000);
 });
 
-test('normalizeEntry: absent optional links are null, never undefined', () => {
-  const e = normalizeEntry({ title: 't' }, 'e-5', 1);
-  for (const k of ['date', 'start', 'end', 'remindAt', 'woId', 'tech']) {
-    assert.strictEqual(e[k], null, k + ' should be null');
+test('normalizeNote: absent optional links are null, never undefined', () => {
+  const n = normalizeNote({ title: 't' }, 'e-5', 1);
+  for (const k of ['woId', 'tech', 'pm', 'contactId']) {
+    assert.strictEqual(n[k], null, k + ' should be null');
   }
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(e)), e); // stable round-trip
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(n)), n); // stable round-trip
 });
 
-test('groupEntriesByDate: buckets dated entries, timed before untimed', () => {
-  const g = groupEntriesByDate([
-    { id: 'b', date: '2026-08-18', start: null, title: 'zz' },
-    { id: 'a', date: '2026-08-18', start: '13:00', title: 'aa' },
-    { id: 'c', date: '2026-08-18', start: '08:00', title: 'cc' },
-    { id: 'd', date: '2026-08-19', start: '09:00', title: 'dd' },
-    { id: 'e', date: null, title: 'backlog' },
+test('groupNotesByDate: buckets dated notes, timed before untimed', () => {
+  const cal = (date, start) => ({ calendar: { date, start, end: null } });
+  const g = groupNotesByDate([
+    { id: 'b', body: 'zz', flags: cal('2026-08-18', null) },
+    { id: 'a', body: 'aa', flags: cal('2026-08-18', '13:00') },
+    { id: 'c', body: 'cc', flags: cal('2026-08-18', '08:00') },
+    { id: 'd', body: 'dd', flags: cal('2026-08-19', '09:00') },
+    { id: 'e', body: 'backlog', flags: { task: { done: false, due: null } } },
   ]);
   assert.deepStrictEqual(g['2026-08-18'].map(e => e.id), ['c', 'a', 'b']);
   assert.deepStrictEqual(g['2026-08-19'].map(e => e.id), ['d']);
   assert.deepStrictEqual(Object.keys(g).sort(), ['2026-08-18', '2026-08-19']);
 });
 
-test('groupEntriesByDate: empty / missing input is an empty map', () => {
-  assert.deepStrictEqual(groupEntriesByDate([]), {});
-  assert.deepStrictEqual(groupEntriesByDate(undefined), {});
+test('groupNotesByDate: empty / missing input is an empty map', () => {
+  assert.deepStrictEqual(groupNotesByDate([]), {});
+  assert.deepStrictEqual(groupNotesByDate(undefined), {});
 });
 
-test('backlogEntries: undated tasks only, open before done, oldest first', () => {
-  const list = backlogEntries([
-    { id: 'done-old', kind: 'task', date: null, done: true, created: 1 },
-    { id: 'open-new', kind: 'task', date: null, done: false, created: 3 },
-    { id: 'open-old', kind: 'task', date: null, done: false, created: 2 },
-    { id: 'dated', kind: 'task', date: '2026-08-18', done: false, created: 4 },
-    { id: 'event', kind: 'event', date: null, created: 5 },
+test('backlogNotes: undated tasks only, open before done, oldest first', () => {
+  const task = (done, due) => ({ task: { done, due } });
+  const list = backlogNotes([
+    { id: 'done-old', body: 'a', ts: 1, flags: task(true, null) },
+    { id: 'open-new', body: 'b', ts: 3, flags: task(false, null) },
+    { id: 'open-old', body: 'c', ts: 2, flags: task(false, null) },
+    { id: 'dated', body: 'd', ts: 4, flags: task(false, '2026-08-18') },
+    { id: 'event', body: 'e', ts: 5, flags: { calendar: { date: '2026-08-18', start: null, end: null } } },
+    { id: 'wo-note', body: 'f', ts: 6, flags: {}, woId: 'WO-1' },
   ]);
   assert.deepStrictEqual(list.map(e => e.id), ['open-old', 'open-new', 'done-old']);
 });
@@ -464,17 +470,19 @@ async function mountedChecks() {
 // --- Mounted entries: calendar chips, backlog, checkbox, editor (S3) --------
 // Own fixture and own mount: the section above asserts exact card counts, and
 // entry chips share the div[title] selector with WO cards.
+// Admin S1: the module now takes notes, not entries. The fixture is built with
+// the SHIPPED normalizeNote so the flags under test are the real ones.
 
 async function entryChecks() {
   const dom = freshDom();
   const { React, createRoot, ScheduleModule } = loadMountBridge();
 
   const today = itinTodayStr();
-  const entries = [
-    { id: 'e-task', kind: 'task', title: 'Order parts', date: today, start: '08:00', done: false, tech: null, created: 1 },
-    { id: 'e-event', kind: 'event', title: 'Team meeting', date: today, start: '12:00', done: false, tech: 'Bob', created: 2 },
-    { id: 'e-back', kind: 'task', title: 'Call vendor', date: null, done: false, tech: null, created: 3 },
-    { id: 'e-back-done', kind: 'task', title: 'File permit', date: null, done: true, tech: null, created: 4 },
+  const notes = [
+    normalizeNote({ kind: 'task', title: 'Order parts', date: today, start: '08:00', done: false, tech: null }, 'e-task', 1),
+    normalizeNote({ kind: 'event', title: 'Team meeting', date: today, start: '12:00', tech: 'Bob' }, 'e-event', 2),
+    normalizeNote({ kind: 'task', title: 'Call vendor', date: null, done: false, tech: null }, 'e-back', 3),
+    normalizeNote({ kind: 'task', title: 'File permit', date: null, done: true, tech: null }, 'e-back-done', 4),
   ];
   const orders = [
     { id: 'WO-LIVE-A', city: 'Springfield', tab: 'active', status: 'Scheduled', tech: 'Alice', type: 'Plumbing',
@@ -489,10 +497,10 @@ async function entryChecks() {
     orders, techs: ['Alice', 'Bob'], statusColors: {}, statusTags: {},
     tech, setTech: (t) => { tech = t; render(); },
     focus: null, onClearFocus: () => {}, onOpenWO: () => {},
-    entries,
-    onAddEntry: (rec) => { added.push(rec); },
-    onUpdateEntry: (id, patch) => { updated.push([id, patch]); },
-    onDeleteEntry: (id) => { deleted.push(id); },
+    notes,
+    onAddNote: (rec) => { added.push(rec); },
+    onUpdateNote: (id, patch) => { updated.push([id, patch]); },
+    onDeleteNote: (id) => { deleted.push(id); },
   }));
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
   const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
@@ -526,7 +534,7 @@ async function entryChecks() {
   // [3] checkbox toggles done through the store callback, and does NOT open the editor
   const cb = chip('Order parts').querySelector('input[type="checkbox"]');
   cb.click(); await flush();
-  ok('entries: checkbox calls onUpdateEntry with the flipped done flag',
+  ok('entries: checkbox calls onUpdateNote with the flipped done flag',
     updated.length === 1 && updated[0][0] === 'e-task' && updated[0][1].done === true, JSON.stringify(updated));
   ok('entries: checkbox click did not open the editor', container.textContent.indexOf('Edit entry') === -1);
 
@@ -556,7 +564,7 @@ async function entryChecks() {
   const blank = Array.from(container.querySelectorAll('input')).find(i => !i.type || i.type === 'text');
   typeInto(blank, 'Invoice run'); await flush();
   click(byLabel('Save')); await flush();
-  ok('entries: Save calls onAddEntry with the typed fields',
+  ok('entries: Save calls onAddNote with the typed fields',
     added.length === 1 && added[0].title === 'Invoice run' && added[0].kind === 'task' && added[0].date === null,
     JSON.stringify(added));
   ok('entries: the form closed after saving', container.textContent.indexOf('New entry') === -1);
@@ -564,7 +572,7 @@ async function entryChecks() {
   // [7] delete from the editor
   click(chip('Call vendor')); await flush();
   click(byLabel('Delete')); await flush();
-  ok('entries: Delete calls onDeleteEntry with the id', deleted.length === 1 && deleted[0] === 'e-back',
+  ok('entries: Delete calls onDeleteNote with the id', deleted.length === 1 && deleted[0] === 'e-back',
     JSON.stringify(deleted));
 
   root.unmount();
