@@ -391,10 +391,17 @@
   // Sub-Status, and Street, so new WOs can be bulk-imported from the list alone
   // (no per-detail visit). Detailed complaint/phone come from a later per-WO
   // capture on the detail page (scrapeMSR).
+  //
+  // IDENTITY ONLY: this answers WHICH page we are on, from the URL, never whether it
+  // has painted. A querySelector('a[href*="/workorder/"]') readiness check used to be
+  // ANDed in here and was removed: Aura lazy-renders the datatable, so a list the user
+  // had only just opened -- or one that is genuinely empty -- reported as "not a list
+  // page" and the scan showed the wrong error. Readiness is the caller's to judge,
+  // from the item count.
   function isMSRListPage() {
     const h = location.hostname, p = location.pathname;
     return h.includes('amherst.my.site.com') && p.includes('/partner/s/')
-      && !/\/workorder\//.test(p) && !!document.querySelector('a[href*="/workorder/"]');
+      && !/\/workorder\//.test(p);
   }
 
   // Trade from the URL slug (…/workorder/{id}/{slug}). Address-based slugs
@@ -803,24 +810,6 @@
   // iframes, scrapes their rendered documents, and never opens a window or tab.
   const MSR_ASSESSMENT_URL = 'https://amherst.my.site.com/partner/s/work-orders-in-assessment';
 
-  // WHICH lists "Find new MSR WOs" scans. Scanning ONLY the assessment list is the same bug
-  // AMH had when it queried only its AllOpen bucket: a WO that lives in another list can
-  // never be found (measured 2026-08-24 -- the user works several MSR list pages). The fix
-  // ports the AMH MECHANISM (OPEN_BUCKETS / fetch_open_orders in scrape_amh.py): load each
-  // list, merge, dedup by WO number, first occurrence wins.
-  //
-  // /partner/s/all-work-orders is DELIBERATELY absent. The user confirmed it is a superset of
-  // these three, but it also carries invoiced (historical) WOs, which would flood the new-WO
-  // review with finished work. These three are the ACTIVE work.
-  //
-  // MSR_ASSESSMENT_URL above stays the single list for the FULL capture and the single-WO
-  // path; only new-WO discovery scans the union.
-  const MSR_LIST_URLS = [
-    'https://amherst.my.site.com/partner/s/work-orders-in-assessment',
-    'https://amherst.my.site.com/partner/s/work-orders-to-approve',
-    'https://amherst.my.site.com/partner/s/work-orders-ready-to-work-on',
-  ];
-
   // Detail wins; list stub fills gaps. Mirrors the tracker merge expectations.
   function mergeMsr(stub, detail) {
     const pick = (a, b) => (a && String(a).trim()) ? a : b;
@@ -931,42 +920,27 @@
       sendResponse({ ok: false, error: 'not on an MSR page' });
       return;
     }
-    // ACK IMMEDIATELY, SCAN AFTERWARDS. Holding the message channel open for the
-    // up-to-35s iframe load does not survive MV3: the service worker sleeps during
-    // the wait and the response is lost (seen live: no result ever posted). Mirror
-    // startMsrCapture/msrCaptureResult: ack now, post the result via a fresh message.
+    // ACK IMMEDIATELY. The result goes back as its OWN message, not as this
+    // response: mirror startMsrCapture/msrCaptureResult so the worker is never
+    // waiting on an open channel.
     sendResponse({ ok: true, started: true });
-    (async () => {
-      // SEQUENTIAL, not parallel: several hidden Aura iframes alive in one tab contend for
-      // the host page's resources and that was never proven to work. Slow and correct wins.
-      console.log('[wo] find-new: scanning ' + MSR_LIST_URLS.length + ' hidden list iframes');
-      const byNum = new Map();
-      let rendered = 0;
-      for (const url of MSR_LIST_URLS) {
-        const doc = await loadInIframe(url);
-        // NO host-document fallback. Scanning `document` when the iframe failed reads the
-        // HOST tab, which may be a WO DETAIL page, and reports a handful of wrong WOs as a
-        // clean scan. A list that did not render contributes nothing.
-        const items = doc ? scanMsrList(doc) : [];
-        if (doc) rendered++;
-        // Per-list outcome to the console: foundWosResult has no field for a PARTIAL failure
-        // (and its shape is consumed by the worker + app, so it must not change), so this log
-        // is the only place a single failing list can be named.
-        console.log('[wo] find-new: ' + url + ' doc=' + (!!doc) + ' items=' + items.length);
-        for (const it of items) {
-          // Normalise for dedup only (strip non-digits, drop leading zeros); the emitted item
-          // keeps its original num/url/address. First list to carry a WO wins.
-          const key = String(it.num || '').replace(/\D/g, '').replace(/^0+/, '');
-          if (!key || byNum.has(key)) continue;
-          byNum.set(key, it);
-        }
-      }
-      const items = Array.from(byNum.values());
-      console.log('[wo] find-new: rendered ' + rendered + '/' + MSR_LIST_URLS.length + ' lists, merged items=' + items.length);
-      // Error ONLY when every list failed. One list rendering is a successful scan.
-      chrome.runtime.sendMessage({ action: 'foundWosResult', items,
-        error: rendered ? '' : 'MSR lists did not render (keep an amherst tab open and loaded, then try again).' });
-    })();
+    // Scan the list page the USER ALREADY HAS OPEN. Handing the portal's WO numbers
+    // to the app, which diffs them against the tracker, is the whole job, and this
+    // content script is already running in that tab, so `document` IS the rendered
+    // list. The previous version re-fetched those same lists into hidden Aura
+    // iframes; loadInIframe returns a doc even when polling times out, so a blank
+    // Aura shell was indistinguishable from a rendered list and got reported as a
+    // clean scan with zero items and no error.
+    const onList = isMSRListPage();
+    const items = onList ? scanMsrList(document) : [];
+    console.log('[wo] find-new: scanned host list, items=' + items.length);
+    // Three outcomes, kept apart so every message the user sees is true. Zero rows on a
+    // real list page is NOT a clean scan -- Aura may not have painted the datatable yet
+    // -- and reporting it as success is exactly the silent zero this rewrite removed.
+    let error = '';
+    if (!onList) error = 'MSR list page not open (open an MSR work order list page, then try again).';
+    else if (!items.length) error = 'MSR list has no rows yet (let the list finish loading, then try again).';
+    chrome.runtime.sendMessage({ action: 'foundWosResult', items, error });
     // no async sendResponse; do NOT return true.
   });
 
