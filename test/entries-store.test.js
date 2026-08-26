@@ -9,6 +9,10 @@
 //  - window.storage is a stub. This proves what the hook WRITES, not that
 //    Electron's storage layer keeps it.
 //  - No layout, no CSS: nothing here is a claim about appearance.
+//  - Admin S2 made the NOTE write debounced (createNoteWriter in src/data.js):
+//    dataRef/setData stay synchronous but the storage.set defers ~1.5s. flush()
+//    below drains it by dispatching beforeunload -- the hook's own flush path --
+//    so `writes` stays readable on the next tick without a wall-clock sleep.
 //
 // Run:  node test/entries-store.test.js
 // Exit code: 0 = all green, 1 = at least one fail.
@@ -97,7 +101,10 @@ async function run() {
   }
   const root = createRoot(dom.window.document.getElementById('probe'));
   root.render(React.createElement(Probe));
-  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0)); };
+  const flush = async () => {
+    dom.window.dispatchEvent(new dom.window.Event('beforeunload'));   // drain the S2 note debounce
+    for (let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+  };
   await flush();
 
   ok('store: the legacy note card migrated into the flat notes array',

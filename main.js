@@ -8,6 +8,7 @@ const { runAmhCapture, acquireToken, withProfileLock, profileDirFor, STDERR_KEY 
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
 const { chooseBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
+const backupLogic    = require('./backup-logic');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -29,7 +30,8 @@ app.on('second-instance', () => {
 // ── Data storage ──────────────────────────────────────────────────────────────
 const dataPath   = path.join(app.getPath('userData'), 'wo-data.json');
 const backupDir  = path.join(app.getPath('userData'), 'backups');
-const MAX_BACKUPS = 10;
+const milestoneDir = path.join(backupDir, backupLogic.MILESTONE_DIR);
+const { MAX_BACKUPS, MAX_MILESTONES } = backupLogic;
 
 function readStore() {
   try {
@@ -46,22 +48,52 @@ function rotateBackups() {
     const dest = path.join(backupDir, `wo-data.${ts}.json`);
     fs.copyFileSync(dataPath, dest);
 
-    // Prune oldest beyond MAX_BACKUPS
+    // Prune oldest beyond MAX_BACKUPS. isRingBackup rejects the 'milestones'
+    // directory entry, so the ring never lists (let alone unlinks) a milestone.
     const files = fs.readdirSync(backupDir)
-      .filter(f => f.startsWith('wo-data.') && f.endsWith('.json'))
-      .map(f => ({ name: f, mtime: fs.statSync(path.join(backupDir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    files.slice(MAX_BACKUPS).forEach(f => {
-      try { fs.unlinkSync(path.join(backupDir, f.name)); } catch(e) {}
+      .filter(backupLogic.isRingBackup)
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(backupDir, f)).mtimeMs }));
+    backupLogic.pruneList(files, MAX_BACKUPS).forEach(name => {
+      try { fs.unlinkSync(path.join(backupDir, name)); } catch(e) {}
     });
   } catch(e) {
     console.log('Backup rotation failed (non-fatal):', e.message);
   }
 }
 
-function writeStore(store) {
+// Milestone tier: a rollback archive the churn ring cannot evict (see
+// backup-logic.js). One snapshot per day and one per app version, kept in the
+// backups/milestones/ SUBDIRECTORY. Non-fatal throughout: a backup failure must
+// never block startup.
+function takeMilestoneIfDue() {
+  try {
+    if (!fs.existsSync(dataPath)) return;
+    const statePath = path.join(milestoneDir, backupLogic.MILESTONE_STATE);
+    let last = null;
+    try { last = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch(e) { last = null; }
+    const now = Date.now();
+    const reason = backupLogic.milestoneDue(now, app.getVersion(), last);
+    if (!reason) return;
+    fs.mkdirSync(milestoneDir, { recursive: true });
+    fs.copyFileSync(dataPath, path.join(milestoneDir, backupLogic.milestoneFileName(reason, now)));
+    fs.writeFileSync(statePath, JSON.stringify({ at: now, version: app.getVersion() }), 'utf8');
+
+    const files = fs.readdirSync(milestoneDir)
+      .filter(backupLogic.isMilestoneBackup)
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(milestoneDir, f)).mtimeMs }));
+    backupLogic.pruneList(files, MAX_MILESTONES).forEach(name => {
+      try { fs.unlinkSync(path.join(milestoneDir, name)); } catch(e) {}
+    });
+  } catch(e) {
+    console.log('Milestone backup failed (non-fatal):', e.message);
+  }
+}
+
+// opts.skipBackup: the caller opts out of the ring snapshot. Note writes use it
+// (src/data.js) because they are the high-churn path that flooded the ring.
+function writeStore(store, opts) {
   fs.mkdirSync(path.dirname(dataPath), { recursive: true });
-  rotateBackups();
+  if (!(opts && opts.skipBackup)) rotateBackups();
   fs.writeFileSync(dataPath, JSON.stringify(store, null, 2), 'utf8');
 }
 
@@ -469,6 +501,11 @@ function registerGlobalHotkey(combo) {
 }
 
 app.whenReady().then(() => {
+  // BEFORE the window. src/data.js runs migrateNoteCardsToNotes/migrateEntriesToNotes
+  // as the renderer loads and then writes, so once the window is up the file on disk
+  // is ALREADY migrated and a snapshot of it is worthless as a rollback point. This
+  // is the only moment a genuine pre-migration copy exists.
+  takeMilestoneIfDue();
   mainWin = createWindow();
   registerGlobalHotkey(currentHotkey);
   ensureTray();
@@ -487,8 +524,8 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 ipcMain.handle('storage-get', (_e, key) => {
   try { const s = readStore(); return s[key] !== undefined ? { key, value: s[key] } : null; } catch { return null; }
 });
-ipcMain.handle('storage-set', (_e, key, value) => {
-  try { const s = readStore(); s[key] = value; writeStore(s); return { key, value }; } catch { return null; }
+ipcMain.handle('storage-set', (_e, key, value, opts) => {
+  try { const s = readStore(); s[key] = value; writeStore(s, opts); return { key, value }; } catch { return null; }
 });
 ipcMain.handle('storage-delete', (_e, key) => {
   try { const s = readStore(); delete s[key]; writeStore(s); return { key, deleted: true }; } catch { return null; }
