@@ -339,9 +339,12 @@ not in prose.
   `ts` hold its original position?~~ ANSWERED: `ts` holds its position, `updated`
   records the edit (ruling 3, see S1 above). The store question is answered by
   ruling 1.
-- **S3:** module name and nav slot. "Admin" is the working name; the module id is
-  still `itinerary` internally and renaming visible strings again is a third
-  rename.
+- ~~**S3:** module name and nav slot.~~ ANSWERED 2026-08-26: rename BOTH, the
+  visible name becomes Admin AND the internal module id becomes `admin`; the nav
+  slot is UNCHANGED (placement settled later in the nav rework). Note `nav.jsx`
+  shows the visible title today is 'Schedule', so this is the third rename, and
+  `settings.lastModule` PERSISTS the id, so the rename needs a migration or the
+  user lands on a blank module. See `roadmap-handoffs/admin-s3-handoff.md`.
 - **S4:** parts flag fields — is `{part, status, distributor, address}` complete
   for what the team asks about? Does address auto-pull from a linked WO?
 - **S5:** `.md` export layout — one file per note, or one file per day appended?

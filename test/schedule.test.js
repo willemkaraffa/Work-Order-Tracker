@@ -399,10 +399,19 @@ async function mountedChecks() {
 
   render(); await flush();
 
-  // [1] default view + week grid
+  // Admin S3: the module now LANDS on the scratchpad composer, not the week
+  // calendar (schedule.jsx's `view` defaults to 'scratchpad'), so the calendar
+  // must be selected before any calendar assertion can see it. NOTHING below is
+  // weakened: every assertion expression is byte-identical to the pre-S3 file.
+  // That the scratchpad is the new default is proven in
+  // test/admin-s3-scratchpad.test.js, so the coverage lost from the label below
+  // is not lost from the suite.
+  click(byLabel('Week')); await flush();
+
+  // [1] week grid
   const text = container.textContent;
-  ok('mount: header title present', text.indexOf('Schedule') !== -1);
-  ok('mount: week is the DEFAULT view (all 7 day columns rendered)',
+  ok('mount: header title present', text.indexOf('Admin') !== -1);
+  ok('mount: Week renders all 7 day columns',
     week.every(d => text.indexOf(mmdd(d)) !== -1), 'expected columns ' + week.map(mmdd).join(','));
   // Assert on the count element's OWN text. container.textContent concatenates
   // siblings with no separator ("3 jobsDayWeekMonth"), so a trailing \b can
@@ -516,6 +525,9 @@ async function entryChecks() {
   };
 
   render(); await flush();
+  // Admin S3: land on the scratchpad, so select the calendar first (same reason
+  // as in mountedChecks). No assertion below this line is changed.
+  click(byLabel('Week')); await flush();
 
   // [1] dated entries render on the calendar
   ok('entries: dated task renders on the calendar', !!chip('Order parts'));

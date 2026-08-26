@@ -10,7 +10,7 @@ import React from 'react';
 export const MODULE_GROUPS = [
   { category: 'Order Management', items: [
     { id: 'work-orders', glyph: '▤', title: 'Work Orders', blurb: 'Track, triage, and bill jobs' },
-    { id: 'itinerary',   glyph: '◷', title: 'Schedule',    blurb: 'Calendar of scheduled jobs by day, week or month' },
+    { id: 'admin',       glyph: '◷', title: 'Admin',       blurb: 'Notepad for tasks, reminders and the schedule' },
     { id: 'maps',        glyph: '◎', title: 'Maps',        blurb: 'Locate work orders on the map' },
   ]},
   { category: 'Accounting', items: [

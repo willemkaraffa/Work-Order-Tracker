@@ -654,6 +654,24 @@ export function backlogNotes(notes) {
       || String(a.id || '').localeCompare(String(b.id || '')));
 }
 
+// Scratchpad: raw jottings, newest first. The Admin module lands on these.
+//
+// "No active flags" is literally ZERO OWN KEYS on the flags object.
+// normalizeFlags only ever ADDS a key when the flag is set -- it writes no
+// `false`/`null` placeholder for an unset one -- so there is nothing per-key to
+// test and Object.keys().length === 0 is the exact predicate. That also means a
+// flag added in a later slice needs no change here: setting it puts a key on the
+// object and the note leaves the scratchpad by itself.
+// woId null keeps WO notes out; they belong to their order's detail pane.
+// Sorted by ts (written-at), the same journal position S5 will inherit --
+// never by `updated`, so editing an old jotting does not jump it to the top.
+export function scratchpadNotes(notes) {
+  return (notes || [])
+    .filter(n => n && !n.woId && Object.keys((n && n.flags) || {}).length === 0)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0)
+      || String(b.id || '').localeCompare(String(a.id || '')));
+}
+
 // "MM/DD h:mm AM" for an epoch-ms reminder time. Mirrors fmtSchedule's shape
 // (app.jsx) but reads a timestamp instead of a {date,start} pair.
 function fmtRemindAt(ms) {

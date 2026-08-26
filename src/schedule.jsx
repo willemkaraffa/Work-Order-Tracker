@@ -6,7 +6,7 @@ import React from 'react';
 import { statusColor } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
-  groupNotesByDate, backlogNotes, noteToEntryForm,
+  groupNotesByDate, backlogNotes, noteToEntryForm, scratchpadNotes, noteTitle,
 } from './orders-logic.js';
 import { TypeIcon, Seg, ActionBtn } from './primitives.jsx';
 import {
@@ -222,7 +222,10 @@ function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
 // reschedule: clicking a card opens the WO command center over this module.
 export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO,
   notes, onAddNote, onUpdateNote, onDeleteNote }) {
-  const [view, setView] = React.useState('week');
+  // Admin S3: the module LANDS on the scratchpad, not the calendar. 'scratchpad'
+  // is a fourth value of the same `view` switch, so day/week/month still reach
+  // the calendar in one click. S6 owns the real tab restructure.
+  const [view, setView] = React.useState('scratchpad');
   // The entry being created or edited, or null. A draft (no id) means create.
   const [editing, setEditing] = React.useState(null);
   const [anchor, setAnchor] = React.useState(itinTodayStr());
@@ -283,6 +286,10 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     const list = backlogNotes(notes);
     return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
   }, [notes, isAll, tech]);
+  // Admin S3 scratchpad: unflagged, WO-less jottings, newest first. Deliberately
+  // NOT tech-filtered like backlog/entriesOn: a scratchpad note is by definition
+  // unflagged and the composer cannot set a tech, so the filter could never bite.
+  const scratch = React.useMemo(() => scratchpadNotes(notes), [notes]);
 
   const saveEntry = (fields) => {
     if (editing && editing.id) onUpdateNote && onUpdateNote(editing.id, fields);
@@ -291,6 +298,67 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   };
   const removeEntry = (id) => { if (onDeleteNote) onDeleteNote(id); setEditing(null); };
 
+  // ── Composer (Admin S3) ───────────────────────────────────────────────────
+  // Body only, no title, no date, NO MODAL -- for new jottings AND for editing
+  // an existing one. A scratchpad note never reaches EntryModal: that editor
+  // speaks the legacy entry language and noteToEntryForm defaults an unflagged
+  // note to kind 'task', so saving there would silently turn a jotting into a
+  // backlog task. The composer writes { body } and nothing else, so it cannot.
+  // `draft` is real user input; `draftId` is which row the user clicked. Neither
+  // mirrors a derived value, so useState is right for both.
+  const [draft, setDraft] = React.useState('');
+  const [draftId, setDraftId] = React.useState(null);   // null = a NEW note
+  const composerRef = React.useRef(null);
+  // Autofocus on module entry. ScheduleModule mounts when the module opens, so
+  // a mount-once effect IS "on entry". The textarea mounts unconditionally (no
+  // render guard), which is what makes the ref readable here at all.
+  React.useEffect(() => { if (composerRef.current) composerRef.current.focus(); }, []);
+  // Load a saved jotting back into the composer. Clicking a row is the ONLY way
+  // to start an edit, and it never opens a modal.
+  const editInComposer = (note) => {
+    setDraft(String(note.body || ''));
+    setDraftId(note.id);
+    if (composerRef.current) composerRef.current.focus();
+  };
+  // Called from BOTH Enter and blur. The second caller sees an already-empty
+  // draft (React re-renders between two separate events) so it cannot
+  // double-write. Clearing draftId as well as draft is what stops a stray blur
+  // after a save from rewriting the note the user just left.
+  //
+  // WHITESPACE-ONLY WRITES NOTHING, and on an in-progress edit it refuses
+  // rather than blanking: the draft is left exactly as typed and the edit stays
+  // open, so an accidental select-all-delete cannot destroy a saved jotting.
+  // Deleting a note stays a separate, explicit act.
+  //
+  // The patch is { body } and ONLY { body }: updateNote merges
+  // (normalizeNote({ ...n, ...patch }, id, now)), so ts, flags and woId survive
+  // untouched and only `updated` moves -- the S1 rule that editing an old note
+  // never jumps it up the journal.
+  const commitDraft = () => {
+    const body = draft.trim();
+    if (!body) return;
+    const id = draftId;
+    setDraft(''); setDraftId(null);
+    if (id) { if (onUpdateNote) onUpdateNote(id, { body }); }
+    else if (onAddNote) onAddNote({ body });
+  };
+  // Enter saves, Shift+Enter inserts a newline, Escape abandons. Enter is the
+  // save key because capture speed is the point: the common case is a one-line
+  // jotting, and the rare multi-line one still has a modifier. preventDefault
+  // stops Enter from also typing the newline it just refused to be. Escape is
+  // the ONLY way out of an edit without writing, because blur saves.
+  const composerKey = (ev) => {
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      setDraft(''); setDraftId(null);
+      return;
+    }
+    if (ev.key !== 'Enter' || ev.shiftKey) return;
+    ev.preventDefault();
+    commitDraft();
+  };
+
+  const isPad = view === 'scratchpad';
   const days = view === 'day' ? [anchor] : view === 'week' ? weekDays(anchor) : monthGrid(anchor);
   const total = days.reduce((n, d) => n + jobsOn(d).length, 0);
   const entryTotal = days.reduce((n, d) => n + entriesOn(d).length, 0);
@@ -392,6 +460,41 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     );
   };
 
+  // Scratchpad row. Same "plain function returning JSX" rule as `card` above.
+  // Clicking loads the note straight back into the composer -- NOT into
+  // EntryModal, which would default kind 'task' onto an unflagged jotting.
+  // noteTitle supplies the first line, as it does everywhere else. The row being
+  // edited is ringed, otherwise a composer full of text has no visible source.
+  const padRow = (note) => {
+    const lines = String(note.body || '').split('\n');
+    const first = lines.findIndex(l => l.trim());
+    const rest = first < 0 ? '' : lines.slice(first + 1).join(' ').trim();
+    return (
+      <div key={note.id} onClick={() => editInComposer(note)}
+        title={noteTitle(note)}
+        style={{
+          border: '1px solid var(--border-1)', borderRadius: 8, background: 'var(--bg-surface)',
+          cursor: 'pointer', padding: '8px 10px', fontSize: 13,
+          display: 'flex', flexDirection: 'column', gap: 2,
+          boxShadow: note.id === draftId ? '0 0 0 2px var(--accent)' : 'none',
+        }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {noteTitle(note) || '(empty)'}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text-3)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>
+            {new Date(note.ts || 0).toLocaleDateString()}
+          </span>
+        </div>
+        {rest && (
+          <div style={{ fontSize: 12, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {rest}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const emptyLine = <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No jobs scheduled</div>;
 
   return (
@@ -400,17 +503,19 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
       <div style={{ flexShrink: 0, padding: '10px 18px', borderBottom: '1px solid var(--border-1)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
-            Schedule
+            Admin
           </div>
           <button onClick={() => step(-1)} style={navBtnStyle}>&lsaquo;</button>
           <button onClick={() => setAnchor(today)} style={navBtnStyle}>Today</button>
           <button onClick={() => step(1)} style={navBtnStyle}>&rsaquo;</button>
           <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
-            {rangeLabel} - {isAll ? 'All techs' : tech} - {total} job{total === 1 ? '' : 's'}
-            {entryTotal ? ' - ' + entryTotal + (entryTotal === 1 ? ' entry' : ' entries') : ''}
+            {isPad
+              ? scratch.length + (scratch.length === 1 ? ' note' : ' notes')
+              : rangeLabel + ' - ' + (isAll ? 'All techs' : tech) + ' - ' + total + ' job' + (total === 1 ? '' : 's')
+                + (entryTotal ? ' - ' + entryTotal + (entryTotal === 1 ? ' entry' : ' entries') : '')}
           </div>
           <Seg
-            options={[{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }]}
+            options={[{ value: 'scratchpad', label: 'Notes' }, { value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }]}
             value={view}
             onChange={setView}
           />
@@ -428,9 +533,38 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         </div>
       </div>
 
-      {/* Body: calendar on the left, the undated-task backlog pinned right. */}
+      {/* Composer (Admin S3). PERMANENTLY MOUNTED: no render guard, no modal, no
+          view condition, so the cursor is live the instant the module opens and
+          stays live in every view. Body only -- meaning is added later by flags. */}
+      <div style={{ flexShrink: 0, padding: '10px 18px', borderBottom: '1px solid var(--border-1)' }}>
+        <textarea
+          ref={composerRef}
+          value={draft}
+          onChange={(ev) => setDraft(ev.target.value)}
+          onKeyDown={composerKey}
+          onBlur={commitDraft}
+          rows={2}
+          placeholder="Jot a note. Enter saves, Shift+Enter for a new line, Escape clears."
+          style={{
+            width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 44,
+            padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-1)',
+            background: 'var(--bg-surface)', color: 'var(--text-1)',
+            fontFamily: 'inherit', fontSize: 13, lineHeight: 1.4,
+          }}
+        />
+      </div>
+
+      {/* Body: scratchpad, or the calendar with the undated-task backlog pinned right. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
       <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 12 }}>
+        {isPad && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {scratch.length
+              ? scratch.map(padRow)
+              : <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No notes yet</div>}
+          </div>
+        )}
+
         {view === 'day' && (
           <div style={{ border: '1px solid ' + (anchor === today ? 'var(--accent)' : 'var(--border-1)'),
             borderRadius: 8, background: 'var(--bg-surface)' }}>

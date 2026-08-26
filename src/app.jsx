@@ -3841,7 +3841,7 @@ function App() {
   React.useEffect(() => {
     const prev = prevModuleRef.current;
     prevModuleRef.current = currentModule;
-    if (currentModule !== 'itinerary' || prev === 'itinerary') return;
+    if (currentModule !== 'admin' || prev === 'admin') return;
     if (!selectedWO) return;
     const o = orders.find(x => x.id === selectedWO);
     if (!o || !o.schedule || !o.tech) return;
@@ -4821,7 +4821,7 @@ function App() {
     dismissOverdue([n]);
     if (String(n.id).startsWith('ev-')) dismissNotif(n.id);
     if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
-    else if (n.kind === 'reminder') setCurrentModule('itinerary');
+    else if (n.kind === 'reminder') setCurrentModule('admin');
     else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
     else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
     else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
@@ -5301,7 +5301,7 @@ function App() {
     setRouteStops([]);
     toast('Sent ' + routeStops.length + ' stop' + (routeStops.length === 1 ? '' : 's') + ' to ' + tech);
     setItinFocus({ tech, date, ts: Date.now() });
-    setCurrentModule('itinerary');
+    setCurrentModule('admin');
   }, [routeStops, orders, setSchedule, toast]);
 
   // Sidebar WO-view selection always returns to the Work Orders module.
@@ -5329,7 +5329,7 @@ function App() {
   // Module entry side-effects: the schedule calendar auto-snaps to selectedWO's schedule
   // (if any); invoices highlights selectedWO row via selectedId prop.
   const switchModule = React.useCallback((m) => {
-    if (m === 'itinerary' && selectedWO) focusItinerary(selectedWO);
+    if (m === 'admin' && selectedWO) focusItinerary(selectedWO);
     // Maps: auto-select the active WO's marker on entry (mirror jumpToMap).
     if (m === 'maps' && selectedWO) setMapsSelected(selectedWO);
     setCurrentModule(m);
@@ -6032,7 +6032,7 @@ function App() {
         const o = orders.find(x => x.id === id);
         if (o && o.schedule) {
           setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now() });
-          setCurrentModule('itinerary');
+          setCurrentModule('admin');
         } else { toast('Not scheduled yet'); }
         break;
       }
@@ -6050,7 +6050,7 @@ function App() {
         // Same navigation as entering the Schedule module from the WO module:
         // scheduled -> move the calendar to its day + highlight.
         focusItinerary(id);
-        setCurrentModule('itinerary');
+        setCurrentModule('admin');
         break;
       case 'regeocode': {
         // Drop the cache entry so the App-level worker picks the WO up
@@ -6306,7 +6306,7 @@ function App() {
           activeOrders={activeOrders}
           statusColors={statusColors}
           statusTags={statusTags}
-          onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('itinerary'); }}
+          onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('admin'); }}
         />
       </>}
       detail={<DetailPane
@@ -6444,7 +6444,7 @@ function App() {
             />
           ) : currentModule === 'remittances' ? (
             <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} masterCatalog={masterCatalog} />
-          ) : currentModule === 'itinerary' ? (
+          ) : currentModule === 'admin' ? (
             <ScheduleModule
               orders={orders}
               techs={techs}

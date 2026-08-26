@@ -120,6 +120,13 @@ export function useWorkOrders() {
           parsed.moreInfoColor = DEFAULT_MORE_INFO_COLOR;
         }
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
+        // Admin S3: the module id 'itinerary' became 'admin'. lastModule is
+        // PERSISTED (app.jsx writes it on every module switch), so an un-migrated
+        // store would restore a module id no render branch matches and land the
+        // user on a blank pane. Idempotent: a store already holding 'admin' has
+        // nothing to match. Sits AFTER the settings object is guaranteed, not up
+        // with the note migrations, so it never has to re-check the type.
+        if (parsed.settings.lastModule === 'itinerary') parsed.settings.lastModule = 'admin';
         if (!parsed.settings.viewSorts || typeof parsed.settings.viewSorts !== 'object') parsed.settings.viewSorts = {};
         if (!Array.isArray(parsed.pms)   || !parsed.pms.length)   parsed.pms   = DEFAULT_PMS.slice();
         // Client fullName backfill: older data has {name, color} only. name is the
