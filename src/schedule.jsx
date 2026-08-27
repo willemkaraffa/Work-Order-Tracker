@@ -6,12 +6,12 @@ import React from 'react';
 import { statusColor } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
-  groupNotesByDate, backlogNotes, noteToEntryForm, scratchpadNotes, noteTitle,
+  groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle,
 } from './orders-logic.js';
-import { TypeIcon, Seg, ActionBtn } from './primitives.jsx';
+import { TypeIcon, Seg, ActionBtn, BinderTabs } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG,
-  navBtnStyle, HeaderChips, Modal,
+  navBtnStyle, HeaderChips,
   itinTodayStr, itinShiftDay, itinSlots, itinSnapSlot, itinFmtTime,
   itinDayLabel, itinDayMonth,
 } from './app.jsx';
@@ -115,126 +115,153 @@ export function DayTimeline({ wo, activeOrders, statusColors, statusTags, onOpen
   );
 }
 
-// remindAt is stored as epoch ms; a datetime-local input speaks
-// 'YYYY-MM-DDTHH:MM' in LOCAL time (no offset suffix), which Date.parse reads
-// back as local. Empty string both ways means "no reminder".
-function msToLocalInput(ms) {
-  if (typeof ms !== 'number') return '';
-  const d = new Date(ms), pad = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
-    + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-}
-function localInputToMs(v) {
-  const t = Date.parse(v);
-  return Number.isNaN(t) ? null : t;
-}
+// How long the pad waits after the last keystroke before it writes. RESETTING
+// debounce, so continuous typing writes nothing until you pause; this delay IS
+// the crash window.
+//
+// CRASH WINDOW, stated the way S2 states its own: a hard kill (power loss,
+// task-kill) between the last keystroke and the next idle tick loses at most
+// PAD_IDLE_MS of typing -- a few words -- plus whatever S2's disk debounce is
+// still holding. createNoteWriter coalesces the trip to disk on its own
+// NOTE_WRITE_MS timer and flushes on beforeunload, so an ordinary quit loses
+// nothing and this timer only ever moves text into memory.
+//
+// 800ms is chosen to sit just past a natural typing pause (a comma, drawing
+// breath mid-dictation) so the common case is one write per sentence rather
+// than one per keystroke, while keeping the worst case to a fragment. Longer
+// would buy fewer writes that S2 already coalesces anyway; shorter would write
+// mid-word for no gain.
+export const PAD_IDLE_MS = 800;
 
-// Create / edit one schedule entry. `entry` is the entry-form VIEW of a note
-// (noteToEntryForm) or a draft ({ kind, date }) minted by the caller -- an id
-// means edit, no id means create. Field rules (undated tasks only, time format)
-// and the kind -> flags mapping are enforced by normalizeNote on the way into
-// the store, not here; this form only collects.
-// Admin S1: notes have no title field, so `title` is the body's first line;
-// normalizeNote folds the two back together.
-function EntryModal({ entry, techs, orders, onSave, onDelete, onClose }) {
-  const [kind, setKind] = React.useState(entry.kind || 'task');
-  const [title, setTitle] = React.useState(entry.title || '');
-  const [body, setBody] = React.useState(entry.body || '');
-  const [date, setDate] = React.useState(entry.date || '');
-  const [start, setStart] = React.useState(entry.start || '');
-  const [end, setEnd] = React.useState(entry.end || '');
-  const [tech, setTech] = React.useState(entry.tech || '');
-  const [woId, setWoId] = React.useState(entry.woId || '');
-  const [remindAt, setRemindAt] = React.useState(msToLocalInput(entry.remindAt));
-  const isEdit = !!entry.id;
+// ONE autosave discipline, shared by the Scratchpad pad AND the Journal editor.
+// Written once on purpose (rule B3): two hand-rolled debounces drift, and the
+// worst bug available in this design is a timer armed for note A firing after
+// the editor has rebound to note B and writing A's text onto B's id. bind() and
+// clear() FLUSH before they rebind, so a pending write can never outlive the
+// note it belongs to.
+//
+// NOTEPAD KEYS everywhere: Enter is a newline, nothing about a keystroke saves,
+// there is no Save button. Enter-to-save shipped in both editors and was
+// rejected -- "messes me up sometimes as I forget shift+enter" -- and the hazard
+// is identical in a side panel, so the Journal autosaves too.
+//
+//   onAdd          mint a new note and RETURN its id; null for an editor that
+//                  only ever edits an existing note (the Journal panel)
+//   onUpdate       patch an existing note; the patch is { body } and ONLY
+//                  { body }, so updateNote's merge keeps ts, flags and woId and
+//                  moves only `updated` -- the S1 rule that editing an old note
+//                  never jumps it up the journal
+//   detachOnBlank  true for the pad, where emptying it starts a NEW note;
+//                  false for the Journal, where emptying it must not deselect
+function useAutosave(onAdd, onUpdate, detachOnBlank) {
+  const [text, setText] = React.useState('');
+  const [id, setId] = React.useState(null);
+  // ref is the TIMER'S ECHO of text/id, not a second source of truth: a fired
+  // timeout and an unmount cleanup both read a render closure that is already
+  // stale by the time they run, and every path below writes state and ref
+  // together. `saved` is the last text actually WRITTEN, so a blur straight
+  // after an idle tick cannot rewrite the same string -- that guard is what
+  // keeps merely opening a note and clicking away from costing a store write.
+  const ref = React.useRef({ body: '', id: null, saved: '' });
+  const timer = React.useRef(null);
+  const alive = React.useRef(true);
 
-  const fld = {
-    display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
-    border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
-    fontFamily: 'inherit', fontSize: 14, boxSizing: 'border-box',
+  const flush = () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    const p = ref.current;
+    const body = String(p.body || '').trim();
+    if (!body) return;              // blank / whitespace-only writes nothing, ever
+    if (body === p.saved) return;   // unchanged since the last write
+    if (p.id) {
+      if (onUpdate) onUpdate(p.id, { body });
+      ref.current = { ...p, saved: body };
+      return;
+    }
+    const minted = onAdd ? onAdd({ body }) : null;
+    ref.current = { ...p, id: minted || null, saved: minted ? body : p.saved };
+    // The mint can happen inside a fired timer or an unmount cleanup, so guard
+    // the setState: React must not be told to update a component that is gone.
+    if (minted && alive.current) setId(minted);
   };
-  const lbl = { fontSize: 12, color: 'var(--text-3)' };
-  // An event occupies a day, so it cannot be saved undated; the store would
-  // default it to today anyway. Say so instead of silently moving it.
-  const dateMissing = kind !== 'task' && !date;
-  const canSave = !!title.trim() && !dateMissing;
+  // Keep the unmount cleanup pointing at the LATEST flush. A cleanup declared
+  // with [] would otherwise close over the mount render's props forever.
+  const flushRef = React.useRef(flush);
+  React.useEffect(() => { flushRef.current = flush; });
+  // A7: the armed timer is cleared AND its debt is paid on unmount, so a module
+  // switch or a tab close cannot strand a pending write.
+  React.useEffect(() => () => {
+    alive.current = false;
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    flushRef.current();
+  }, []);
 
-  return (
-    <Modal open onClose={onClose} title={isEdit ? 'Edit entry' : 'New entry'} width={460}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <Seg
-          options={[{ value: 'task', label: 'Task' }, { value: 'event', label: 'Event' }, { value: 'reminder', label: 'Reminder' }]}
-          value={kind}
-          onChange={setKind}
-        />
-        <label style={lbl}>Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus style={fld} />
-        </label>
-        <label style={lbl}>{kind === 'task' ? 'Due date (blank = backlog)' : 'Day'}
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={fld} />
-        </label>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <label style={{ ...lbl, flex: 1 }}>Start
-            <input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={fld} />
-          </label>
-          <label style={{ ...lbl, flex: 1 }}>End
-            <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={fld} />
-          </label>
-        </div>
-        <label style={lbl}>Remind me (blank = no reminder)
-          <input type="datetime-local" value={remindAt} onChange={(e) => setRemindAt(e.target.value)} style={fld} />
-        </label>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <label style={{ ...lbl, flex: 1 }}>Tech
-            <select value={tech} onChange={(e) => setTech(e.target.value)} style={fld}>
-              <option value="">(anyone)</option>
-              {(techs || []).map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </label>
-          <label style={{ ...lbl, flex: 1 }}>Work order
-            <input value={woId} onChange={(e) => setWoId(e.target.value)} list="entry-wo-ids" placeholder="WO #" style={fld} />
-            <datalist id="entry-wo-ids">
-              {(orders || []).slice(0, 400).map(o => <option key={o.id} value={o.id} />)}
-            </datalist>
-          </label>
-        </div>
-        <label style={lbl}>Notes
-          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={3} style={{ ...fld, resize: 'vertical' }} />
-        </label>
-        {dateMissing && <div style={{ fontSize: 12, color: 'var(--danger, #d9534f)' }}>{kind === 'event' ? 'An event needs a day.' : 'A reminder needs a day.'}</div>}
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          {isEdit && <ActionBtn onClick={() => onDelete(entry.id)}>Delete</ActionBtn>}
-          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
-          <ActionBtn primary disabled={!canSave}
-            onClick={() => onSave({ kind, title, body, date: date || null, start: start || null, end: end || null, tech: tech || null, woId: woId || null, remindAt: localInputToMs(remindAt) })}>
-            Save
-          </ActionBtn>
-        </div>
-      </div>
-    </Modal>
-  );
+  const onChange = (ev) => {
+    const body = ev.target.value;
+    setText(body);
+    const blank = !body.trim();
+    if (detachOnBlank && blank) {
+      // A pad emptied to blank DETACHES from its note: select-all-delete is how
+      // a mouse starts a fresh note, and without this the next thing typed
+      // would silently overwrite the note just finished. The old note keeps its
+      // last saved text -- clearing the pad is not deleting a note.
+      if (ref.current.id && alive.current) setId(null);
+      ref.current = { body, id: null, saved: '' };
+    } else {
+      ref.current = { ...ref.current, body };
+    }
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => { timer.current = null; flushRef.current(); }, PAD_IDLE_MS);
+  };
+
+  // Load a saved note into the editor. FLUSHES FIRST, which is the whole point:
+  // whatever was being written lands on ITS OWN id before the editor rebinds.
+  const bind = (note) => {
+    flush();
+    const body = String((note && note.body) || '');
+    setText(body); setId((note && note.id) || null);
+    ref.current = { body, id: (note && note.id) || null, saved: body };
+  };
+  // Flush, then go back to a blank page / no selection. With autosave there is
+  // no unsaved state to abandon, so discarding the tail would be data loss.
+  const clear = () => {
+    flush();
+    setText(''); setId(null);
+    ref.current = { body: '', id: null, saved: '' };
+  };
+
+  return { text, id, onChange, flush, bind, clear };
 }
 
-// Read-only calendar over every WO that carries a schedule (NOT just active
-// ones: S1 retention keeps schedules on completed WOs, so past days still read
-// as history -- not-live jobs just render muted). Day / Week / Month; week is
-// seven stacked day columns, not an hour grid. No drag, no drop, no inline
-// reschedule: clicking a card opens the WO command center over this module.
+// The ADMIN module: a ring binder, not a calendar. Four sub-modules behind
+// binder tabs -- Scratchpad (a full-height notepad, the landing tab), Journal
+// (every note, newest first, with a pinned + undated-task quick-nav), Calendar
+// (the read-only day/week/month view, which owns ALL the calendar chrome) and
+// Contacts (S7).
+//
+// Admin S3b deleted EntryModal, the "+ New" button and the backlog rail by
+// explicit ruling: calendar chips are READ-ONLY until S4 ships flag modals.
+// The note is the primitive; a calendar entry is one thing a note becomes.
+//
+// The calendar still reads EVERY WO that carries a schedule, not just active
+// ones: S1 retention keeps schedules on completed WOs, so past days read as
+// history and not-live jobs just render muted.
 export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO,
-  notes, onAddNote, onUpdateNote, onDeleteNote }) {
-  // Admin S3: the module LANDS on the scratchpad, not the calendar. 'scratchpad'
-  // is a fourth value of the same `view` switch, so day/week/month still reach
-  // the calendar in one click. S6 owns the real tab restructure.
-  const [view, setView] = React.useState('scratchpad');
-  // The entry being created or edited, or null. A draft (no id) means create.
-  const [editing, setEditing] = React.useState(null);
+  onOpenMaps, notes, onAddNote, onUpdateNote }) {
+  // The binder tab. Lands on Scratchpad: writing is the point of the module.
+  const [tab, setTab] = React.useState('scratchpad');
+  const [view, setView] = React.useState('week');
   const [anchor, setAnchor] = React.useState(itinTodayStr());
   const [highlightId, setHighlightId] = React.useState(null);
   const highlightRef = React.useRef(null);
   const today = itinTodayStr();
   const isAll = tech === 'ALL';
 
-  React.useEffect(() => { if (techs.length && tech !== 'ALL' && !techs.includes(tech)) setTech(techs[0]); }, [techs, tech]);
+  // setTech is in the deps (rule A4): an effect that calls a function must
+  // observe it. In practice app.jsx passes the setItinTech useState setter,
+  // which React guarantees is stable, so this was a LATENT risk rather than a
+  // live stale closure -- but the guarantee lives in the caller, not here, and
+  // the day someone wraps it the omission would bite silently.
+  React.useEffect(() => { if (techs.length && tech !== 'ALL' && !techs.includes(tech)) setTech(techs[0]); }, [techs, tech, setTech]);
 
   // Apply any pending focus (jump-from-WO, Maps route send, module-entry
   // auto-tech) exactly once. App clears it via onClearFocus so a later remount
@@ -253,6 +280,13 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     if (focus.tech && techs.includes(focus.tech)) setTech(focus.tech);
     if (focus.date) setAnchor(focus.date);
     if (focus.highlightId != null) setHighlightId(focus.highlightId);
+    // S3b: the module lands on Scratchpad, so an inbound jump (WO command centre
+    // "Open in Schedule", a Maps route send) has to switch the binder to the
+    // Calendar tab or it would silently land on the notepad. Setting it HERE,
+    // in the same render pass that sets highlightId, is what keeps the
+    // scroll-into-view effect below correct: the chip's ref is attached by the
+    // time that effect re-runs (its dep list carries `tab`).
+    setTab('calendar');
     if (onClearFocus) onClearFocus();
   }, [focus && focus.ts, techs, setTech, setAnchor, setHighlightId, onClearFocus]);
 
@@ -263,7 +297,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     if (highlightId != null && highlightRef.current) {
       highlightRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
-  }, [highlightId, anchor, view, tech]);
+  }, [highlightId, anchor, view, tech, tab]);
 
   const byDate = React.useMemo(() => groupByScheduleDate(orders), [orders]);
   const jobsOn = React.useCallback((d) => {
@@ -282,80 +316,112 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     const list = byEntryDate[d] || [];
     return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
   }, [byEntryDate, isAll, tech]);
-  const backlog = React.useMemo(() => {
-    const list = backlogNotes(notes);
-    return isAll ? list : list.filter(e => !e.tech || e.tech === tech);
-  }, [notes, isAll, tech]);
   // Admin S3 scratchpad: unflagged, WO-less jottings, newest first. Deliberately
-  // NOT tech-filtered like backlog/entriesOn: a scratchpad note is by definition
+  // NOT tech-filtered like entriesOn: a scratchpad note is by definition
   // unflagged and the composer cannot set a tech, so the filter could never bite.
   const scratch = React.useMemo(() => scratchpadNotes(notes), [notes]);
 
-  const saveEntry = (fields) => {
-    if (editing && editing.id) onUpdateNote && onUpdateNote(editing.id, fields);
-    else onAddNote && onAddNote(fields);
-    setEditing(null);
-  };
-  const removeEntry = (id) => { if (onDeleteNote) onDeleteNote(id); setEditing(null); };
+  // JOURNAL body: EVERY note, newest first, jottings included. Sorted on `ts`
+  // (written-at), never `updated`, so editing an old note does not jump it --
+  // the same S1 rule scratchpadNotes follows. Derived, so useMemo, never state.
+  const journal = React.useMemo(() => (notes || [])
+    .filter(n => n && n.id)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id))),
+  [notes]);
+  const [jFilter, setJFilter] = React.useState('all');
+  const journalShown = React.useMemo(
+    () => (jFilter === 'jottings'
+      ? journal.filter(n => !n.woId && Object.keys(n.flags || {}).length === 0)
+      : journal),
+    [journal, jFilter]);
 
-  // ── Composer (Admin S3) ───────────────────────────────────────────────────
-  // Body only, no title, no date, NO MODAL -- for new jottings AND for editing
-  // an existing one. A scratchpad note never reaches EntryModal: that editor
-  // speaks the legacy entry language and noteToEntryForm defaults an unflagged
-  // note to kind 'task', so saving there would silently turn a jotting into a
-  // backlog task. The composer writes { body } and nothing else, so it cannot.
-  // `draft` is real user input; `draftId` is which row the user clicked. Neither
-  // mirrors a derived value, so useState is right for both.
-  const [draft, setDraft] = React.useState('');
-  const [draftId, setDraftId] = React.useState(null);   // null = a NEW note
+  // QUICK-NAV: the pinned notes AND the undated backlog tasks, MERGED into one
+  // list so everything important is in one spot, each row marked with WHICH it
+  // is. `pinned` is the note record's EXISTING field (app.jsx already toggles
+  // it, detail.jsx already floats pinned notes first) -- there is no second
+  // starred/flagged concept here. backlogNotes is unchanged; only its old rail
+  // was retired. A note that is both appears ONCE carrying both markers.
+  const quickNav = React.useMemo(() => {
+    const taskIds = new Set(backlogNotes(notes).map(n => n.id));
+    const seen = new Set();
+    const out = [];
+    const push = (n) => {
+      if (!n || !n.id || seen.has(n.id)) return;
+      seen.add(n.id);
+      out.push({ note: n, pinned: !!n.pinned, task: taskIds.has(n.id) });
+    };
+    // Pinned first (the "starred email" the rail is modelled on), newest first,
+    // then whatever backlog tasks are not already pinned, in backlogNotes order
+    // (open before done, oldest first).
+    (notes || []).filter(n => n && n.id && n.pinned)
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id)))
+      .forEach(push);
+    backlogNotes(notes).forEach(push);
+    return out;
+  }, [notes]);
+  const [navFilter, setNavFilter] = React.useState('all');
+  const quickNavShown = React.useMemo(
+    () => (navFilter === 'pinned' ? quickNav.filter(q => q.pinned)
+      : navFilter === 'tasks' ? quickNav.filter(q => q.task)
+      : quickNav),
+    [quickNav, navFilter]);
+
+  // ── The two editors ───────────────────────────────────────────────────────
+  // Both run the SAME autosave discipline (useAutosave above). The pad mints new
+  // notes and detaches when emptied; the Journal panel only ever edits the note
+  // that is selected, so it passes no minter and never detaches on blank.
+  const pad = useAutosave(onAddNote, onUpdateNote, true);
+  const jrn = useAutosave(null, onUpdateNote, false);
   const composerRef = React.useRef(null);
-  // Autofocus on module entry. ScheduleModule mounts when the module opens, so
-  // a mount-once effect IS "on entry". The textarea mounts unconditionally (no
-  // render guard), which is what makes the ref readable here at all.
-  React.useEffect(() => { if (composerRef.current) composerRef.current.focus(); }, []);
-  // Load a saved jotting back into the composer. Clicking a row is the ONLY way
-  // to start an edit, and it never opens a modal.
+  const jPadRef = React.useRef(null);
+
+  // Cursor live on module entry AND every time the binder comes back to the
+  // Scratchpad tab. ScheduleModule mounts when the module opens, so the first
+  // run of this effect (tab === 'scratchpad') IS "on entry". The pad is never
+  // unmounted -- inactive tabs hide it with display:none, they do not tear it
+  // down -- so the ref is always attached when this runs (rule A3), and text
+  // mid-autosave-window survives a trip to the Calendar tab and back.
+  React.useEffect(() => { if (tab === 'scratchpad' && composerRef.current) composerRef.current.focus(); }, [tab]);
+
+  // Clicking a jottings row loads it into the pad. bind() flushes first, so the
+  // note being written lands on its own id before the pad rebinds.
   const editInComposer = (note) => {
-    setDraft(String(note.body || ''));
-    setDraftId(note.id);
+    pad.bind(note);
     if (composerRef.current) composerRef.current.focus();
   };
-  // Called from BOTH Enter and blur. The second caller sees an already-empty
-  // draft (React re-renders between two separate events) so it cannot
-  // double-write. Clearing draftId as well as draft is what stops a stray blur
-  // after a save from rewriting the note the user just left.
-  //
-  // WHITESPACE-ONLY WRITES NOTHING, and on an in-progress edit it refuses
-  // rather than blanking: the draft is left exactly as typed and the edit stays
-  // open, so an accidental select-all-delete cannot destroy a saved jotting.
-  // Deleting a note stays a separate, explicit act.
-  //
-  // The patch is { body } and ONLY { body }: updateNote merges
-  // (normalizeNote({ ...n, ...patch }, id, now)), so ts, flags and woId survive
-  // untouched and only `updated` moves -- the S1 rule that editing an old note
-  // never jumps it up the journal.
-  const commitDraft = () => {
-    const body = draft.trim();
-    if (!body) return;
-    const id = draftId;
-    setDraft(''); setDraftId(null);
-    if (id) { if (onUpdateNote) onUpdateNote(id, { body }); }
-    else if (onAddNote) onAddNote({ body });
-  };
-  // Enter saves, Shift+Enter inserts a newline, Escape abandons. Enter is the
-  // save key because capture speed is the point: the common case is a one-line
-  // jotting, and the rare multi-line one still has a modifier. preventDefault
-  // stops Enter from also typing the newline it just refused to be. Escape is
-  // the ONLY way out of an edit without writing, because blur saves.
+  // Enter is a NEWLINE -- this handler deliberately lets it through untouched.
+  // Escape is the only key the pad reacts to, and with autosave it no longer
+  // means "abandon": the text is already saved, so Escape means "clear the pad
+  // and start a new note". clear() flushes first, so nothing typed is ever
+  // lost, and Escape does nothing at all on a pad that owns no note yet -- a
+  // stray press can therefore never destroy text that was never saved.
   const composerKey = (ev) => {
-    if (ev.key === 'Escape') {
-      ev.preventDefault();
-      setDraft(''); setDraftId(null);
-      return;
-    }
-    if (ev.key !== 'Enter' || ev.shiftKey) return;
+    if (ev.key !== 'Escape') return;
+    if (!pad.id) return;
     ev.preventDefault();
-    commitDraft();
+    pad.clear();
+  };
+
+  // ── Journal selection panel ───────────────────────────────────────────────
+  // Selecting a journal row swaps the quick-nav column for that note, body
+  // editable and autosaving exactly like the pad. Its own useAutosave instance,
+  // not the pad's: ruling 8 says each tab owns its side column, and one shared
+  // buffer would let a half-typed jotting leak into a saved note.
+  //
+  // jNote is DERIVED from the hook's id, not stored: if the selected note is
+  // deleted elsewhere the panel falls back to the quick-nav on its own (A1).
+  const jNote = React.useMemo(() => (notes || []).find(n => n && n.id === jrn.id) || null, [notes, jrn.id]);
+  // bind() flushes the entry being LEFT before rebinding, so switching from note
+  // A to note B mid-write can never land A's text on B's id.
+  const selectJournal = (note) => jrn.bind(note);
+  const closeJournal = () => jrn.clear();
+  // Same keys as the pad: Enter is a newline, Escape flushes then deselects.
+  // Escape is the way back to the quick-nav, and it cannot lose the tail typed
+  // since the last idle tick because clear() writes it first.
+  const journalKey = (ev) => {
+    if (ev.key !== 'Escape') return;
+    ev.preventDefault();
+    jrn.clear();
   };
 
   const isPad = view === 'scratchpad';
@@ -429,54 +495,54 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     );
   };
 
-  // Entry chip. Same "plain function returning JSX" rule as `card` above: not a
-  // component defined in render. Clicking the row opens the editor; clicking a
-  // task's checkbox only toggles done (stopPropagation), it must not open it.
+  // Calendar entry chip. READ-ONLY as of S3b: ruling 5 deleted the entry editor,
+  // so a chip renders what the flags say and nothing clicks. Reads flags
+  // DIRECTLY -- noteToEntryForm is gone from this module because projecting a
+  // note through the legacy entry form is what let an unflagged jotting acquire
+  // kind 'task'. Same "plain function returning JSX" rule as `card` above.
   const entryChip = (note, compact) => {
-    // The module edits and renders the entry-form VIEW of a note (kind picker,
-    // title = first body line); normalizeNote maps it back to flags on save.
-    const e = noteToEntryForm(note);
-    const isTask = e.kind === 'task';
+    const f = (note && note.flags) || {};
+    const isTask = !!f.task;
+    const done = !!(f.task && f.task.done);
+    const start = f.calendar && f.calendar.start;
+    const label = noteTitle(note);
     return (
-      <div key={e.id} onClick={(ev) => { ev.stopPropagation(); setEditing(e); }}
-        title={e.title + (e.tech ? ' - ' + e.tech : '') + (e.woId ? ' - ' + e.woId : '')}
+      <div key={note.id}
+        title={label + (note.tech ? ' - ' + note.tech : '') + (note.woId ? ' - ' + note.woId : '')}
         style={{
           border: '1px dashed var(--border-2)', borderLeft: '4px solid ' + (isTask ? 'var(--text-3)' : 'var(--accent)'),
-          borderRadius: 6, background: 'var(--bg-surface-2, var(--bg-surface))', cursor: 'pointer',
+          borderRadius: 6, background: 'var(--bg-surface-2, var(--bg-surface))',
           padding: compact ? '2px 4px' : '4px 7px', fontSize: compact ? 11 : 12,
           display: 'flex', gap: 5, alignItems: 'center', whiteSpace: 'nowrap', overflow: 'hidden',
-          opacity: e.done ? 0.5 : 1,
+          opacity: done ? 0.5 : 1,
         }}>
-        {isTask && (
-          <input type="checkbox" checked={!!e.done} onClick={(ev) => ev.stopPropagation()}
-            onChange={() => onUpdateNote && onUpdateNote(e.id, { ...e, done: !e.done })}
-            style={{ margin: 0, cursor: 'pointer', flexShrink: 0 }} />
-        )}
-        {e.start && <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{itinFmtTime(e.start)}</span>}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: e.done ? 'line-through' : 'none' }}>
-          {e.title || '(untitled)'}
+        {start && <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{itinFmtTime(start)}</span>}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: done ? 'line-through' : 'none' }}>
+          {label || '(untitled)'}
         </span>
       </div>
     );
   };
 
-  // Scratchpad row. Same "plain function returning JSX" rule as `card` above.
-  // Clicking loads the note straight back into the composer -- NOT into
-  // EntryModal, which would default kind 'task' onto an unflagged jotting.
-  // noteTitle supplies the first line, as it does everywhere else. The row being
-  // edited is ringed, otherwise a composer full of text has no visible source.
-  const padRow = (note) => {
+  // ONE note-row renderer, shared by the scratchpad column, the journal body and
+  // the quick-nav. A plain function returning JSX, NOT a component defined in
+  // render (rule A5) -- a component here would remount every row on each parent
+  // render and drop focus mid-click.
+  //   activeId -- the row currently loaded in an editor, drawn with a ring
+  //   onPick   -- what a click does (load into the pad / select in the journal)
+  //   marks    -- quick-nav markers, e.g. ['Pinned', 'Task']
+  const padRow = (note, activeId, onPick, marks) => {
     const lines = String(note.body || '').split('\n');
     const first = lines.findIndex(l => l.trim());
     const rest = first < 0 ? '' : lines.slice(first + 1).join(' ').trim();
     return (
-      <div key={note.id} onClick={() => editInComposer(note)}
+      <div key={note.id} onClick={() => onPick(note)}
         title={noteTitle(note)}
         style={{
           border: '1px solid var(--border-1)', borderRadius: 8, background: 'var(--bg-surface)',
           cursor: 'pointer', padding: '8px 10px', fontSize: 13,
           display: 'flex', flexDirection: 'column', gap: 2,
-          boxShadow: note.id === draftId ? '0 0 0 2px var(--accent)' : 'none',
+          boxShadow: note.id === activeId ? '0 0 0 2px var(--accent)' : 'none',
         }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -491,172 +557,295 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
             {rest}
           </div>
         )}
+        {marks && marks.length > 0 && (
+          <div style={{ display: 'flex', gap: 5, marginTop: 2 }}>
+            {marks.map(m => (
+              <span key={m} style={{
+                fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase',
+                padding: '1px 6px', borderRadius: 999,
+                border: '1px solid ' + (m === 'Pinned' ? 'var(--accent)' : 'var(--border-2)'),
+                color: m === 'Pinned' ? 'var(--accent)' : 'var(--text-3)',
+              }}>{m}</span>
+            ))}
+          </div>
+        )}
       </div>
     );
   };
 
   const emptyLine = <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No jobs scheduled</div>;
+  const colHead = (label, count) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+      borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
+      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+        {label}
+      </span>
+      {count != null && <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{count}</span>}
+    </div>
+  );
+  const asideStyle = {
+    width: 260, flexShrink: 0, borderLeft: '1px solid var(--border-1)',
+    display: 'flex', flexDirection: 'column', minHeight: 0,
+  };
+  const listStyle = {
+    flex: 1, minHeight: 0, overflow: 'auto', padding: 8,
+    display: 'flex', flexDirection: 'column', gap: 6,
+  };
+  const padStyle = {
+    flex: 1, minHeight: 0, width: '100%', boxSizing: 'border-box', resize: 'none',
+    padding: '14px 16px', borderRadius: 10, border: '1px solid var(--border-1)',
+    background: 'var(--bg-surface)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 15, lineHeight: 1.55,
+  };
 
   return (
     <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      {/* Header */}
-      <div style={{ flexShrink: 0, padding: '10px 18px', borderBottom: '1px solid var(--border-1)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
-            Admin
-          </div>
-          <button onClick={() => step(-1)} style={navBtnStyle}>&lsaquo;</button>
-          <button onClick={() => setAnchor(today)} style={navBtnStyle}>Today</button>
-          <button onClick={() => step(1)} style={navBtnStyle}>&rsaquo;</button>
-          <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
-            {isPad
-              ? scratch.length + (scratch.length === 1 ? ' note' : ' notes')
-              : rangeLabel + ' - ' + (isAll ? 'All techs' : tech) + ' - ' + total + ' job' + (total === 1 ? '' : 's')
-                + (entryTotal ? ' - ' + entryTotal + (entryTotal === 1 ? ' entry' : ' entries') : '')}
-          </div>
-          <Seg
-            options={[{ value: 'scratchpad', label: 'Notes' }, { value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }]}
-            value={view}
-            onChange={setView}
-          />
-          <select value={tech} onChange={(e) => setTech(e.target.value)} style={{
-            padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
-            background: 'var(--bg-surface)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
-          }}>
-            <option value="ALL">All techs</option>
-            {techs.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <button onClick={() => setEditing({ kind: 'task', date: view === 'day' ? anchor : '' })}
-            title="Create a task or event" style={navBtnStyle}>+ New</button>
-          <div style={{ flex: 1 }} />
-          <HeaderChips />
+      {/* Title row. S3b ruling 2: the module's top bar carries the binder and
+          nothing else -- prev/Today/next, the day/week/month switch and the tech
+          dropdown all moved inside the Calendar tab. */}
+      <div style={{ flexShrink: 0, padding: '10px 18px 8px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ fontFamily: "'Bricolage Grotesque', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: '-0.02em' }}>
+          Admin
         </div>
+        <div style={{ flex: 1 }} />
+        <HeaderChips />
       </div>
+      <BinderTabs
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { value: 'scratchpad', label: 'Scratchpad', title: 'Write first, decide later' },
+          { value: 'journal', label: 'Journal', title: 'Every note, newest first' },
+          { value: 'calendar', label: 'Calendar', title: 'Scheduled jobs and dated notes' },
+          { value: 'contacts', label: 'Contacts', title: 'Clients, distributors and PMs' },
+        ]}
+      />
 
-      {/* Composer (Admin S3). PERMANENTLY MOUNTED: no render guard, no modal, no
-          view condition, so the cursor is live the instant the module opens and
-          stays live in every view. Body only -- meaning is added later by flags. */}
-      <div style={{ flexShrink: 0, padding: '10px 18px', borderBottom: '1px solid var(--border-1)' }}>
-        <textarea
-          ref={composerRef}
-          value={draft}
-          onChange={(ev) => setDraft(ev.target.value)}
-          onKeyDown={composerKey}
-          onBlur={commitDraft}
-          rows={2}
-          placeholder="Jot a note. Enter saves, Shift+Enter for a new line, Escape clears."
-          style={{
-            width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 44,
-            padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-1)',
-            background: 'var(--bg-surface)', color: 'var(--text-1)',
-            fontFamily: 'inherit', fontSize: 13, lineHeight: 1.4,
-          }}
-        />
-      </div>
-
-      {/* Body: scratchpad, or the calendar with the undated-task backlog pinned right. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
-      <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 12 }}>
-        {isPad && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+
+        {/* SCRATCHPAD. ALWAYS MOUNTED, hidden with display:none on the other
+            tabs rather than unmounted (rule A3): the pad is ref-attached and
+            autofocused, and tearing it down would drop a half-typed jotting
+            every time the user glanced at the calendar. The pad fills the tab
+            floor to ceiling -- it IS the module, not a field in it. */}
+        <div style={{
+          display: tab === 'scratchpad' ? 'flex' : 'none',
+          flex: 1, minWidth: 0, minHeight: 0, padding: 14,
+        }}>
+          <textarea
+            ref={composerRef}
+            value={pad.text}
+            onChange={pad.onChange}
+            onKeyDown={composerKey}
+            onBlur={pad.flush}
+            placeholder="Start writing. The pad saves itself. Clear it (or press Escape) to start a new note."
+            style={padStyle}
+          />
+        </div>
+        <aside style={{ ...asideStyle, display: tab === 'scratchpad' ? 'flex' : 'none' }}>
+          {colHead('Jottings', scratch.length)}
+          <div style={listStyle}>
             {scratch.length
-              ? scratch.map(padRow)
-              : <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No notes yet</div>}
+              ? scratch.map(n => padRow(n, pad.id, editInComposer))
+              : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing yet. The pad is waiting.</div>}
+          </div>
+        </aside>
+
+        {/* JOURNAL. Body: every note, newest first, jottings included. Column:
+            the merged pinned + undated-task quick-nav, swapped for the selected
+            note's body while a row is selected. */}
+        {tab === 'journal' && (
+          <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 12,
+            display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+                {journalShown.length} {journalShown.length === 1 ? 'note' : 'notes'}
+              </span>
+              <Seg
+                options={[{ value: 'all', label: 'All' }, { value: 'jottings', label: 'Jottings' }]}
+                value={jFilter}
+                onChange={setJFilter}
+              />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {journalShown.length
+                ? journalShown.map(n => padRow(n, jrn.id, selectJournal))
+                : <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No notes yet</div>}
+            </div>
           </div>
         )}
+        {tab === 'journal' && (
+          <aside style={asideStyle}>
+            {jNote ? (<>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+                borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  Note
+                </span>
+                <div style={{ flex: 1 }} />
+                <button onClick={closeJournal} title="Back to quick-nav"
+                  style={{ ...navBtnStyle, padding: '2px 8px' }}>Back</button>
+              </div>
+              {/* Body-only editor: the pad's behaviour in a narrower box, and
+                  literally the pad's code -- same useAutosave. Enter is a
+                  newline, the text writes itself on the same idle debounce,
+                  blur flushes, unchanged text writes nothing, Escape flushes
+                  then deselects. */}
+              <div style={{ flex: 1, minHeight: 0, padding: 10, display: 'flex' }}>
+                <textarea
+                  ref={jPadRef}
+                  value={jrn.text}
+                  onChange={jrn.onChange}
+                  onKeyDown={journalKey}
+                  onBlur={jrn.flush}
+                  style={{ ...padStyle, fontSize: 13, padding: '10px 12px' }}
+                />
+              </div>
+              {/* Jump row. S4 hangs its flag buttons HERE, alongside these two --
+                  that is why it is a wrapping flex row and not a two-button bar.
+                  No flag UI is invented in this slice. */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 10px 10px', flexShrink: 0 }}>
+                {jNote.woId && (
+                  <ActionBtn title={'Open ' + jNote.woId} onClick={() => onOpenWO && onOpenWO(jNote.woId)}>
+                    {jNote.woId}
+                  </ActionBtn>
+                )}
+                {jNote.woId && onOpenMaps && (
+                  <ActionBtn title={'Show ' + jNote.woId + ' on the map'} onClick={() => onOpenMaps(jNote.woId)}>
+                    Map
+                  </ActionBtn>
+                )}
+              </div>
+            </>) : (<>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+                borderBottom: '1px solid var(--border-1)', flexShrink: 0, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                  Quick-nav
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{quickNavShown.length}</span>
+                <div style={{ flex: 1 }} />
+                <Seg
+                  options={[{ value: 'all', label: 'All' }, { value: 'pinned', label: 'Pinned' }, { value: 'tasks', label: 'Tasks' }]}
+                  value={navFilter}
+                  onChange={setNavFilter}
+                />
+              </div>
+              <div style={listStyle}>
+                {quickNavShown.length
+                  ? quickNavShown.map(q => padRow(q.note, jrn.id, selectJournal,
+                    [q.pinned ? 'Pinned' : null, q.task ? 'Task' : null].filter(Boolean)))
+                  : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing pinned, no open tasks</div>}
+              </div>
+            </>)}
+          </aside>
+        )}
 
-        {view === 'day' && (
-          <div style={{ border: '1px solid ' + (anchor === today ? 'var(--accent)' : 'var(--border-1)'),
-            borderRadius: 8, background: 'var(--bg-surface)' }}>
-            <div style={colHeadStyle(anchor)}>{itinDayLabel(anchor)}</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: 6 }}>
-              {entriesOn(anchor).map(e => entryChip(e, false))}
-              {jobsOn(anchor).map(o => card(o, false))}
-              {!jobsOn(anchor).length && !entriesOn(anchor).length && emptyLine}
+        {/* CALENDAR. Owns every piece of calendar chrome. No backlog strip:
+            ruling 3 retired the rail outright, it did not move here. Chips are
+            read-only until S4's flag modals land. */}
+        {tab === 'calendar' && (
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flexShrink: 0, padding: '10px 14px', borderBottom: '1px solid var(--border-1)',
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <button onClick={() => step(-1)} style={navBtnStyle}>&lsaquo;</button>
+              <button onClick={() => setAnchor(today)} style={navBtnStyle}>Today</button>
+              <button onClick={() => step(1)} style={navBtnStyle}>&rsaquo;</button>
+              <div style={{ fontSize: 13, color: 'var(--text-2)' }}>
+                {rangeLabel + ' - ' + (isAll ? 'All techs' : tech) + ' - ' + total + ' job' + (total === 1 ? '' : 's')
+                  + (entryTotal ? ' - ' + entryTotal + (entryTotal === 1 ? ' entry' : ' entries') : '')}
+              </div>
+              <Seg
+                options={[{ value: 'day', label: 'Day' }, { value: 'week', label: 'Week' }, { value: 'month', label: 'Month' }]}
+                value={view}
+                onChange={setView}
+              />
+              <select value={tech} onChange={(e) => setTech(e.target.value)} style={{
+                padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border-1)',
+                background: 'var(--bg-surface)', color: 'var(--text-1)', fontFamily: 'inherit', fontSize: 13,
+              }}>
+                <option value="ALL">All techs</option>
+                {techs.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 12 }}>
+              {view === 'day' && (
+                <div style={{ border: '1px solid ' + (anchor === today ? 'var(--accent)' : 'var(--border-1)'),
+                  borderRadius: 8, background: 'var(--bg-surface)' }}>
+                  <div style={colHeadStyle(anchor)}>{itinDayLabel(anchor)}</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: 6 }}>
+                    {entriesOn(anchor).map(e => entryChip(e, false))}
+                    {jobsOn(anchor).map(o => card(o, false))}
+                    {!jobsOn(anchor).length && !entriesOn(anchor).length && emptyLine}
+                  </div>
+                </div>
+              )}
+
+              {view === 'week' && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 6 }}>
+                  {days.map(d => (
+                    <div key={d} style={{
+                      border: '1px solid ' + (d === today ? 'var(--accent)' : 'var(--border-1)'),
+                      borderRadius: 8, background: 'var(--bg-surface)', minHeight: 120,
+                      display: 'flex', flexDirection: 'column', minWidth: 0,
+                    }}>
+                      <div style={colHeadStyle(d)}>{weekdayOf(d)} {itinDayMonth(d)}</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 5 }}>
+                        {entriesOn(d).map(e => entryChip(e, false))}
+                        {jobsOn(d).map(o => card(o, false))}
+                      </div>
+                    </div>
+                  ))}
+                  {total === 0 && entryTotal === 0 && <div style={{ gridColumn: '1 / -1' }}>{emptyLine}</div>}
+                </div>
+              )}
+
+              {view === 'month' && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 4 }}>
+                  {days.map(d => {
+                    const jobs = jobsOn(d);
+                    const ents = entriesOn(d);
+                    // Cell is short: at most 2 entries + 3 jobs, the rest rolls into "+N more".
+                    const hidden = Math.max(0, ents.length - 2) + Math.max(0, jobs.length - 3);
+                    const inMonth = d.slice(0, 7) === anchor.slice(0, 7);
+                    return (
+                      <div key={d} onClick={() => { setAnchor(d); setView('day'); }} style={{
+                        border: '1px solid ' + (d === today ? 'var(--accent)' : 'var(--border-1)'),
+                        borderRadius: 6, background: 'var(--bg-surface)', minHeight: 84, cursor: 'pointer',
+                        padding: 4, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0,
+                        opacity: inMonth ? 1 : 0.45,
+                      }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: d === today ? 'var(--accent)' : 'var(--text-3)' }}>
+                          {Number(d.slice(8))}
+                        </div>
+                        {ents.slice(0, 2).map(e => entryChip(e, true))}
+                        {jobs.slice(0, 3).map(o => card(o, true))}
+                        {hidden > 0 && (
+                          <div style={{ fontSize: 10, color: 'var(--text-3)' }}>+{hidden} more</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {view === 'week' && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 6 }}>
-            {days.map(d => (
-              <div key={d} style={{
-                border: '1px solid ' + (d === today ? 'var(--accent)' : 'var(--border-1)'),
-                borderRadius: 8, background: 'var(--bg-surface)', minHeight: 120,
-                display: 'flex', flexDirection: 'column', minWidth: 0,
-              }}>
-                <div style={colHeadStyle(d)}>{weekdayOf(d)} {itinDayMonth(d)}</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 5 }}>
-                  {entriesOn(d).map(e => entryChip(e, false))}
-                  {jobsOn(d).map(o => card(o, false))}
-                </div>
-              </div>
-            ))}
-            {total === 0 && entryTotal === 0 && <div style={{ gridColumn: '1 / -1' }}>{emptyLine}</div>}
+        {/* CONTACTS. Empty until S7. No record shape, no fields, nothing
+            speculative. */}
+        {tab === 'contacts' && (
+          <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 24 }}>
+            <div style={{ maxWidth: 460, color: 'var(--text-3)', fontSize: 13, lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 700, color: 'var(--text-2)', marginBottom: 6 }}>Contacts</div>
+              The contacts book -- clients, distributors and PMs -- lands in S7.
+              Until then a contact is just a note: write it on the Scratchpad and
+              it is in the Journal.
+            </div>
           </div>
         )}
 
-        {view === 'month' && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: 4 }}>
-            {days.map(d => {
-              const jobs = jobsOn(d);
-              const ents = entriesOn(d);
-              // Cell is short: at most 2 entries + 3 jobs, the rest rolls into "+N more".
-              const hidden = Math.max(0, ents.length - 2) + Math.max(0, jobs.length - 3);
-              const inMonth = d.slice(0, 7) === anchor.slice(0, 7);
-              return (
-                <div key={d} onClick={() => { setAnchor(d); setView('day'); }} style={{
-                  border: '1px solid ' + (d === today ? 'var(--accent)' : 'var(--border-1)'),
-                  borderRadius: 6, background: 'var(--bg-surface)', minHeight: 84, cursor: 'pointer',
-                  padding: 4, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0,
-                  opacity: inMonth ? 1 : 0.45,
-                }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: d === today ? 'var(--accent)' : 'var(--text-3)' }}>
-                    {Number(d.slice(8))}
-                  </div>
-                  {ents.slice(0, 2).map(e => entryChip(e, true))}
-                  {jobs.slice(0, 3).map(o => card(o, true))}
-                  {hidden > 0 && (
-                    <div style={{ fontSize: 10, color: 'var(--text-3)' }}>+{hidden} more</div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
-
-      {/* Backlog: undated tasks. Dating one (in the editor) moves it onto the
-          calendar; there is no drag target, by design. */}
-      <aside style={{ width: 240, flexShrink: 0, borderLeft: '1px solid var(--border-1)',
-        display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: '1px solid var(--border-1)' }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-            Backlog
-          </span>
-          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{backlog.length}</span>
-          <div style={{ flex: 1 }} />
-          <button onClick={() => setEditing({ kind: 'task', date: '' })} title="Add an undated task"
-            style={{ ...navBtnStyle, padding: '2px 8px' }}>+</button>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {backlog.length
-            ? backlog.map(e => entryChip(e, false))
-            : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>No undated tasks</div>}
-        </div>
-      </aside>
-      </div>
-
-      {editing && (
-        <EntryModal
-          entry={editing}
-          techs={techs}
-          orders={orders}
-          onSave={saveEntry}
-          onDelete={removeEntry}
-          onClose={() => setEditing(null)}
-        />
-      )}
     </div>
   );
 }

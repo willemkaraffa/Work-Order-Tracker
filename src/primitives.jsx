@@ -233,6 +233,51 @@ export function Seg({ options, value, onChange, equal }) {
   );
 }
 
+
+// Binder tabs: the tabs of a ring binder or a folder drawer, across the top of
+// a pane, switching SUB-MODULES. Deliberately NOT Seg (above): Seg is a compact
+// segmented toggle for one value inside a toolbar, and using it as a pane's
+// primary switch is what made the Admin module read as a calendar with a text
+// field bolted on. These read as physical tabs -- the active one is raised,
+// carries an accent edge and bleeds into the body below it, the inactive ones
+// sit recessed on the strip.
+//
+// Lives in primitives, not in schedule.jsx, because Admin is not the only pane
+// heading for sub-modules (S5 journal views, S7 contacts, the planned Overview
+// rebuild), and a second pane inventing a third tab vocabulary is exactly the
+// drift this file exists to prevent.
+//
+// tabs: [{ value, label, title? }]. A plain map, no component defined in render.
+export function BinderTabs({ tabs, value, onChange }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-end', gap: 4,
+      padding: '0 18px', flexShrink: 0,
+      borderBottom: '1px solid var(--border-1)',
+      background: 'var(--bg-surface)',
+    }}>
+      {(tabs || []).map(t => {
+        const on = t.value === value;
+        return (
+          <button key={t.value} onClick={() => onChange(t.value)} title={t.title || t.label}
+            style={{
+              marginBottom: -1,
+              padding: on ? '10px 20px 11px' : '8px 18px 9px',
+              border: '1px solid var(--border-1)',
+              borderBottom: '1px solid ' + (on ? 'var(--bg-canvas)' : 'var(--border-1)'),
+              borderRadius: '9px 9px 0 0',
+              background: on ? 'var(--bg-canvas)' : 'transparent',
+              color: on ? 'var(--text-1)' : 'var(--text-3)',
+              boxShadow: on ? 'inset 0 3px 0 var(--accent)' : 'none',
+              fontFamily: 'inherit', fontSize: 13, fontWeight: on ? 700 : 500,
+              cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>{t.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
 export const miniBtnStyle = {
   height: 20, padding: '0 5px',
   background: 'var(--bg-canvas)', border: '1px solid var(--border-1)',

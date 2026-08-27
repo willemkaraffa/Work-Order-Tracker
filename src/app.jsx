@@ -6455,10 +6455,10 @@ function App() {
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
               onOpenWO={openWO}
+              onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
               notes={notes}
               onAddNote={storeAddNote}
               onUpdateNote={storeUpdateNote}
-              onDeleteNote={storeDeleteNote}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>

@@ -214,18 +214,29 @@ async function hookChecks() {
   ok('migration: an unrelated module id is left alone', other === 'invoices', String(other));
 }
 
-// ───────────── C. the real ScheduleModule: the mounted composer ──────────────
+// ───────────── C. the real ScheduleModule: the AUTOSAVING pad ────────────────
+// S3b amendment. Enter-to-save shipped and was rejected on sight, so the pad is
+// now a notepad: Enter is a newline, no keystroke saves, and the text writes
+// itself on an idle timer. Every assertion below that encoded Enter-saves or
+// Shift+Enter was DELETED with the behaviour, the same way the EntryModal
+// assertions were -- keeping one would assert a feature the human ordered gone.
+//
+// The timer is driven by PAD_IDLE_MS exported from the module, never by a
+// guessed sleep, so this file cannot silently rot if the delay is retuned.
 
 async function composerChecks() {
   stored = { orders: [], presets: [], inboxes: [], notes: [], settings: {} };
   const dom = freshDom();
-  const { React, createRoot, ScheduleModule } = bundle('admin-s3-mount-entry', [
+  const { React, createRoot, ScheduleModule, PAD_IDLE_MS } = bundle('admin-s3-mount-entry', [
     "import React from 'react';",
     "import { createRoot } from 'react-dom/client';",
-    "import { ScheduleModule } from './src/schedule.jsx';",
-    "export { React, createRoot, ScheduleModule };",
+    "import { ScheduleModule, PAD_IDLE_MS } from './src/schedule.jsx';",
+    "export { React, createRoot, ScheduleModule, PAD_IDLE_MS };",
   ]);
 
+  // onAddNote returns the minted id, exactly as data.js addNote does. Without
+  // that the pad could never update the note it just created.
+  let seq = 0;
   const added = [], edits = [];
   const notes = [
     normalizeNote({ body: 'older jotting', ts: 100 }, 's-old'),
@@ -237,17 +248,14 @@ async function composerChecks() {
   const render = () => root.render(React.createElement(ScheduleModule, {
     orders: [], techs: ['Alice'], statusColors: {}, statusTags: {},
     tech: 'ALL', setTech: () => {},
-    focus: null, onClearFocus: () => {}, onOpenWO: () => {},
+    focus: null, onClearFocus: () => {}, onOpenWO: () => {}, onOpenMaps: () => {},
     notes,
-    onAddNote: (rec) => { added.push(rec); },
+    onAddNote: (rec) => { added.push(rec); return 'minted-' + (++seq); },
     onUpdateNote: (id, patch) => { edits.push([id, patch]); },
-    onDeleteNote: () => {},
   }));
   render(); await tick();
 
   const pad = () => container.querySelector('textarea');
-  // React installs its own value setter on the node; assigning .value directly
-  // never reaches onChange. Call the prototype setter, then fire input.
   const typeInto = (el, v) => {
     const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value');
     desc.set.call(el, v);
@@ -258,118 +266,172 @@ async function composerChecks() {
   const row = (t) => Array.from(container.querySelectorAll('div[title]'))
     .find(d => d.getAttribute('title') === t);
   const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  // The ONLY wall-clock wait in this file, and it is the timer under test.
+  const idle = async () => { await new Promise(r => setTimeout(r, PAD_IDLE_MS + 60)); await tick(); };
+  const BLANKS = '   \t  ';
 
-  ok('composer: a textarea is mounted with no interaction at all', !!pad());
-  ok('composer: it has focus on module entry',
-    !!pad() && dom.window.document.activeElement === pad(), String(dom.window.document.activeElement && dom.window.document.activeElement.tagName));
+  ok('pad: a textarea is mounted with no interaction at all', !!pad());
+  ok('pad: it has focus on module entry',
+    !!pad() && dom.window.document.activeElement === pad(),
+    String(dom.window.document.activeElement && dom.window.document.activeElement.tagName));
+  ok('pad: the placeholder no longer promises Enter saves',
+    (pad().placeholder || '').indexOf('Enter saves') === -1, pad().placeholder);
 
   // The default body view is the scratchpad, newest first, task note excluded.
   const rowTitles = Array.from(container.querySelectorAll('div[title]')).map(d => d.getAttribute('title'));
   ok('scratchpad view is the DEFAULT body view, newest first',
     rowTitles.indexOf('newest jotting') === 0 && rowTitles.indexOf('older jotting') === 1, rowTitles.join(','));
-  ok('scratchpad view does not list the task note (it stays in the backlog)',
-    rowTitles.indexOf('Call vendor') > 1 || rowTitles.indexOf('Call vendor') === -1, rowTitles.join(','));
+  ok('scratchpad view does not list the task note (it stays in the quick-nav)',
+    rowTitles.indexOf('Call vendor') === -1, rowTitles.join(','));
 
-  // POSITIVE CONTROL FIRST. Without it, every "wrote nothing" below would also
-  // pass against a composer that does not work at all.
+  // Enter is a NEWLINE. Nothing about a keystroke saves.
   typeInto(pad(), 'buy a new torch'); await tick();
   press(pad(), 'Enter'); await tick();
-  ok('composer: Enter writes the note, body only',
-    added.length === 1 && added[0].body === 'buy a new torch' && !added[0].kind, JSON.stringify(added));
-  ok('composer: saving clears the draft', pad().value === '', JSON.stringify(pad().value));
-  ok('composer: focus stays in the composer after an Enter save',
-    dom.window.document.activeElement === pad(), String(dom.window.document.activeElement && dom.window.document.activeElement.tagName));
-
-  // Shift+Enter must NOT save (it inserts a newline instead).
-  typeInto(pad(), 'line one'); await tick();
+  ok('pad: Enter writes NOTHING (it is a newline, not a save key)',
+    added.length === 0 && edits.length === 0, JSON.stringify({ added, edits }));
+  ok('pad: Enter does not clear the pad', pad().value === 'buy a new torch', pad().value);
   press(pad(), 'Enter', true); await tick();
-  ok('composer: Shift+Enter does NOT save', added.length === 1, JSON.stringify(added));
-  typeInto(pad(), ''); await tick();
+  ok('pad: Shift+Enter writes nothing either (it has no special meaning now)',
+    added.length === 0 && edits.length === 0, JSON.stringify({ added, edits }));
 
-  // THE SPEC CASE: whitespace-only writes nothing, on either save path.
-  const before = added.length;
-  typeInto(pad(), '   \n\t  '); await tick();
-  press(pad(), 'Enter'); await tick();
-  ok('composer: a whitespace-only Enter writes NOTHING', added.length === before, JSON.stringify(added.slice(before)));
+  // Autosave: one note per idle pause, NOT one per keystroke.
+  typeInto(pad(), 'buy a new torch a'); await tick();
+  typeInto(pad(), 'buy a new torch an'); await tick();
+  typeInto(pad(), 'buy a new torch and tape'); await tick();
+  ok('pad: rapid typing issues NO write while the timer is still running',
+    added.length === 0 && edits.length === 0, JSON.stringify({ added, edits }));
+  await idle();
+  ok('pad: one idle pause mints EXACTLY ONE note, carrying the latest text',
+    added.length === 1 && added[0].body === 'buy a new torch and tape', JSON.stringify(added));
+  ok('pad: the minted note is body-only -- no kind, no flags',
+    JSON.stringify(Object.keys(added[0])) === '["body"]', JSON.stringify(added[0]));
+  ok('pad: autosaving does NOT clear the pad (you are still writing in it)',
+    pad().value === 'buy a new torch and tape', pad().value);
+
+  typeInto(pad(), 'buy a new torch and tape, from Ferguson'); await tick();
+  await idle();
+  ok('pad: continued typing UPDATES the same note, it does not mint a second',
+    added.length === 1 && edits.length === 1 && edits[0][0] === 'minted-1'
+      && edits[0][1].body === 'buy a new torch and tape, from Ferguson',
+    JSON.stringify({ added, edits }));
+  ok('pad: the update patch carries body and NOTHING else',
+    JSON.stringify(Object.keys(edits[0][1])) === '["body"]', JSON.stringify(edits[0][1]));
+
+  // Blur flushes immediately, without waiting out the timer.
+  typeInto(pad(), 'blurred before the timer fired'); await tick();
   pad().blur(); await tick();
-  ok('composer: a whitespace-only blur writes NOTHING', added.length === before, JSON.stringify(added.slice(before)));
+  ok('pad: blur flushes at once, no idle wait',
+    edits.length === 2 && edits[1][1].body === 'blurred before the timer fired', JSON.stringify(edits));
+  pad().blur(); await tick();
+  ok('pad: a second blur with unchanged text writes nothing more', edits.length === 2, JSON.stringify(edits));
 
-  // Blur saves a real body.
+  // Escape clears ONLY once a note exists.
   pad().focus();
-  typeInto(pad(), 'boss wants the Cecil invoice chased'); await tick();
-  pad().blur(); await tick();
-  ok('composer: blur writes the note',
-    added.length === before + 1 && added[before].body === 'boss wants the Cecil invoice chased',
-    JSON.stringify(added.slice(before)));
-  ok('composer: blur-save cleared the draft, so a later blur cannot double-write', pad().value === '');
-  pad().blur(); await tick();
-  ok('composer: a second blur after a save writes nothing more', added.length === before + 1, JSON.stringify(added.slice(before)));
+  press(pad(), 'Escape'); await tick();
+  ok('pad: Escape clears the pad once the note is saved', pad().value === '', JSON.stringify(pad().value));
+  ok('pad: Escape flushed first, so nothing typed was lost', edits.length === 2, JSON.stringify(edits));
 
-  // ── editing a saved jotting happens IN THE COMPOSER, never in EntryModal ──
-  // EntryModal's form defaults an unflagged note to kind 'task', so opening a
-  // scratchpad row there would convert it into a backlog task on save. These
-  // checks are what hold that door shut.
-  const addedBeforeEdit = added.length;
+  // A pad that owns no note yet must ignore Escape entirely, so a stray press
+  // can never destroy text that was never saved.
+  const beforeStray = added.length + edits.length;
+  typeInto(pad(), 'not saved yet'); await tick();
+  press(pad(), 'Escape'); await tick();
+  ok('pad: Escape does NOTHING on a pad with no saved note (unsaved text survives)',
+    pad().value === 'not saved yet' && added.length + edits.length === beforeStray,
+    JSON.stringify({ value: pad().value, added, edits }));
+
+  // After a clear, the pad is writing a NEW note, not the old one.
+  await idle();
+  ok('pad: typing after a clear mints a NEW note instead of overwriting the last',
+    added.length === 2 && added[1].body === 'not saved yet' && edits.length === 2,
+    JSON.stringify({ added, edits }));
+
+  // Blank / whitespace-only never mints.
+  const beforeBlank = added.length;
+  typeInto(pad(), BLANKS); await tick();
+  await idle();
+  ok('pad: a whitespace-only pad mints NOTHING on the idle tick', added.length === beforeBlank,
+    JSON.stringify(added.slice(beforeBlank)));
+  pad().blur(); await tick();
+  ok('pad: a whitespace-only pad mints NOTHING on blur either', added.length === beforeBlank,
+    JSON.stringify(added.slice(beforeBlank)));
+  ok('pad: emptying the pad DETACHES it, so the note just written is not blanked',
+    edits.every(e => String(e[1].body || '').trim() !== ''), JSON.stringify(edits));
+
+  // Clicking a saved jotting edits it IN THE PAD, never in a modal.
+  pad().focus();
+  typeInto(pad(), ''); await tick();
+  const editsBefore = edits.length, addedBefore = added.length;
 
   click(row('older jotting')); await tick();
-  ok('edit: clicking a row loads its body into the composer',
+  ok('edit: clicking a row loads its body into the pad',
     pad().value === 'older jotting', JSON.stringify(pad().value));
-  ok('edit: clicking a row opens NO modal (EntryModal never renders)',
+  ok('edit: clicking a row opens NO modal (EntryModal is gone)',
     container.textContent.indexOf('Edit entry') === -1 && container.textContent.indexOf('New entry') === -1,
     container.textContent.slice(0, 200));
-  ok('edit: the composer is focused after a row click',
-    dom.window.document.activeElement === pad());
+  ok('edit: the pad is focused after a row click', dom.window.document.activeElement === pad());
+  ok('edit: merely loading a row writes nothing',
+    edits.length === editsBefore && added.length === addedBefore, JSON.stringify({ added, edits }));
 
   typeInto(pad(), 'older jotting, revised'); await tick();
-  press(pad(), 'Enter'); await tick();
-  ok('edit: saving calls onUpdateNote with the clicked row id',
-    edits.length === 1 && edits[0][0] === 's-old', JSON.stringify(edits));
-  ok('edit: saving does NOT call onAddNote (no duplicate note)',
-    added.length === addedBeforeEdit, JSON.stringify(added.slice(addedBeforeEdit)));
-  ok('edit: the patch carries body and NOTHING else -- no kind, so no task flag',
-    edits.length === 1 && JSON.stringify(Object.keys(edits[0][1])) === '["body"]'
-      && edits[0][1].body === 'older jotting, revised', JSON.stringify(edits));
-  ok('edit: the draft cleared after the update', pad().value === '');
+  await idle();
+  ok('edit: autosave updates the CLICKED note, by its own id',
+    edits.length === editsBefore + 1 && edits[editsBefore][0] === 's-old'
+      && edits[editsBefore][1].body === 'older jotting, revised', JSON.stringify(edits.slice(editsBefore)));
+  ok('edit: editing a saved note never calls onAddNote (no duplicate)',
+    added.length === addedBefore, JSON.stringify(added.slice(addedBefore)));
 
-  // The edit target must be released, or the next jotting would overwrite it.
+  // Clearing the pad detaches it from that note, so the next thing typed is a
+  // NEW note and cannot overwrite the one just edited.
+  typeInto(pad(), ''); await tick();
   typeInto(pad(), 'a brand new jotting'); await tick();
-  press(pad(), 'Enter'); await tick();
-  ok('edit: the NEXT jotting after an edit calls onAddNote, not onUpdateNote',
-    added.length === addedBeforeEdit + 1 && added[added.length - 1].body === 'a brand new jotting'
-      && edits.length === 1, JSON.stringify({ added: added.slice(addedBeforeEdit), edits }));
-
-  // Escape abandons an edit without writing. It is the only way out, since blur saves.
-  click(row('newest jotting')); await tick();
-  ok('edit: a second row loads too', pad().value === 'newest jotting', JSON.stringify(pad().value));
-  typeInto(pad(), 'newest jotting, mangled'); await tick();
-  press(pad(), 'Escape'); await tick();
-  ok('edit: Escape clears the draft', pad().value === '', JSON.stringify(pad().value));
-  ok('edit: Escape wrote nothing',
-    edits.length === 1 && added.length === addedBeforeEdit + 1,
-    JSON.stringify({ edits, added: added.slice(addedBeforeEdit) }));
-  pad().blur(); await tick();
-  ok('edit: a blur after Escape still writes nothing (the edit target was released)',
-    edits.length === 1 && added.length === addedBeforeEdit + 1,
-    JSON.stringify({ edits, added: added.slice(addedBeforeEdit) }));
-
-  // Whitespace-only must not BLANK an existing note. It refuses the write and
-  // leaves the draft as typed, with the edit still open.
-  pad().focus();
-  click(row('older jotting')); await tick();
-  typeInto(pad(), '   \t '); await tick();
-  press(pad(), 'Enter'); await tick();
-  ok('edit: a whitespace-only submit does NOT blank the note being edited',
-    edits.length === 1, JSON.stringify(edits));
-  ok('edit: a refused whitespace submit leaves the draft exactly as typed',
-    pad().value === '   \t ', JSON.stringify(pad().value));
-  typeInto(pad(), 'recovered after the refusal'); await tick();
-  press(pad(), 'Enter'); await tick();
-  ok('edit: the edit stayed OPEN through the refusal (still updates, never adds)',
-    edits.length === 2 && edits[1][0] === 's-old' && edits[1][1].body === 'recovered after the refusal'
-      && added.length === addedBeforeEdit + 1,
-    JSON.stringify({ edits, added: added.slice(addedBeforeEdit) }));
+  await idle();
+  ok('edit: after clearing, the next text mints a NEW note rather than overwriting',
+    added.length === addedBefore + 1 && added[added.length - 1].body === 'a brand new jotting'
+      && edits.length === editsBefore + 1,
+    JSON.stringify({ added: added.slice(addedBefore), edits: edits.slice(editsBefore) }));
 
   root.unmount();
+  closeDom(dom);
+}
+
+// ─── C2. a pending write must not be stranded by an unmount (rule A7) ────────
+// Its own mount, because proving it requires unmounting.
+
+async function unmountFlushCheck() {
+  stored = { orders: [], presets: [], inboxes: [], notes: [], settings: {} };
+  const dom = freshDom();
+  const { React, createRoot, ScheduleModule } = bundle('admin-s3-mount-entry', [
+    "import React from 'react';",
+    "import { createRoot } from 'react-dom/client';",
+    "import { ScheduleModule, PAD_IDLE_MS } from './src/schedule.jsx';",
+    "export { React, createRoot, ScheduleModule, PAD_IDLE_MS };",
+  ]);
+  const added = [];
+  const container = dom.window.document.getElementById('probe');
+  const root = createRoot(container);
+  root.render(React.createElement(ScheduleModule, {
+    orders: [], techs: ['Alice'], statusColors: {}, statusTags: {},
+    tech: 'ALL', setTech: () => {},
+    focus: null, onClearFocus: () => {}, onOpenWO: () => {}, onOpenMaps: () => {},
+    notes: [],
+    onAddNote: (rec) => { added.push(rec); return 'minted-u'; },
+    onUpdateNote: () => {},
+  }));
+  await tick();
+
+  const pad = container.querySelector('textarea');
+  const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value');
+  desc.set.call(pad, 'typed, then the module was torn down');
+  pad.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  ok('unmount: nothing is written yet -- the timer is still armed', added.length === 0, JSON.stringify(added));
+
+  root.unmount();          // a module switch, a tab close, anything
+  await tick();
+  ok('unmount: the pending write is FLUSHED, not stranded',
+    added.length === 1 && added[0].body === 'typed, then the module was torn down', JSON.stringify(added));
+
   closeDom(dom);
 }
 
@@ -428,12 +490,250 @@ async function storeChecks() {
   closeDom(dom);
 }
 
+// ───────────── E. the binder: tabs, Journal, quick-nav, selection ────────────
+// Admin S3b rebuilt the module's shell. The pad is the tab, the sub-modules are
+// binder tabs, and the retired backlog rail came back as a MERGED pinned +
+// undated-task quick-nav in the Journal.
+//
+// The Scratchpad pane is never unmounted -- inactive tabs hide it with
+// display:none -- so a raw querySelectorAll would see rows that are on screen
+// only in the DOM sense. `vis()` below filters on the inline display, which is
+// exactly the mechanism under test; it is not a workaround.
+
+async function binderChecks() {
+  stored = { orders: [], presets: [], inboxes: [], notes: [], settings: {} };
+  const dom = freshDom();
+  const { React, createRoot, ScheduleModule, PAD_IDLE_MS } = bundle('admin-s3-mount-entry', [
+    "import React from 'react';",
+    "import { createRoot } from 'react-dom/client';",
+    "import { ScheduleModule, PAD_IDLE_MS } from './src/schedule.jsx';",
+    "export { React, createRoot, ScheduleModule, PAD_IDLE_MS };",
+  ]);
+  const idle = async () => { await new Promise(r => setTimeout(r, PAD_IDLE_MS + 60)); await tick(); };
+
+  const edits = [], openedWO = [], openedMap = [];
+  const notes = [
+    normalizeNote({ body: 'newest jotting', ts: 900 }, 'j-pad-new'),
+    normalizeNote({ body: 'older jotting', ts: 100 }, 'j-pad-old'),
+    normalizeNote({ kind: 'task', title: 'Call vendor', date: null, done: false, ts: 500 }, 'j-task'),
+    normalizeNote({ body: 'pinned policy note', pinned: true, ts: 700 }, 'j-pin'),
+    normalizeNote({ kind: 'task', title: 'Chase the permit', date: null, done: false, pinned: true, ts: 600 }, 'j-both'),
+    normalizeNote({ body: 'tenant called back', woId: 'WO-9', ts: 800 }, 'j-wo'),
+  ];
+
+  const container = dom.window.document.getElementById('probe');
+  const root = createRoot(container);
+  root.render(React.createElement(ScheduleModule, {
+    orders: [], techs: ['Alice'], statusColors: {}, statusTags: {},
+    tech: 'ALL', setTech: () => {},
+    focus: null, onClearFocus: () => {},
+    onOpenWO: (id) => { openedWO.push(id); },
+    onOpenMaps: (id) => { openedMap.push(id); },
+    notes,
+    onAddNote: (rec) => { edits.push(['<MINT>', rec]); return 'minted-b'; },
+    onUpdateNote: (id, patch) => { edits.push([id, patch]); },
+  }));
+  await tick();
+
+  const vis = (el) => {
+    let n = el;
+    while (n && n !== container) { if (n.style && n.style.display === 'none') return false; n = n.parentElement; }
+    return true;
+  };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  const press = (el, key, shift) => el.dispatchEvent(
+    new dom.window.KeyboardEvent('keydown', { key, shiftKey: !!shift, bubbles: true }));
+  const typeInto = (el, v) => {
+    const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value');
+    desc.set.call(el, v);
+    el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
+  const byLabel = (l) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === l);
+  // The Journal carries TWO filters and both offer an 'All'. byLabel finds the
+  // BODY one (it comes first in the DOM); navBtn is scoped to the visible aside,
+  // which is the quick-nav.
+  const jAside = () => Array.from(container.querySelectorAll('aside')).filter(vis)[0];
+  const navBtn = (l) => Array.from(jAside().querySelectorAll('button')).find(b => b.textContent.trim() === l);
+  const rows = () => Array.from(container.querySelectorAll('div[title]')).filter(vis);
+  const rowTitles = () => rows().map(d => d.getAttribute('title'));
+  const rowByTitle = (t) => rows().find(d => d.getAttribute('title') === t);
+  // On the Journal tab the SAME note is on screen twice -- once in the body
+  // list, once in the quick-nav -- so every row helper must say which it means.
+  const bodyRows = () => rows().filter(d => !(jAside() && jAside().contains(d)));
+  const bodyTitles = () => bodyRows().map(d => d.getAttribute('title'));
+  const navRows = () => (jAside() ? Array.from(jAside().querySelectorAll('div[title]')) : []);
+  const navTitles = () => navRows().map(d => d.getAttribute('title'));
+  const marksOf = (t) => {
+    const r = navRows().find(d => d.getAttribute('title') === t);
+    return r ? Array.from(r.querySelectorAll('span')).map(s => s.textContent.trim())
+      .filter(x => x === 'Pinned' || x === 'Task') : ['<no quick-nav row>'];
+  };
+  // The pad is identified by its placeholder; the journal editor is the other
+  // textarea. Never by index, which would silently follow a DOM reorder.
+  const pad = () => Array.from(container.querySelectorAll('textarea'))
+    .find(t => (t.placeholder || '').indexOf('Start writing') === 0);
+  const jPad = () => Array.from(container.querySelectorAll('textarea'))
+    .find(t => (t.placeholder || '').indexOf('Start writing') !== 0);
+
+  // [1] the binder itself
+  for (const label of ['Scratchpad', 'Journal', 'Calendar', 'Contacts']) {
+    ok('binder: tab "' + label + '" exists', !!byLabel(label));
+  }
+  ok('binder: lands on Scratchpad with the pad focused and live',
+    !!pad() && dom.window.document.activeElement === pad(),
+    String(dom.window.document.activeElement && dom.window.document.activeElement.tagName));
+  // scratchpadNotes = zero flags AND no woId, so the WO-linked note is out and
+  // the pinned-but-unflagged one is in. Newest first.
+  ok('binder: the Scratchpad column shows the jottings only, newest first',
+    rowTitles().join('|') === 'newest jotting|pinned policy note|older jotting',
+    rowTitles().join('|'));
+  ok('binder: no calendar chrome on the Scratchpad tab',
+    !byLabel('Today') && !container.querySelector('select'));
+
+  // [2] JOURNAL body: every note, newest first, jottings included
+  click(byLabel('Journal')); await tick();
+  ok('journal: body lists EVERY note, newest first, jottings included',
+    bodyTitles().join('|')
+      === 'newest jotting|tenant called back|pinned policy note|Chase the permit|Call vendor|older jotting',
+    bodyTitles().join('|'));
+
+  // [3] QUICK-NAV: pinned AND undated tasks, merged, each marked
+  ok('quick-nav: a pinned note is marked Pinned', marksOf('pinned policy note').join(',') === 'Pinned',
+    marksOf('pinned policy note').join(','));
+  ok('quick-nav: an undated task is marked Task', marksOf('Call vendor').join(',') === 'Task',
+    marksOf('Call vendor').join(','));
+  ok('quick-nav: a note that is BOTH carries both markers', marksOf('Chase the permit').join(',') === 'Pinned,Task',
+    marksOf('Chase the permit').join(','));
+  ok('quick-nav: a note that is BOTH appears exactly ONCE (merged, not concatenated)',
+    navTitles().filter(t => t === 'Chase the permit').length === 1, navTitles().join('|'));
+  ok('quick-nav: it holds pinned + undated tasks and nothing else',
+    navTitles().join('|') === 'pinned policy note|Chase the permit|Call vendor', navTitles().join('|'));
+
+  // [4] the marker filter
+  click(navBtn('Pinned')); await tick();
+  ok('quick-nav: the Pinned filter keeps only pinned entries',
+    navTitles().join('|') === 'pinned policy note|Chase the permit', navTitles().join('|'));
+  click(navBtn('Tasks')); await tick();
+  ok('quick-nav: the Tasks filter keeps only undated tasks',
+    navTitles().join('|') === 'Chase the permit|Call vendor', navTitles().join('|'));
+  click(navBtn('All')); await tick();
+
+  // Journal body category filter: jottings as their own category.
+  click(byLabel('Jottings')); await tick();
+  ok('journal: the Jottings filter narrows the body to unflagged, WO-less notes',
+    bodyTitles().join('|') === 'newest jotting|pinned policy note|older jotting', bodyTitles().join('|'));
+  click(byLabel('All')); await tick();
+
+  // [5] selection swaps the column for a body-only editor
+  click(rowByTitle('tenant called back')); await tick();
+  ok('journal: selecting a row swaps the quick-nav for the note editor',
+    !!jPad() && jPad().value === 'tenant called back' && container.textContent.indexOf('Quick-nav') === -1,
+    String(jPad() && jPad().value));
+  ok('journal: a WO-linked note offers the WO and Map jumps',
+    !!byLabel('WO-9') && !!byLabel('Map'));
+  click(byLabel('WO-9')); await tick();
+  click(byLabel('Map')); await tick();
+  ok('journal: the WO jump reuses onOpenWO', openedWO.join(',') === 'WO-9', openedWO.join(','));
+  ok('journal: the map jump reuses onOpenMaps', openedMap.join(',') === 'WO-9', openedMap.join(','));
+
+  typeInto(jPad(), 'tenant called back, twice'); await tick();
+  press(jPad(), 'Enter'); await tick();
+  ok('journal: Enter writes NOTHING (it is a newline here too, not a save key)',
+    edits.length === 0, JSON.stringify(edits));
+  ok('journal: Enter neither clears nor deselects the panel',
+    jPad() && jPad().value === 'tenant called back, twice', String(jPad() && jPad().value));
+  press(jPad(), 'Enter', true); await tick();
+  ok('journal: Shift+Enter writes nothing either', edits.length === 0, JSON.stringify(edits));
+  await idle();
+  ok('journal: an idle pause commits through onUpdateNote, body and nothing else',
+    edits.length === 1 && edits[0][0] === 'j-wo'
+      && JSON.stringify(Object.keys(edits[0][1])) === '["body"]'
+      && edits[0][1].body === 'tenant called back, twice', JSON.stringify(edits));
+
+  jPad().focus();
+  typeInto(jPad(), 'tenant called back, three times'); await tick();
+  jPad().blur(); await tick();
+  ok('journal: blur flushes at once, no idle wait',
+    edits.length === 2 && edits[1][1].body === 'tenant called back, three times', JSON.stringify(edits));
+  jPad().focus(); jPad().blur(); await tick();
+  ok('journal: a second blur with unchanged text writes nothing more', edits.length === 2, JSON.stringify(edits));
+
+  click(byLabel('Back')); await tick();
+  ok('journal: Back restores the quick-nav', container.textContent.indexOf('Quick-nav') !== -1 && !jPad());
+
+  // [6] THE SWITCH-MID-WRITE CASE. The worst bug available in this design is a
+  // timer armed for note A firing after the panel has rebound to note B, writing
+  // A's text onto B's id. Arm a write on A, switch to B before the timer fires.
+  click(rowByTitle('pinned policy note')); await tick();            // A = j-pin
+  typeInto(jPad(), 'pinned policy note, amended'); await tick();    // timer armed
+  const beforeSwitch = edits.length;
+  click(rowByTitle('Call vendor')); await tick();                   // B = j-task
+  ok('journal: switching entries mid-write FLUSHES the entry being left, onto ITS id',
+    edits.length === beforeSwitch + 1 && edits[beforeSwitch][0] === 'j-pin'
+      && edits[beforeSwitch][1].body === 'pinned policy note, amended',
+    JSON.stringify(edits.slice(beforeSwitch)));
+  ok('journal: the panel rebound to the new entry, showing ITS text',
+    !!jPad() && jPad().value === 'Call vendor',
+    String(jPad() && jPad().value));
+  await idle();
+  ok('journal: the armed timer never fired onto the NEW entry id',
+    edits.length === beforeSwitch + 1, JSON.stringify(edits.slice(beforeSwitch)));
+
+  // [7] Escape FLUSHES, then deselects. With autosave there is no unsaved state
+  // to abandon, so a silently discarded tail would be data loss.
+  click(rowByTitle('older jotting')); await tick();
+  typeInto(jPad(), 'older jotting, via the journal'); await tick();
+  const beforeEsc = edits.length;
+  press(jPad(), 'Escape'); await tick();
+  ok('journal: Escape flushes before deselecting (no silent data loss)',
+    edits.length === beforeEsc + 1 && edits[beforeEsc][0] === 'j-pad-old'
+      && edits[beforeEsc][1].body === 'older jotting, via the journal',
+    JSON.stringify(edits.slice(beforeEsc)));
+  ok('journal: Escape then restores the quick-nav',
+    container.textContent.indexOf('Quick-nav') !== -1 && !jPad());
+
+  // The unchanged-text guard still holds: browsing costs no writes.
+  const beforeBrowse = edits.length;
+  click(rowByTitle('newest jotting')); await tick();
+  jPad().focus(); jPad().blur(); await tick();
+  ok('journal: blurring an UNCHANGED note writes nothing (no browse-time write storm)',
+    edits.length === beforeBrowse, JSON.stringify(edits.slice(beforeBrowse)));
+  click(byLabel('Back')); await tick();
+
+  // [8] the pad is never unmounted: text mid-autosave-window survives a tab trip
+  click(byLabel('Scratchpad')); await tick();
+  typeInto(pad(), 'half typed, mid autosave window'); await tick();
+  click(byLabel('Calendar')); await tick();
+  ok('calendar: the tab owns the calendar chrome (Today + tech dropdown)',
+    !!byLabel('Today') && !!byLabel('Week') && !!container.querySelector('select'));
+  ok('calendar: no backlog rail anywhere', container.textContent.indexOf('Backlog') === -1);
+  // NOTE ON SCOPE: this proves the pad is never UNMOUNTED, which is the A3
+  // property under test. In a real browser a tab click also blurs the pad, so
+  // writePad would have flushed the text on the way out; jsdom's synthetic click
+  // fires no blur, which is what leaves the pad mid-autosave-window and readable
+  // here. Either way nothing typed is lost -- that is the point of autosave.
+  ok('pad: STILL MOUNTED behind another tab, draft intact',
+    !!pad() && pad().value === 'half typed, mid autosave window' && !vis(pad()), String(pad() && pad().value));
+  click(byLabel('Contacts')); await tick();
+  ok('contacts: an empty state naming S7', container.textContent.indexOf('S7') !== -1,
+    container.textContent.slice(-200));
+  click(byLabel('Scratchpad')); await tick();
+  ok('pad: the draft survived the round trip and the cursor came back',
+    pad().value === 'half typed, mid autosave window' && dom.window.document.activeElement === pad(),
+    pad().value);
+
+  root.unmount();
+  closeDom(dom);
+}
+
 // ─────────────────────────────────── report ──────────────────────────────────
 
 (async () => {
   await hookChecks();
   await composerChecks();
+  await unmountFlushCheck();
   await storeChecks();
+  await binderChecks();
   console.log('admin S3 -- scratchpad selector, lastModule migration, mounted composer');
   console.log('======================================================================');
   let pass = 0, fail = 0;

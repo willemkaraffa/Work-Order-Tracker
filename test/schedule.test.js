@@ -399,13 +399,12 @@ async function mountedChecks() {
 
   render(); await flush();
 
-  // Admin S3: the module now LANDS on the scratchpad composer, not the week
-  // calendar (schedule.jsx's `view` defaults to 'scratchpad'), so the calendar
-  // must be selected before any calendar assertion can see it. NOTHING below is
-  // weakened: every assertion expression is byte-identical to the pre-S3 file.
-  // That the scratchpad is the new default is proven in
-  // test/admin-s3-scratchpad.test.js, so the coverage lost from the label below
-  // is not lost from the suite.
+  // Admin S3b: the module LANDS on the Scratchpad binder tab, so the Calendar
+  // TAB and then the Week range must be selected before any calendar assertion
+  // can see them. NOTHING below is weakened: every assertion expression is
+  // byte-identical to the pre-S3 file. That Scratchpad is the landing tab is
+  // proven in test/admin-s3-scratchpad.test.js.
+  click(byLabel('Calendar')); await flush();
   click(byLabel('Week')); await flush();
 
   // [1] week grid
@@ -476,11 +475,20 @@ async function mountedChecks() {
   root.unmount();
 }
 
-// --- Mounted entries: calendar chips, backlog, checkbox, editor (S3) --------
+// --- Mounted entries: calendar chips (S3b) ----------------------------------
 // Own fixture and own mount: the section above asserts exact card counts, and
 // entry chips share the div[title] selector with WO cards.
-// Admin S1: the module now takes notes, not entries. The fixture is built with
-// the SHIPPED normalizeNote so the flags under test are the real ones.
+// Admin S1: the module takes notes, not entries. The fixture is built with the
+// SHIPPED normalizeNote so the flags under test are the real ones.
+//
+// Admin S3b DELETED, by explicit human ruling, the entry editor (EntryModal),
+// the "+ New" button, entry delete and the backlog rail. The assertions that
+// proved those behaviours were removed with them -- keeping one would assert
+// that a feature the human ordered removed still exists. What remains is every
+// assertion about calendar RENDERING, SOURCING, EXCLUSION and the TECH FILTER,
+// unchanged. The two undated tasks stay in the fixture on purpose: they now
+// prove an EXCLUSION (an undated task appears on no calendar day) instead of a
+// backlog rail.
 
 async function entryChecks() {
   const dom = freshDom();
@@ -498,35 +506,26 @@ async function entryChecks() {
       address: '1 Main St, Springfield, IL 62701', schedule: { date: today, start: '09:00' } },
   ];
 
-  const added = [], updated = [], deleted = [];
   let tech = 'ALL';
   const container = dom.window.document.getElementById('probe');
   const root = createRoot(container);
   const render = () => root.render(React.createElement(ScheduleModule, {
     orders, techs: ['Alice', 'Bob'], statusColors: {}, statusTags: {},
     tech, setTech: (t) => { tech = t; render(); },
-    focus: null, onClearFocus: () => {}, onOpenWO: () => {},
+    focus: null, onClearFocus: () => {}, onOpenWO: () => {}, onOpenMaps: () => {},
     notes,
-    onAddNote: (rec) => { added.push(rec); },
-    onUpdateNote: (id, patch) => { updated.push([id, patch]); },
-    onDeleteNote: (id) => { deleted.push(id); },
+    onAddNote: () => {}, onUpdateNote: () => {},
   }));
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
   const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
   const byLabel = (l) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === l);
   const chip = (t) => Array.from(container.querySelectorAll('div[title]'))
     .find(d => (d.getAttribute('title') || '').indexOf(t) === 0);
-  // React installs its own value setter on the input node; assigning .value
-  // directly never reaches onChange. Call the prototype setter, then fire input.
-  const typeInto = (el, v) => {
-    const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value');
-    desc.set.call(el, v);
-    el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-  };
 
   render(); await flush();
-  // Admin S3: land on the scratchpad, so select the calendar first (same reason
-  // as in mountedChecks). No assertion below this line is changed.
+  // S3b: the binder lands on Scratchpad, so open the Calendar tab first. Every
+  // calendar assertion below is unchanged.
+  click(byLabel('Calendar')); await flush();
   click(byLabel('Week')); await flush();
 
   // [1] dated entries render on the calendar
@@ -535,57 +534,30 @@ async function entryChecks() {
   ok('entries: header counts the dated entries', container.textContent.indexOf('2 entries') !== -1,
     container.textContent.slice(0, 300));
 
-  // [2] backlog holds the undated tasks
-  const backlogChips = Array.from(container.querySelectorAll('div[title]'))
-    .map(d => d.getAttribute('title'))
-    .filter(t => t === 'Call vendor' || t === 'File permit');
-  ok('entries: both undated tasks are in the backlog', backlogChips.length === 2, backlogChips.join(','));
-  ok('entries: done backlog task is dimmed', chip('File permit') && chip('File permit').style.opacity === '0.5',
-    chip('File permit') && chip('File permit').style.opacity);
+  // [2] an undated task lands on no day at all (the rail that used to catch it
+  //     is gone; the EXCLUSION it always relied on is what is proved here)
+  ok('entries: an undated task appears on no calendar day', !chip('Call vendor') && !chip('File permit'),
+    Array.from(container.querySelectorAll('div[title]')).map(d => d.getAttribute('title')).join(','));
 
-  // [3] checkbox toggles done through the store callback, and does NOT open the editor
-  const cb = chip('Order parts').querySelector('input[type="checkbox"]');
-  cb.click(); await flush();
-  ok('entries: checkbox calls onUpdateNote with the flipped done flag',
-    updated.length === 1 && updated[0][0] === 'e-task' && updated[0][1].done === true, JSON.stringify(updated));
-  ok('entries: checkbox click did not open the editor', container.textContent.indexOf('Edit entry') === -1);
-
-  // [4] clicking the chip body opens the editor, prefilled
+  // [3] chips are READ-ONLY: no checkbox, and clicking one opens nothing
+  ok('entries: a calendar chip carries no checkbox (chips are read-only)',
+    !container.querySelector('input[type="checkbox"]'));
   click(chip('Team meeting')); await flush();
-  ok('entries: chip click opens the editor', container.textContent.indexOf('Edit entry') !== -1);
-  ok('entries: editor is prefilled with the entry title',
-    !!Array.from(container.querySelectorAll('input')).find(i => i.value === 'Team meeting'));
-  click(byLabel('Cancel')); await flush();
-  ok('entries: cancel closes the editor', container.textContent.indexOf('Edit entry') === -1);
+  ok('entries: clicking a chip opens no editor',
+    container.textContent.indexOf('Edit entry') === -1 && container.textContent.indexOf('New entry') === -1,
+    container.textContent.slice(0, 200));
 
-  // [5] tech filter: tagged entry hides, untagged stays
+  // [4] tech filter: tagged entry hides, untagged stays
   const sel = container.querySelector('select');
   sel.value = 'Alice';
   sel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await flush();
   ok('entries: an event tagged to another tech is filtered out', !chip('Team meeting'));
   ok('entries: untagged entry survives the tech filter', !!chip('Order parts'));
-  ok('entries: untagged backlog task survives the tech filter', !!chip('Call vendor'));
   sel.value = 'ALL';
   sel.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
   await flush();
-
-  // [6] + New creates through onAddEntry
-  click(byLabel('+ New')); await flush();
-  ok('entries: + New opens the create form', container.textContent.indexOf('New entry') !== -1);
-  const blank = Array.from(container.querySelectorAll('input')).find(i => !i.type || i.type === 'text');
-  typeInto(blank, 'Invoice run'); await flush();
-  click(byLabel('Save')); await flush();
-  ok('entries: Save calls onAddNote with the typed fields',
-    added.length === 1 && added[0].title === 'Invoice run' && added[0].kind === 'task' && added[0].date === null,
-    JSON.stringify(added));
-  ok('entries: the form closed after saving', container.textContent.indexOf('New entry') === -1);
-
-  // [7] delete from the editor
-  click(chip('Call vendor')); await flush();
-  click(byLabel('Delete')); await flush();
-  ok('entries: Delete calls onDeleteNote with the id', deleted.length === 1 && deleted[0] === 'e-back',
-    JSON.stringify(deleted));
+  ok('entries: ALL restores the tagged entry', !!chip('Team meeting'));
 
   root.unmount();
 }
