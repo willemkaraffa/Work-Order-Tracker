@@ -533,6 +533,25 @@ Fix 4 to "end the silent no-flag disappearance where a line matches nothing and 
 nothing", and 6 previously-silent price-off lines now surface. That is the stated goal,
 not a regression.
 
+**Proof step 7 (section 13), RUN.** Harness rebuilt at `scratchpad/replay.js`; it
+re-resolves the 68 stored MSR remittance lines through the shipped
+`bidItemsToInvoiceLines` + `computeInvoiceTotals` and compares against the figures stored
+on each line. It exits non-zero if any per-line face total moves. Replayed at `HEAD~1` as
+well, so the Fix 4 delta is isolated rather than inferred.
+
+| | stored (pre-Slice-1) | pre-Fix-4 | after Fix 4 |
+| --- | --- | --- | --- |
+| lines replayed | 68 | 68 | 68 |
+| per-line FACE moved | - | 0 | **0** |
+| face total | 8875.86 | 8875.86 | **8875.86** |
+| sentinel | 54 | 30 | **28** |
+| reported tax | 417.85 | 492.89 | **483.40** |
+
+Money did not move: face total byte-identical, zero lines shifted, only the tax column
+moved. Fix 4 lowered reported MSR tax by $9.49, and the cause is the point of the fix:
+two lines stop being all-labor `Labor!` sentinels and carry their library item's real
+material/labor split instead, so less of the face is labor and less tax is embedded.
+
 **Correction to section 4.** It claims Fix 4 recovers about 4 lines. Measured: 2. The
 other two do not fail on vocabulary. `(2x) Clean Condenser` reaches the remittance path
 at $300 unit against a $150 library row, so no exact-price route can fire; Fix 6 parses
