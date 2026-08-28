@@ -90,6 +90,32 @@ function resolveBidSheetName(sheetNames, bidCells) {
   return present.length === 1 ? present[0] : null;
 }
 
+// Fix 6 (section 9): bid sheets COMPRESS repeat work into one line ("(2x) Clean Condenser
+// $300"). Both read paths hardcoded qty 1, so the count was lost, the desc never matched
+// the library at its UNIT price, and the line landed as generic flagged labor. Pull the
+// count off the front/back of the description. The marker MUST carry parens or an 'x':
+// a BARE leading number is a SIZE in this catalog ("2 Ton Condenser", "50 Gallon Water
+// Heater - Gas", "3 - 3.5 Ton Package Unit"), and reading it as a count would silently
+// divide a real line total by a tonnage. Count is capped 1..99 so a stray year or model
+// number cannot become one. -> {desc, count}; trimmed desc + count 1 when nothing fires.
+// Pure.
+function extractCount(desc) {
+  const s = String(desc == null ? '' : desc).trim();
+  const sane = (n) => Number.isFinite(n) && n >= 1 && n <= 99;
+  // leading "(2x) desc" / "(2) desc" -- parens make the intent explicit.
+  let m = s.match(/^\(\s*(\d{1,2})\s*x?\s*\)\s*(.+)$/i);
+  if (m && sane(Number(m[1]))) return { desc: m[2].trim(), count: Number(m[1]) };
+  // leading "2x desc" -- the 'x' AND the space after it are required, so "2 Ton" (no x)
+  // and "2x4 lumber" (no space) both fall through untouched.
+  m = s.match(/^(\d{1,2})\s*x\s+(.+)$/i);
+  if (m && sane(Number(m[1]))) return { desc: m[2].trim(), count: Number(m[1]) };
+  // trailing "desc (2 units)" and its wordings. A bare trailing "(2)" is NOT accepted:
+  // it is ambiguous with a model/size note, and guessing there could move money.
+  m = s.match(/^(.+?)\s*\(\s*(\d{1,2})\s*(?:x|units?|ea|each|pcs?)\s*\)\s*$/i);
+  if (m && sane(Number(m[2]))) return { desc: m[1].trim(), count: Number(m[2]) };
+  return { desc: s, count: 1 };
+}
+
 // Bug A (real cause): a bid sheet lists the SAME work in both its main catalog table
 // and its OTHER free-text summary (the human hand-writes OTHER for MSR's Salesforce
 // submission), with wording ("Clean Condenser" vs "Clean condenser coil") and rounding
@@ -97,10 +123,23 @@ function resolveBidSheetName(sheetNames, bidCells) {
 // dedup: two items collapse iff BOTH (a) prices are cent-equal AND (b) one's matchTokens
 // set CONTAINS the other's (smaller set is a subset of the larger AND has >=1 token, so
 // an all-filler/empty desc never swallows a real one). Keep the RICHER (longer) desc;
-// price is identical by the gate. items = [{desc, unitPrice, qty}]. Pure.
+// price is identical by the gate. items = [{desc, unitPrice, qty, src?}]. Pure.
+//
+// Fix 6 adds two count/provenance rules:
+//   (a) COUNT-AWARE: a merge keeps the LARGER qty. Keeping the first row's qty let a
+//       restated line silently drop its count back to 1.
+//   (b) SAME-SECTION rows do NOT collapse. Two hand-written "$150 Clean Condenser" lines
+//       inside OTHER are genuine repeat work and lose $150 when merged; the duplicate this
+//       function exists for is a main-table row RESTATED in OTHER, i.e. across sections.
+//       `src` is an internal provenance tag set by readSheetOtherItems ('table'/'other')
+//       and is never returned. A merged row remembers EVERY section it absorbed, so a
+//       third row from a section already folded in still refuses to merge.
+//   (c) Untagged rows (every other caller, and the existing tests) behave exactly as
+//       before: the block only fires when both sides carry a tag and the tags collide.
 function dedupeLineItems(items) {
   const list = Array.isArray(items) ? items : [];
-  const kept = [];  // { desc, unitPrice, qty, toks:Set }
+  const qtyOf = (x) => (Number(x && x.qty) > 0 ? Number(x.qty) : 1);
+  const kept = [];  // { desc, unitPrice, qty, srcs:Set, toks:Set }
   for (const it of list) {
     if (!it) continue;
     const cents = Math.round((Number(it.unitPrice) || 0) * 100);
@@ -108,6 +147,7 @@ function dedupeLineItems(items) {
     let merged = false;
     for (const k of kept) {
       if (Math.round((Number(k.unitPrice) || 0) * 100) !== cents) continue;
+      if (it.src && k.srcs.has(it.src)) continue;   // (b) same section = real repeat work
       // token containment: smaller set subset of larger, and non-empty.
       const small = toks.size <= k.toks.size ? toks : k.toks;
       const large = small === toks ? k.toks : toks;
@@ -117,10 +157,12 @@ function dedupeLineItems(items) {
       if (!subset) continue;
       // duplicate: keep the richer (longer) desc + its token set.
       if (String(it.desc || '').length > String(k.desc || '').length) { k.desc = it.desc; k.toks = toks; }
+      if (qtyOf(it) > qtyOf(k)) k.qty = qtyOf(it);   // (a) larger count wins
+      if (it.src) k.srcs.add(it.src);
       merged = true;
       break;
     }
-    if (!merged) kept.push({ desc: it.desc, unitPrice: it.unitPrice, qty: it.qty, toks });
+    if (!merged) kept.push({ desc: it.desc, unitPrice: it.unitPrice, qty: it.qty, srcs: new Set(it.src ? [it.src] : []), toks });
   }
   return kept.map(k => ({ desc: k.desc, unitPrice: k.unitPrice, qty: k.qty }));
 }
@@ -135,7 +177,9 @@ function dedupeLineItems(items) {
 //   - a WARRANTY line = designated non-billable to the PM ("$124.58 Capacitor - Warranty").
 // A line can pack several "$amount desc"; a leading no-'$' segment ("200 Labor...") still
 // parses. Verified against Advantis (317.50), Dell Meadows (230.66), Nightshade (1595).
-// Pure. -> [{desc, unitPrice}].
+// Fix 6: the desc can carry a compressed count ("(2x) Clean Condenser"), stripped here so
+// the count is visible and the matcher sees a clean library name. Pure.
+// -> [{desc, unitPrice, qty}].
 function parseOtherCell(text) {
   const out = [];
   for (const raw of String(text || '').split(/\r?\n/)) {
@@ -159,12 +203,21 @@ function parseOtherCell(text) {
       const price = parseFloat(m[1].replace(/,/g, ''));
       if (!Number.isFinite(price) || price <= 0) continue;
       if (neg) continue;                        // struck/removed scope: not charged
-      const desc = m[2].trim();
+      const { desc, count } = extractCount(m[2]);
       if (/warranty/i.test(desc)) continue;     // designated non-billable to the PM
-      out.push({ desc, unitPrice: Math.round(price * 100) / 100 });
+      // Rule 2 of section 9: there is no library at THIS layer, so the amount A is read as
+      // EXTENDED -- qty N at A/N leaves the line total untouched while making the count
+      // visible. Split ONLY when A in whole cents divides evenly by N: a rounded unit price
+      // times the count would not sum back to A, and one cent of drift flips reconcileMsrRow
+      // from 'match' to 'off'. Indivisible -> qty 1 at the whole amount; the STRIPPED desc
+      // still goes out either way, so the matcher gets a clean name and the existing
+      // price-off warning fires downstream where the library actually exists.
+      const cents = Math.round(price * 100);
+      const split = count > 1 && cents % count === 0;
+      out.push({ desc, unitPrice: (split ? cents / count : cents) / 100, qty: split ? count : 1 });
     }
   }
   return out;
 }
 
-module.exports = { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell };
+module.exports = { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell, extractCount };

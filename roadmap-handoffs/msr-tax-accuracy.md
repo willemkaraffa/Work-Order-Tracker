@@ -383,6 +383,49 @@ so a parser guess must never silently move a total.
 - **Existing guard reused.** The sheet states its own BID TOTAL and the app already warns
   when captured lines fall short. Correct counts make that a real check.
 
+### IMPLEMENTED (Fix 6, 2026-08-28)
+
+Shipped in `bid-select.js` + `main.js` (`readSheetOtherItems`), covered by
+`test/bid-select.test.js`. No new field: the tag below never leaves the module.
+
+- **`extractCount(desc) -> {desc, count}`** (new export in `bid-select.js`). Recognizes
+  exactly the four real shapes: leading `(2x)`, leading `2x `, leading `(2)`, trailing
+  `(2 units)` and its wordings (`unit`, `units`, `ea`, `each`, `pc`, `pcs`, `x`). The
+  marker MUST carry parens or an `x`. A bare leading number is a SIZE in this catalog, so
+  `2 Ton Condenser`, `3 - 3.5 Ton Package Unit`, `50 Gallon Water Heater - Gas`, `R-410A`
+  and `R22` come back untouched at count 1. Count is capped 1..99, so a year or model
+  number cannot become a count. A bare trailing `(2)` is deliberately NOT accepted: it is
+  ambiguous with a model note.
+- **DIVISIBILITY GUARD (both read paths).** Rule 2 above is applied only when the amount
+  in whole cents divides evenly by the count. Otherwise the row is emitted at qty 1 with
+  the whole amount. A rounded unit price times the count would not sum back, and one cent
+  of drift flips `reconcileMsrRow` from `match` to `off`. In BOTH branches the STRIPPED
+  desc still goes out, so the matcher gets a clean library name and the existing price-off
+  warning fires downstream where the library actually exists.
+- **`parseOtherCell`** now returns `{desc, unitPrice, qty}`. Struck-negative drop,
+  warranty drop, packed `$amt desc` segments and the leading no-`$` segment are unchanged.
+- **Main catalog table branch** (`main.js`) now pushes `qty: q` at `price / q` instead of
+  qty 1 at the extended price, so the unit price is what the library matcher compares
+  against. `price` there is already extended (`Line Item Price` = Qty x Total Price, or
+  `q * Total Price` on the fallback). Split requires an integer `q > 1` plus the cent
+  guard. Service Call canonicalization untouched.
+- **Count-aware dedupe.** When two rows collapse, `dedupeLineItems` keeps the LARGER qty.
+  It used to keep the first row's qty, so a restated line silently lost its count.
+- **SAME-SECTION rows no longer collapse.** `main.js` tags each row it builds with an
+  internal `src` (`'table'` or `'other'`); `dedupeLineItems` refuses to merge when both
+  rows carry a tag and the tags are equal, and a merged row remembers EVERY section it
+  absorbed. Two hand-written `$150 Clean Condenser` lines inside OTHER are genuine repeat
+  work worth $300; the duplicate the fuzzy dedup exists for is a main-table row restated
+  in OTHER, i.e. across sections. Untagged rows (every other caller, and the pre-existing
+  tests) collapse exactly as before, and `src` is never emitted on the returned items.
+
+**Live evidence for the integer guard**, measured across all 424 real bid workbooks under
+the WORK ORDERS tree: only 2 main-table rows carry Quantity > 1 at all, and 1 of those is
+`R410a q=1.25 $62.50`. Quantity in that column is sometimes a MEASURE (pounds of
+refrigerant), not a count, which is exactly why the split requires `Number.isInteger(q)`.
+Without it that row would have reported a count of 1.25. The other row is an integer
+quantity whose extended cents divide evenly, so the branch does fire on real data.
+
 ---
 
 ## 10. Proposed fix

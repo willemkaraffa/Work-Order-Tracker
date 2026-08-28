@@ -2,7 +2,7 @@
 // chooseBidCoFiles (Bug A) + resolveBidSheetName (Bug B): pure main-process helpers,
 // tested by direct require (no electron/fs). Exit 0 pass / 1 fail.
 const assert = require('assert');
-const { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('../bid-select.js');
+const { chooseBidCoFiles, additiveBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell, extractCount } = require('../bid-select.js');
 
 const results = [];
 function test(name, fn) {
@@ -276,6 +276,112 @@ test('multiple "$amount desc" on one line both parse', () => {
 test('blank cell -> []', () => {
   assert.deepStrictEqual(parseOtherCell(''), []);
   assert.deepStrictEqual(parseOtherCell('\n  \n'), []);
+});
+
+// ---- extractCount (Fix 6: compressed repeat work, section 9 wording table) ----
+test('every section 9 wording shape yields the count and a stripped desc', () => {
+  assert.deepStrictEqual(extractCount('(2x) Clean Condenser'), { desc: 'Clean Condenser', count: 2 });
+  assert.deepStrictEqual(extractCount('2x Condenser Cleaning'), { desc: 'Condenser Cleaning', count: 2 });
+  assert.deepStrictEqual(extractCount('(2) Condenser Cleaning'), { desc: 'Condenser Cleaning', count: 2 });
+  assert.deepStrictEqual(extractCount('Condenser Cleaning (2 units)'), { desc: 'Condenser Cleaning', count: 2 });
+});
+
+test('trailing unit wordings all read as a count', () => {
+  for (const tail of ['(2 unit)', '(2 units)', '(2 ea)', '(2 each)', '(2 pc)', '(2 pcs)', '(2x)']) {
+    assert.deepStrictEqual(extractCount('Condenser Cleaning ' + tail), { desc: 'Condenser Cleaning', count: 2 }, tail);
+  }
+});
+
+test('a BARE leading number is a SIZE, not a count (would divide a line total)', () => {
+  for (const d of ['2 Ton Condenser', '3 - 3.5 Ton Package Unit', '50 Gallon Water Heater - Gas', 'R-410A', 'R22']) {
+    assert.deepStrictEqual(extractCount(d), { desc: d, count: 1 }, d);
+  }
+});
+
+test('count capped 1..99 so a year/model number cannot become a count', () => {
+  assert.deepStrictEqual(extractCount('(2019) Model Unit'), { desc: '(2019) Model Unit', count: 1 });
+  assert.deepStrictEqual(extractCount('410x Something'), { desc: '410x Something', count: 1 });
+});
+
+test('empty/absent desc -> count 1', () => {
+  assert.deepStrictEqual(extractCount(''), { desc: '', count: 1 });
+  assert.deepStrictEqual(extractCount(null), { desc: '', count: 1 });
+});
+
+// ---- parseOtherCell quantity (Fix 6: total-preserving split) ----
+test('"$300 (2x) Clean Condenser" -> qty 2 @ 150, total preserved', () => {
+  const out = parseOtherCell('$300 (2x) Clean Condenser');
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].desc, 'Clean Condenser');
+  assert.strictEqual(out[0].qty, 2);
+  assert.strictEqual(out[0].unitPrice, 150);
+  assert.strictEqual(out[0].qty * out[0].unitPrice, 300);
+});
+
+test('indivisible amount: qty stays 1 at the FULL amount, desc still stripped', () => {
+  const out = parseOtherCell('$301.55 (2x) Clean Condenser');
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].desc, 'Clean Condenser');
+  assert.strictEqual(out[0].qty, 1);
+  assert.strictEqual(out[0].unitPrice, 301.55);
+});
+
+test('no count marker -> qty 1, desc untouched', () => {
+  const out = parseOtherCell('$150 Clean Condenser Coil');
+  assert.strictEqual(out[0].qty, 1);
+  assert.strictEqual(out[0].desc, 'Clean Condenser Coil');
+  assert.strictEqual(out[0].unitPrice, 150);
+});
+
+// ---- dedupeLineItems: count-aware + provenance-aware (Fix 6) ----
+test('collapse keeps the LARGER qty (restated line must not lose its count)', () => {
+  const out = dedupeLineItems([
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'table' },
+    { desc: 'Clean Condenser Coil', unitPrice: 150, qty: 2, src: 'other' },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].qty, 2);
+  assert.strictEqual(out[0].desc, 'Clean Condenser Coil');
+});
+
+test('SAME-section rows do not collapse (two real $150 OTHER lines keep $300)', () => {
+  const out = dedupeLineItems([
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'other' },
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'other' },
+  ]);
+  assert.strictEqual(out.length, 2);
+});
+
+test('cross-section rows still collapse (main table restated in OTHER)', () => {
+  const out = dedupeLineItems([
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'table' },
+    { desc: 'Clean condenser coil', unitPrice: 150, qty: 1, src: 'other' },
+  ]);
+  assert.strictEqual(out.length, 1);
+});
+
+test('a merged row remembers both sections: a 3rd same-section row stays separate', () => {
+  const out = dedupeLineItems([
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'table' },
+    { desc: 'Clean condenser coil', unitPrice: 150, qty: 1, src: 'other' },
+    { desc: 'Clean condenser coil', unitPrice: 150, qty: 1, src: 'other' },
+  ]);
+  assert.strictEqual(out.length, 2);
+});
+
+test('untagged legacy rows collapse exactly as before', () => {
+  const out = dedupeLineItems([
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 1 },
+    { desc: 'Clean condenser coil', unitPrice: 150, qty: 1 },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].desc, 'Clean condenser coil');
+  assert.strictEqual(out[0].qty, 1);
+});
+
+test('no src emitted on returned rows (provenance is internal plumbing)', () => {
+  const out = dedupeLineItems([{ desc: 'Clean Condenser', unitPrice: 150, qty: 1, src: 'table' }]);
+  assert.deepStrictEqual(Object.keys(out[0]).sort(), ['desc', 'qty', 'unitPrice']);
 });
 
 console.log('bid-select test');

@@ -910,7 +910,17 @@ async function readSheetOtherItems(file, sheetName) {
         // diagnostic-only visit whose OTHER is blank (WO 03753381 Buffalo Way) still
         // reads; dedupeLineItems collapses it when OTHER restates "$85 Service Call".
         const desc = /diagnostic fee|service call/i.test(name) ? 'Service Call' : name;
-        items.push({ desc, unitPrice: Math.round(price * 100) / 100, qty: 1 });
+        // Fix 6: `price` above is the EXTENDED figure (the "Line Item Price" column is
+        // Qty x Total Price, and the fallback multiplies by q itself), so emitting qty 1
+        // hid the count AND compared an extended amount against the library's UNIT price,
+        // flagging real matches. Emit qty q at price/q instead: same line total, count
+        // visible, unit price is what the matcher wants. Guard: split only when the
+        // extended cents divide evenly by an integer q. A rounded unit price times the
+        // count would not sum back, and one cent of drift flips reconcileMsrRow from
+        // 'match' to 'off'. `src` is internal provenance for dedupeLineItems only.
+        const cents = Math.round(price * 100);
+        const split = Number.isInteger(q) && q > 1 && cents % q === 0;
+        items.push({ desc, unitPrice: (split ? cents / q : cents) / 100, qty: split ? q : 1, src: 'table' });
       }
     }
   }
@@ -925,7 +935,10 @@ async function readSheetOtherItems(file, sheetName) {
         if (stop) break;
         const desc = cellText(row, cDesc).trim();
         if (!desc) continue;
-        for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: 1 });
+        // Fix 6: carry parseOtherCell's qty through ("(2x) Clean Condenser" is 2 x $150,
+        // not 1 x $300); hardcoding 1 here threw the count away again. src tags the section
+        // so dedupeLineItems will not merge two genuine repeat OTHER lines into one.
+        for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: it.qty, src: 'other' });
       }
     }
   }
