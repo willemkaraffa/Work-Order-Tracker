@@ -577,6 +577,59 @@ route to the reported symptom.
 **Fix 7 - two-line RazorSync entry for mixed lines.** Section 7. Material portion under
 the non-taxable `Materials!` item, pre-tax labor under a taxable `MSR!`.
 
+### IMPLEMENTED (Fix 7, 2026-08-28)
+
+Shipped as one new pure export in `src/orders-logic.js` plus its two consumers in
+`src/remittances.jsx`, covered by 6 cases in `test/invoice-lines.test.js`.
+
+- **`razorSyncRows(line, defaultAgreement) -> [{ tag, desc, price }]`.** Returns ONE row,
+  today's behavior, for anything that is not a mix: a non-tax-inclusive agreement, a line
+  carrying no split, or a labor share of exactly 0 or 1 (the 19 labor-only diagnostics and
+  cleanings, the 4 refrigerants). Returns TWO rows only when the agreement is
+  tax-inclusive AND the labor share is strictly between 0 and 1: `Materials!` first at the
+  material amount, `MSR!` second at pre-tax labor, in RazorSync entry order. It sits
+  behind the same `catalogTax(...).taxableInclusive` gate `laborShare` does, so an AMH line
+  can never reach the split path (D7). No new field: it reads `material`/`labor` through
+  the existing accessors and reuses `laborShare`, `money`, `TAX_RATE` and `sentinelTag`.
+- **One source for display and copy.** The remittance table renders one grid row per
+  ENTRY row, and `CopyStepper` builds its steps from the SAME `razorSyncRows` call, so
+  what a user sees and what the stepper walks cannot drift. A mixed line contributes two
+  sets of three fields. The line's own tax and post-tax figures sit on the LAST entry row,
+  so the per-line numbers stay intact and are still shown exactly once. A non-mixed line
+  renders byte-identically to before.
+
+**Correction to section 7's arithmetic wording.** The two entered rows sum to the line's
+PRE-TAX total, not to the face. The face is what RazorSync arrives at AFTER it re-applies
+7.25% to the `MSR!` row. Worked: face 900 at a 1/3 labor share gives labor 300, pre-tax
+labor 279.72, tax 20.28, so the rows entered are 600.00 and 279.72 (sum 879.72) and
+RazorSync lands on 900.00. Material is taken as the REMAINDER of the pre-tax total so the
+pair can never drift a cent from the money core.
+
+**LIVE COUPLING, the user's action, not the app's.** `MSR!` must be switched to TAXABLE
+inside RazorSync at the moment this is adopted, exactly as section 7 rules. Entering the
+two rows while `MSR!` is still untaxed under-records the tax and the rows will not reach
+the face. The app cannot make that change.
+
+**Proof.** `scratchpad/replay.js` re-run after the change: 68 lines, 0 per-line face
+totals moved, face total 8875.86, reported tax 483.40, all identical to the pre-Fix-7
+figures. Fix 7 changes ENTRY presentation only; had the helper leaked into the totals
+path, those numbers would have moved.
+
+**MEASURED REACH, and why nothing splits on screen yet.** 145 of the 173 MSR library
+items carry BOTH a material and a labor amount, so the mixed case is the common case, not
+an edge. But of the 68 stored remittance lines, ZERO carry a split at all, so ZERO render
+as two rows today. Re-resolving those same 68 lines through the shipped resolver gives 44
+with a split and **5 that render as two rows**. The stored blocks simply predate Slice 1,
+which is when a confirmed match started carrying its split. Not a Fix 7 defect: the
+two-row path is correct and fires on freshly resolved lines. It stays invisible until a
+block is re-fetched and re-saved, at which point `taxSplit` carries the split onto the
+stored line.
+
+**Honest limit on verification.** The two-row RENDER is proven by unit tests on
+`razorSyncRows` plus the fact that the table and `CopyStepper` both read that one
+function. It is NOT live-proven in the running app, because no stored block currently
+contains a mixed line to draw. Re-save one MSR block and the path becomes observable.
+
 ---
 
 ## 11. Considerations solidified

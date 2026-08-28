@@ -1555,6 +1555,41 @@ export function categoryLabel(line) {
 export function sentinelTag(line) {
   return { AMH: 'AMH!', MSR: 'MSR!', labor: 'Labor!', material: 'Materials!' }[categoryLabel(line)];
 }
+
+// RazorSync ENTRY rows for ONE line. RazorSync is the official invoice record (D2) and
+// applies tax PER LINE from the catalog item, so a MIXED tax-inclusive line (taxed labor
+// PLUS untaxed material) cannot enter as one row: a taxable row would tax the material,
+// which D1 forbids, and an untaxed row records zero tax on work that carries tax. Section
+// 7 ruling: the material portion enters under the non-taxable `Materials!` item and the
+// PRE-TAX labor under the taxable `MSR!` item, so RazorSync re-adds 7.25% to the second
+// row and the two rows land on the face price. Everything else stays ONE row, as today.
+//
+// The two prices sum to the line's PRE-TAX total (li.pre), NOT to the face: the face is
+// what RazorSync arrives at AFTER it applies tax to the MSR! row. Material is taken as
+// the REMAINDER of li.pre so the pair can never drift a cent from the money core.
+//
+// Pure: (line, defaultAgreement) -> [{ tag, desc, price }]. The remittance display AND
+// CopyStepper both read THIS function, so the rows a user sees and the rows they copy
+// cannot fall out of step.
+export function razorSyncRows(line, defaultAgreement) {
+  const li = line || {};
+  const desc = li.desc || '';
+  const pre = money(Number(li.pre) || 0);
+  const single = [{ tag: sentinelTag(li), desc, price: pre }];
+  // Same load-bearing gate laborShare sits behind: AMH library material/labor columns are
+  // internal COST BASIS, never a tax basis, so AMH can never reach the split path (D7).
+  if (!catalogTax(li.agreement || defaultAgreement).taxableInclusive) return single;
+  if (!hasTaxSplit(li)) return single;
+  const share = laborShare(li);
+  if (!(share > 0 && share < 1)) return single;   // all-labor or all-material: one row
+  const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
+  const face = money(Number(li.unitPrice) * qty);
+  const preTaxLabor = money(money(face * share) / TAX_RATE);
+  return [
+    { tag: 'Materials!', desc, price: money(pre - preTaxLabor) },
+    { tag: 'MSR!', desc, price: preTaxLabor },
+  ];
+}
 export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, defaultAgreement, authoritativeTotal) {
   const saved = (savedInvoice && Array.isArray(savedInvoice.lineItems)) ? savedInvoice.lineItems : [];
   const changes = [];
