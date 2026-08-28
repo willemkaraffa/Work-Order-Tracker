@@ -525,6 +525,14 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
                     style={{ cursor: onCopy ? 'pointer' : 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {e.desc || '(no description)'}{j === 0 && l.qty > 1 ? ' ×' + l.qty : ''}
                   </span>
+                  {/* A split line shows the SAME wording twice, so say which portion each
+                      row is. Display only -- it is deliberately NOT part of e.desc, which
+                      is the text pasted into RazorSync. */}
+                  {entry.length > 1 && (
+                    <span style={{ flexShrink: 0, fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>
+                      {j === 0 ? 'material portion' : 'labor, pre-tax'}
+                    </span>
+                  )}
                 </span>
                 <span onClick={onCopy ? () => onCopy(e.price) : undefined}
                   title={onCopy ? 'Click to copy pre-tax price' : undefined}
