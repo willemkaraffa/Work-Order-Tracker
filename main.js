@@ -998,7 +998,9 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec, paid) => {
     // sheet (a CO fully restates the WO); additive union of bid+CO is the fallback for a
     // partially-itemized CO. Whichever total is closest to paid wins (primary on ties).
     const candidates = [];
-    for (const p of allBidCoSheets(r.folder)) {
+    const folderExists = fs.existsSync(r.folder);
+    const sheets = allBidCoSheets(r.folder);
+    for (const p of sheets) {
       let rows = [], statedTotal = null;
       try { const res = await readSheetOtherItems(p, sheetName); rows = (res && res.items) || []; statedTotal = (res && res.statedTotal != null) ? res.statedTotal : null; } catch (_) { rows = []; statedTotal = null; }
       if (!rows.length) continue;
@@ -1006,7 +1008,18 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec, paid) => {
       candidates.push({ name: path.basename(p), mtime, path: p, rows, statedTotal });
     }
     const sel = selectBidItems(candidates, paid);
-    return { ok: true, items: sel.items, count: sel.items.length, statedTotal: sel.statedTotal };
+    // SAY WHY there is nothing, instead of returning a silent empty. A bid sheet is read
+    // ONLY from this WO's own folder (<property>\WO <num>), which is the tree the app
+    // itself creates: a sheet sitting anywhere else belongs to no WO we can name, and
+    // guessing would invoice one WO's scope onto another (one property routinely holds
+    // several WOs). So "this WO has no folder yet" is a real, reportable state, not an
+    // error to swallow -- swallowing it is why folders predating the WO-number level read
+    // as "no bid sheet" with nothing the user could act on.
+    const reason = sel.items.length ? null
+      : !folderExists ? 'no-wo-folder'
+      : !sheets.length ? 'no-bid-sheet'
+      : 'sheets-had-no-rows';
+    return { ok: true, items: sel.items, count: sel.items.length, statedTotal: sel.statedTotal, reason, folder: r.folder };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 

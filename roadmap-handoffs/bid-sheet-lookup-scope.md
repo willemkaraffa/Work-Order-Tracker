@@ -1,4 +1,16 @@
-# The bid-sheet parser misses 71 of 336 MSR work orders
+# Bid sheets outside a WO's own folder are invisible, and that is CORRECT
+
+**RULED 2026-08-28 by the user, and this doc is corrected accordingly. An earlier draft
+proposed attributing a stray sheet to a work order. That is withdrawn.** The rule is: a
+bid sheet counts only when it sits inside the WO's own `WO <num>` folder. If the WO number
+on the containing folder does not match the WO being read, the sheet is not acknowledged.
+The app already creates that structure, so there is nothing to infer.
+
+That rule was ALREADY the code: `allBidCoSheets` walks only from `<property>\WO <num>`,
+so no work order can ever pick up another's sheet. Verified, not assumed. Nothing about
+attribution needed building.
+
+# Original report, kept for the measurement
 
 Filed 2026-08-28. Reported as "5015 Gailardia Dr's bid sheet is no longer found by the
 parser". NO CODE YET, deliberately: the obvious fix can attach the WRONG work order's
@@ -46,7 +58,7 @@ So 71 work orders silently return zero line items. Examples: `21 ASH ST`,
 `315 W Barnes St`, `3919 Alder Grove Ln`, `418 September Ln`, `3061 BUTTONWOOD LN`,
 `110 Brookfield Dr`.
 
-## Why the obvious fix is unsafe
+## Why the obvious fix is unsafe (this is why the rule above is right)
 
 "Fall back to scanning the property folder" is wrong as stated. A property holds MANY work
 orders over time. 5015 Gailardia Dr alone has FOUR MSR orders (02714191, 02877908,
@@ -54,26 +66,34 @@ orders over time. 5015 Gailardia Dr alone has FOUR MSR orders (02714191, 0287790
 folder holds ONE HVAC bid sheet, and nothing in its path says which of the four it
 belongs to. A blind widen would hand one work order another's scope and invoice it.
 
-## What a real fix has to establish
+## SHIPPED 2026-08-28: fail loud, attribute nothing
 
-1. **Attribution.** Given a sheet found outside a `WO <num>` folder, decide WHICH work
-   order it belongs to, or refuse. Candidate signals, in order of strength: the WO number
-   inside the workbook itself; the sheet's own `Date of Bid` cell against the order's
-   date; the dated folder name (`05-28`) against the order's date; file mtime.
-   `readSheetOtherItems` already opens the workbook, so reading a WO/date cell is cheap.
-2. **Refuse rather than guess.** When a property folder holds one sheet and exactly ONE
-   order plausibly claims it, attach it. When two or more orders could claim it, attach
-   NOTHING and say so. This is the same shape as the Fix 4 ambiguity rule: two candidates
-   at the same evidence means confirm neither.
-3. **Fail loud.** Split today's single silent `[]`: "no bid sheet for this WO" versus
-   "found N sheets at the property, none attributable to this WO". The current swallow is
-   why this went unnoticed across 71 orders.
-4. **Do not move files.** Reorganising the tree to match the new convention is a separate,
-   reversible chore and must not be smuggled into a read path.
+The read path is unchanged: still only `<property>\WO <num>`, still nothing inferred. The
+one defect worth fixing was the SILENCE. `read-bid-lineitems` returned a bare empty list
+whether the WO had no folder, had a folder with no sheet, or had a sheet that read zero
+rows, so a user could not tell "nothing to read" from "you have not made the folder yet".
+
+- `main.js` `read-bid-lineitems` now returns `reason` (`no-wo-folder` / `no-bid-sheet` /
+  `sheets-had-no-rows`) and `folder` alongside the items.
+- `src/invoices.jsx` surfaces it through the EXISTING `captureMsg` banner instead of
+  autofilling nothing quietly. `no-wo-folder` tells the user to use "Go to folder" and put
+  the sheet inside, and says plainly that a sheet filed elsewhere is not read because one
+  property holds many WOs.
+
+## What is left, and it is DATA, not code
+
+71 work orders have a legacy sheet parked outside their WO folder. Gailardia's sits in a
+hand-made `05-28` folder under the property root, with a hand-made filename: the app names
+its own copies `<address> Bid DD-MM.xlsx` and writes them straight into `WO <num>`, so
+that folder was never app-created. Those 71 stay invisible until someone opens the WO,
+uses "Go to folder", and moves the sheet in. That is a filing chore with a human deciding
+which WO each sheet belongs to, which is exactly the judgement the code refuses to fake.
+
+Do NOT write a migration that guesses. Same reason as above.
 
 ## Acceptance
 
-- Gailardia WO 03984200 either gets its sheet with stated evidence, or reports an explicit
-  ambiguity naming the other three orders. Silence is a failure.
+- Gailardia WO 03984200 reports `no-wo-folder` and tells the user what to do. Silence is
+  the failure; a guess would be worse.
 - The 179 that work today must be unchanged. Measure before and after with the same walk.
 - No work order gains line items whose total contradicts a paid remittance amount.

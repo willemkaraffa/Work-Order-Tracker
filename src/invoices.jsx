@@ -892,7 +892,15 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     if (!order || !window.woFolder || !window.woFolder.readBidLineItems) return;
     let cancelled = false;
     window.woFolder.readBidLineItems(order).then(res => {
-      if (cancelled || !res || !res.ok || !Array.isArray(res.items) || !res.items.length) return;
+      if (cancelled || !res || !res.ok) return;
+      if (!Array.isArray(res.items) || !res.items.length) {
+        // Bid sheets are read ONLY from this WO's own folder. Report WHICH empty state
+        // this is instead of autofilling nothing in silence (main.js sets res.reason).
+        if (res.reason === 'no-wo-folder') setCaptureMsg('This WO has no folder yet, so no bid sheet was read. Use "Go to folder" to create it, then put the bid sheet inside. A sheet filed anywhere else is not read: one property holds many WOs, so it cannot be attributed.');
+        else if (res.reason === 'no-bid-sheet') setCaptureMsg("No bid or CO sheet in this WO's folder.");
+        else if (res.reason === 'sheets-had-no-rows') setCaptureMsg("Found a bid sheet in this WO's folder but read zero line items from it.");
+        return;
+      }
       // Route through bidItemsToInvoiceLines (shape {name=desc, qty, price}) so
       // materials are detected (taxable=false) and any service-library match
       // applies -- instead of everything defaulting to taxable Labor.
