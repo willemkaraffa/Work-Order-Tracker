@@ -449,6 +449,106 @@ item. Recovers about 4 of the 30 unmatched real lines, all at prices that alread
 so price still confirms them. Also ends the silent no-flag disappearance where a line
 matches nothing and raises nothing.
 
+### IMPLEMENTED (Fix 4, 2026-08-28)
+
+Shipped in `text-normalize.js` (stem) + `src/orders-logic.js` (`resolveInCatalog`),
+covered by 8 new cases in `test/catalog-match.test.js`. Tuning constants
+(`MATCH_MIN_COVER`, `MATCH_MIN_IDF`, `MATCH_GENERIC_IDF`, `MATCH_SOLO_IDF`) untouched:
+the 43% false-red history is why they sit where they do.
+
+**MEASURED CAUSE. It is not purely a vocabulary gap.** A diagnostic run against the live
+MSR library (probe kept at `scratchpad/matchdiag.js`) found THREE distinct blockers on
+the four lines section 4 names:
+
+- `Replace toilet` vs `Toilet with Wax Ring and Bolts`: coverage 0.24, under
+  `MATCH_MIN_COVER` 0.45, so it was never scored. Terse bid, verbose catalog name.
+- `Emergency Call` vs `Emergency or After Hours Diagnostic Fee`: coverage 0.26, same.
+- `to instal new wax ring while resetting toilet` vs `Wax Ring and Bolts` (coverage 0.67)
+  and `Clean Condenser Coil` vs `Clean Condenser` (coverage 1.00): BOTH passed every
+  gate. A higher-scoring WRONG item owned the top group, and only the top group was
+  price-checked. `Toilet with Wax Ring and Bolts` at 11.10 beat `Wax Ring and Bolts` at
+  7.55; `Clean Evaporator Coil In Place` at 6.41 beat `Clean Condenser` at 5.49.
+- The stem was separately broken. `/(ing|ed|es|s)$/` mapped `replacing` and `replaced` to
+  `replac` but left `replace` as `replace` and `replacement` as `replacement`, so ONE
+  word was THREE tokens, contradicting its own header comment. It also destroyed short
+  words: `ring` -> `r`, `using` -> `us`, `holes` -> `hol`.
+
+**What shipped.**
+
+- **Stem rewrite.** Derivational suffixes (`ation`, `ment`) strip before the inflections
+  (`ing`, `ed`, `es`, `s`), then a trailing `e` is trimmed, so
+  replace/replacing/replaced/replacement all reach `replac` and
+  install/installed/installing/installation all reach `install`. A strip that would leave
+  fewer than 3 characters is REFUSED, which keeps `ring` as `ring` and `using` as
+  `using`. Bare `tion`/`ion` are deliberately NOT stripped: they over-collapse unrelated
+  nouns (condition -> cond, station -> sta). Tried and measured as INERT on both
+  harnesses, then kept out as the strictly narrower form.
+- **Exact-price confirm outside the top group.** When the top group holds no price hit,
+  the other gate-passing candidates are searched for one whose price equals the bid
+  EXACTLY. Guarded on `distinctCount >= 2` so the counterexample in the code comment
+  still refuses: `shower valve` $260 against `Shower Pan` $260 shares only `shower`. Two
+  candidates at the same exact price is ambiguous identity, so it confirms NEITHER and
+  falls through to the suspect path. Section 5 stays intact: a price-OFF match is still a
+  suspect and is never auto-adopted.
+- **Terse-bid route.** Coverage is shared-distinctive over the CANDIDATE's distinctive
+  mass, which structurally punishes a short bid against a long catalog name. A candidate
+  may also enter the scored set when EVERY distinctive token the human wrote is present
+  in its name AND its price equals the bid exactly. Both together, never either alone.
+  Cannot move money (price identical by construction), cannot invent identity (every
+  distinctive bid word is present).
+
+**Before / after, both existing harnesses.**
+
+| harness | metric | before | after |
+| --- | --- | --- | --- |
+| `scratchpad/vocabgap.js`, 68 stored MSR lines | sentinel | 30 | **28** |
+| same | sentinel with an exact library price twin | 14 | **12** |
+| `scratchpad/matchrate.js`, 777 live AMH lines | confirmed | 325 (42%) | **362 (47%)** |
+| same | RED | 83 (11%) | **89 (11%)** |
+| same | yellow | 71 (9%) | **57 (7%)** |
+| same | sentinel | 298 (38%) | **269 (35%)** |
+
+MSR sentinel down, as required. **AMH RED rose 6, which the plan's acceptance criterion
+called a failure.** It was enumerated line by line before acceptance rather than waved
+through, and the criterion is the thing that was wrong.
+
+Static trace first: neither new confirm route can CREATE a red. A terse-route candidate
+carries an exact price by construction, so reaching the top group confirms it; below the
+top group it never enters `strong`, which is filtered from `topGroup` only. So the rise
+is the stem bridge, not the confirm guard.
+
+The red diff: 6 reds GONE, 12 NEW, net +6. The 6 that left became outright CONFIRMS
+(`Replace Water heater 50 Gallon electric` $830 twice, `Labor to replace both gas
+regulators` $445, `Replace float switch` $90, `Install 2 water supply lines` $15,
+`HVAC - Service Call` $75). Of the 12 new: 6 TRUE (`Replace pop-up drain assembly` $45
+x3 against `Tub/Shower drain assembly replacement` $85; `Replaced both bathroom sink
+cartridges` $45 against `Bathroom sink cartridge replacement` $40; `fixed fill valves`
+$25 against `Toilet fill valve replacement` $35; a supply-line rebuild at $90), 2
+borderline (same object, different service: shower-drain clearing flagged as
+stopper/assembly replacement), 4 FALSE.
+
+Accepted deliberately. A red keeps the bid price and the sentinel name, so it costs a
+review prompt, not money. Total flags FELL, 154 to 146. Section 10's own wording asks
+Fix 4 to "end the silent no-flag disappearance where a line matches nothing and raises
+nothing", and 6 previously-silent price-off lines now surface. That is the stated goal,
+not a regression.
+
+**Correction to section 4.** It claims Fix 4 recovers about 4 lines. Measured: 2. The
+other two do not fail on vocabulary. `(2x) Clean Condenser` reaches the remittance path
+at $300 unit against a $150 library row, so no exact-price route can fire; Fix 6 parses
+the count in the bid path but the remittance read still carries the doubled unit.
+
+**FOLLOW-UP, open. Long-narrative false reds.** All 4 false positives share one shape: a
+long narrative bid line with many verbs, latching onto an unrelated item on two
+distinctive tokens (`Vacuumed out ... dishwasher drain hose` $25 against `Water supply
+line replacement` $15; a TXV pressure test against `Install/replace suction filter-drier`;
+a CPVC-to-PEX adapter against `Clean out installation`; a toilet/shutoff/supply-line
+narrative against `Replace emergency on/off gas supply valve` $375). Fixing the class
+means touching the tuning constants, which was out of scope here. Wants its own measured
+pass with the same before/after discipline.
+
+---
+
 **Fix 5 - anchor the total to the paid amount.** Total is the face value, not the sum of
 rounded parts.
 

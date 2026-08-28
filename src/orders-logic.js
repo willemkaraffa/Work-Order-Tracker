@@ -1054,6 +1054,8 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
   const df = new Map();
   for (const toks of nameToks) for (const t of toks) df.set(t, (df.get(t) || 0) + 1);
   const idf = (t) => Math.log((N + 1) / ((df.get(t) || 0) + 1));
+  // The BID's own distinctive tokens, for the terse-bid route in the loop below.
+  const wDistinct = [...w].filter(t => idf(t) >= MATCH_GENERIC_IDF);
   const scored = [];
   for (let i = 0; i < items.length; i++) {
     const toks = nameToks[i];
@@ -1071,7 +1073,19 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
       if (s >= MATCH_GENERIC_IDF) { distinctTotal += s; if (w.has(t)) { distinctShared += s; distinctCount++; } }
     }
     if (score < MATCH_MIN_IDF) continue;
-    if (distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
+    // TERSE-BID route into the scored set. Coverage is shared-distinctive over the
+    // CANDIDATE's distinctive mass, which structurally punishes a SHORT bid against a
+    // LONG catalog name ("Replace toilet" covers 0.24 of "Toilet with Wax Ring and
+    // Bolts"; "Emergency Call" covers 0.26 of "Emergency or After Hours Diagnostic
+    // Fee"), so those never got scored at all. A candidate may ALSO pass when EVERY
+    // distinctive token the human wrote is present in its name AND its price equals the
+    // bid price exactly. Both together, never either alone: the price is identical by
+    // construction so this cannot move money, and full bid coverage means it cannot
+    // invent identity. The tuning constants above stay where they are -- the 43% false-
+    // red history is why they are there.
+    const terse = wDistinct.length > 0 && wDistinct.every(t => toks.has(t))
+      && Math.abs(priceOf(items[i].price) - price) < 0.005;
+    if (!terse && distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
     scored.push({ it: items[i], score, distinctCount, distinctShared });
   }
   if (!scored.length) return null;
@@ -1086,6 +1100,18 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
   const topGroup = scored.filter(s => Math.abs(s.score - top) < 1e-9);
   const priceMatch = topGroup.find(s => Math.abs(priceOf(s.it.price) - price) < 0.005);
   if (priceMatch) return { confirmed: priceMatch.it };
+  // EXACT-PRICE CONFIRM OUTSIDE THE TOP GROUP. Price-checking only the top group loses a
+  // right-priced candidate to a higher-scoring WRONG one: "Toilet with Wax Ring and Bolts"
+  // ($11.10) outscores "Wax Ring and Bolts" ($7.55) on a bid that IS the wax ring, and
+  // "Clean Evaporator Coil In Place" outscores "Clean Condenser". So when the top group has
+  // no price hit, look among the OTHER gate-passing candidates for one whose price equals
+  // the bid EXACTLY -- but demand real identity evidence (>=2 shared DISTINCTIVE tokens),
+  // which is exactly what refuses the counterexample above ("shower valve" $260 vs "Replace
+  // Shower Pan" $260 shares only "shower", distinctCount 1). Two candidates at the same
+  // exact price is ambiguous identity: confirm NEITHER, fall through to the suspect path.
+  const exactOut = scored.filter(s => s.distinctCount >= 2
+    && Math.abs(priceOf(s.it.price) - price) < 0.005);
+  if (exactOut.length === 1) return { confirmed: exactOut[0].it };
   // A SUSPECT (price-off FLAG) needs real evidence: >=2 shared distinctive tokens, OR a
   // single shared token that is genuinely RARE (idf >= MATCH_SOLO_IDF). One common word
   // ("air" -> Air Handler, "line" -> Supply Line) is too weak to flag; a rare one
