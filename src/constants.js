@@ -31,9 +31,12 @@ export const DEFAULT_PMS = [
 //   taxableInclusive     a TAXABLE line's price already includes tax -> divide it
 //                        back out so grand = face (MSR only). AMH/General taxable
 //                        lines are pre-tax, so tax is added on top.
-//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line. AMH/MSR
-//                        default FALSE (AMH inclusive; MSR tax-included sheets); a
-//                        service-call/diagnostic/emergency wording overrides to taxable.
+//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line. Only
+//                        AMH defaults FALSE (Premier pricing is inclusive and carries its
+//                        own per-line vendorTax); General and MSR labor default TRUE -- an
+//                        MSR price is tax-inclusive, so its labor portion IS tax-bearing
+//                        (roadmap-handoffs/msr-tax-accuracy.md D1). A service-call/
+//                        diagnostic/emergency wording overrides to taxable everywhere.
 export const CATALOG_TAX = {
   General: { taxableInclusive: false, defaultLaborTaxable: true },
   AMH:     { taxableInclusive: false, defaultLaborTaxable: false },

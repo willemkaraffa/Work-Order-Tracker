@@ -895,34 +895,111 @@ export function money(n) {
   return Math.round(v * 100) / 100;
 }
 
-// Pure. invoice = { lineItems:[{ unitPrice, qty, taxable, agreement }] }.
+// The blank-cell sentinel the service library stores on a material/labor cell
+// (library_io.js MATERIAL_INCLUDED). It means that side is BUNDLED INTO THE OTHER,
+// NOT zero, so it must never be coerced to a number. Re-declared here rather than
+// imported: library_io.js is a CJS main-process module that pulls in exceljs, which
+// must not enter the renderer bundle.
+const MATERIAL_INCLUDED = 'Included';
+
+// THE CHOKE POINT for carrying the split across a boundary. Every site that builds an
+// invoice line OUT OF something else spreads this instead of re-listing the two field
+// names by hand: re-listing them is exactly how the split got silently dropped at four
+// separate boundaries (reconcileMsrRow, the editor save map, reconcileBlockToInvoice,
+// recomputeInvoice), each time reverting a line to the whole-price divide-out with no
+// visible symptom. Returns {} when the source carries no split, so the spread is always
+// safe, and it never coerces: 'Included' stays the string sentinel.
+export function taxSplit(src) {
+  if (!src || (src.material == null && src.labor == null)) return {};
+  return { material: src.material, labor: src.labor };
+}
+// True when a line carries a usable tax base at all. A spread that someone forgets is
+// still silent at the boundary, so the money core COUNTS the misses instead
+// (computeInvoiceTotals -> missingSplit): a tax-inclusive line with no split is
+// indistinguishable in its numbers from a dropped one, and this is what makes the drop
+// observable + assertable per boundary rather than invisible until an invoice is wrong.
+function hasTaxSplit(li) {
+  return !!li && (li.material != null || li.labor != null);
+}
+
+// LABOR SHARE of a line's face price, 0..1. TAX-INCLUSIVE agreements ONLY -- the caller
+// checks catalogTax(...).taxableInclusive first, so this can never reach an AMH or
+// General line. That gate is load-bearing: AMH's library material/labor columns are
+// INTERNAL COST BASIS that deliberately do not sum to the sell price (library_io.js
+// ~92), so reading them as a tax basis would compute tax from our own cost. AMH is ruled
+// out of this model entirely (roadmap-handoffs/msr-tax-accuracy.md D7).
+// The split is applied as a SHARE, never as absolute dollars: an item listed
+// 1772.30 material / 500.00 labor is 22.0% labor, so a line billed at any other figure
+// keeps that 22.0% labor share and the line total still equals the bid price.
+// No usable split (a saved line predating it) -> fall back to the line's boolean
+// `taxable`, which reproduces the old whole-price divide-out exactly.
+function laborShare(li) {
+  const material = li && li.material;
+  const labor = li && li.labor;
+  if (labor === MATERIAL_INCLUDED) return 0;      // labor bundled into material -> untaxed
+  if (material === MATERIAL_INCLUDED) return 1;   // material bundled into labor -> all taxed
+  const m = typeof material === 'number' && !Number.isNaN(material) ? material : null;
+  const l = typeof labor === 'number' && !Number.isNaN(labor) ? labor : null;
+  if (m != null && l != null && m + l > 0) return l / (m + l);
+  return (li && li.taxable) ? 1 : 0;
+}
+
+// Pure. invoice = { lineItems:[{ unitPrice, qty, taxable, material, labor, agreement }] }.
 // defaultAgreement = the WO's catalog tab (General/AMH/MSR), used when a line
-// carries no agreement of its own. A taxable line divides the embedded tax out
-// only when its catalog is tax-inclusive (catalogTax(agreement).taxableInclusive);
-// otherwise the price is pre-tax and tax is added on top.
+// carries no agreement of its own.
+//   TAX-INCLUSIVE catalog (MSR): the face price is the final post-tax figure and the tax
+//     rides on the LABOR portion ONLY (material already bore sales tax at purchase --
+//     msr-tax-accuracy.md D1). face = material + labor; pre-tax labor = labor/TAX_RATE;
+//     tax = labor - pre-tax labor; the line total is the face, always. Cents are settled
+//     PER LINE here and the material remainder is taken by subtraction, so pre + tax ==
+//     face exactly and the grand total equals the face BY CONSTRUCTION (a 1-cent drift
+//     is enough to flip reconcileMsrRow from 'match' to 'off').
+//   NON-inclusive catalog (AMH, General): unchanged -- the price is pre-tax and tax is
+//     added on top of the taxable subtotal, rounded once on the subtotal.
 // Returns per-line breakdown + { taxableSubtotal, nonTaxableSubtotal, tax, grandTotal }.
 export function computeInvoiceTotals(invoice, defaultAgreement) {
   const lines = (invoice && Array.isArray(invoice.lineItems)) ? invoice.lineItems : [];
-  let taxableSubtotal = 0;   // pre-tax sum of taxable lines
-  let nonTaxableSubtotal = 0;
+  let taxableRaw = 0;        // pre-tax sum of taxable (non-inclusive) lines
+  let nonTaxableRaw = 0;
+  let inclusiveTax = 0;      // cent-exact, summed per inclusive line
+  let inclusivePre = 0;      // cent-exact pre-tax (material + pre-tax labor)
+  let inclusiveNonTax = 0;   // cent-exact material portions
+  let missingSplit = 0;      // tax-inclusive lines arriving with NO tax base (see hasTaxSplit)
   const rows = lines.map((li) => {
     const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
     const unit = money(Number(li.unitPrice));
     const taxable = !!li.taxable;
     const inclusive = catalogTax(li.agreement || defaultAgreement).taxableInclusive;
+    if (inclusive) {
+      const split = hasTaxSplit(li);
+      if (!split) missingSplit++;
+      const face = money(unit * qty);
+      const laborPortion = money(face * laborShare(li));
+      const materialPortion = money(face - laborPortion);          // remainder: no drift
+      const preTaxLabor = money(laborPortion / TAX_RATE);
+      const lineTax = money(laborPortion - preTaxLabor);
+      const linePre = money(face - lineTax);                       // == material + pre-tax labor
+      inclusiveTax += lineTax;
+      inclusivePre += preTaxLabor;
+      inclusiveNonTax += materialPortion;
+      return { ...li, qty, unitPrice: unit, preTaxUnit: money(linePre / qty), lineSubtotal: linePre,
+        ...(split ? {} : { splitMissing: true }) };
+    }
     // Accumulate raw (unrounded) line values so the cent rounding happens once
     // on the subtotals, not per line (avoids 1-cent drift on multi-line invoices).
-    const preTaxUnitRaw = (taxable && inclusive) ? (unit / TAX_RATE) : unit;
-    const lineRaw = preTaxUnitRaw * qty;
-    if (taxable) taxableSubtotal += lineRaw;
-    else nonTaxableSubtotal += lineRaw;
-    return { ...li, qty, unitPrice: unit, preTaxUnit: money(preTaxUnitRaw), lineSubtotal: money(lineRaw) };
+    const lineRaw = unit * qty;
+    if (taxable) taxableRaw += lineRaw;
+    else nonTaxableRaw += lineRaw;
+    return { ...li, qty, unitPrice: unit, preTaxUnit: unit, lineSubtotal: money(lineRaw) };
   });
-  taxableSubtotal = money(taxableSubtotal);
-  nonTaxableSubtotal = money(nonTaxableSubtotal);
-  const tax = money(taxableSubtotal * (TAX_RATE - 1));
+  // Tax on the non-inclusive side is added on top of its OWN rounded subtotal, exactly
+  // as before, so an AMH/General invoice is byte-identical to the pre-split behaviour.
+  const addedTax = money(money(taxableRaw) * (TAX_RATE - 1));
+  const taxableSubtotal = money(taxableRaw + inclusivePre);
+  const nonTaxableSubtotal = money(nonTaxableRaw + inclusiveNonTax);
+  const tax = money(addedTax + inclusiveTax);
   const grandTotal = money(taxableSubtotal + tax + nonTaxableSubtotal);
-  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal };
+  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal, missingSplit };
 }
 
 /* ---------- invoice line normalization (Build A) ---------- */
@@ -1060,24 +1137,52 @@ export function resolveBidLine(wording, price, clientCatalog, generalCatalog, ag
   // longer encodes the PM. Retiring AMH!/MSR! does NOT change any total (tax = agreement
   // + taxable only). AMH labor still defaults non-taxable via catalogTax(agreement).
   const laborName = () => 'Labor!';
+  // The material/labor SPLIT is the tax base computeInvoiceTotals reads, and it is
+  // MSR-only: gated on the agreement being tax-inclusive so it can never ride on an AMH
+  // line, whose library material/labor columns are internal COST BASIS that deliberately
+  // do not sum to the sell price (library_io.js ~92) and are not a tax basis at all
+  // (roadmap-handoffs/msr-tax-accuracy.md D7 rules AMH out of this model).
+  const inclusive = catalogTax(agreement).taxableInclusive;
+  // Field names reused from the library items on purpose (NOT a new `taxableBase`): the
+  // line and the catalog then speak one language -- the invoice editor already renders
+  // material/labor cells and computeInvoiceTotals reads exactly these two names.
+  const split = (laborPortion) => (inclusive
+    ? { material: money(bidPrice - laborPortion), labor: money(laborPortion) }
+    : {});
   const sentinel = () => {
     // Service Call / Diagnostic / Emergency are ALWAYS taxed (both PMs) and are a
     // billable SERVICE (labor), not a material -- even though the wording is verbless
     // (would otherwise fall to Materials!). Force labor + taxable. (Core truth #3.)
     if (SERVICE_TAXABLE_RE.test(desc)) {
-      return { ...base, name: laborName(), category: 'labor', taxable: true };
+      return { ...base, ...split(bidPrice), name: laborName(), category: 'labor', taxable: true };
     }
+    // No library counterpart -> no catalog split, so read the wording convention the
+    // user already writes by hand in the bid sheet free-text box (D6, 13 of 13 on real
+    // data): a "Material(s)" lead is 100% material and untaxed, a "Labor"/verb lead is
+    // 100% labor and fully tax-bearing.
     const mat = isMaterialWording(desc);
-    if (mat) return { ...base, name: 'Materials!', category: 'material', taxable: false };
-    // Labor fallback: taxable = the catalog's labor default. General labor is taxed;
-    // AMH/MSR default FALSE (AMH inclusive; MSR sheets tax-included). A matched library
-    // item's own taxable still wins on the confirm path.
-    return { ...base, name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
+    if (mat) {
+      // Fits NEITHER lead and carries no action verb: isMaterialWording files it as
+      // material, the conservative direction on a tax record, but on a tax-inclusive
+      // agreement that split is a guess -- surface it for a human ruling on the EXISTING
+      // priceFlag/FlagResolveModal path (yellow = needs a look, not a contract breach)
+      // rather than inventing a second flag concept.
+      const ambiguous = inclusive && !/^\s*materials?\b/i.test(desc);
+      return { ...base, ...split(0), name: 'Materials!', category: 'material', taxable: false,
+        ...(ambiguous ? { priceFlag: 'yellow' } : {}) };
+    }
+    // Labor fallback: taxable = the catalog's labor default. General and MSR labor is
+    // taxed (CATALOG_TAX.*.defaultLaborTaxable true); AMH defaults FALSE (Premier pricing
+    // is inclusive). A matched library item's own taxable still wins on the confirm path.
+    return { ...base, ...split(bidPrice), name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
   };
   // Category from the bid wording (material vs labor), not hardcoded -- a CONFIRMED
   // material (e.g. a General refrigerant line) must not read as labor. Tax is unaffected
   // (driven by agreement + taxable); PM-listed lines display their client via categoryLabel.
-  const confirm = (it) => ({ ...base, name: it.name, category: isMaterialWording(desc) ? 'material' : 'labor', taxable: !!it.taxable });
+  // A confirmed item also hands over ITS split as the line's tax base ('Included' stays
+  // the string sentinel -- never coerced to a number).
+  const itemSplit = (it) => (inclusive ? taxSplit(it) : {});
+  const confirm = (it) => ({ ...base, ...itemSplit(it), name: it.name, category: isMaterialWording(desc) ? 'material' : 'labor', taxable: !!it.taxable });
   const suspectList = (items) => items.map(s => ({ name: s.name, price: priceOf(s.price) }));
   // Fixed-contract clients flag RED (price off the signed agreement); General drifts -> YELLOW.
   const clientFlag = (agreement === 'AMH' || agreement === 'MSR') ? 'red' : 'yellow';
@@ -1204,6 +1309,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
     unitPrice: money(Number(it && it.unitPrice)),
     qty: Number(it && it.qty) > 0 ? Number(it.qty) : 1,
     taxable: !!(it && it.taxable),
+    // The material/labor split IS the tax base for a tax-inclusive line: without it the
+    // money core falls back to the old whole-price divide-out. Copied through taxSplit
+    // ('Included' stays the string sentinel meaning "bundled into the other side", not 0).
+    ...taxSplit(it),
     // Carry the resolveBidLine identity flags so a billed invoice keeps the warning
     // icon (FlagResolveModal) for a price-off / unconfirmed line the user should vet.
     priceFlag: (it && it.priceFlag) || undefined,
@@ -1215,7 +1324,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
   const lines = invLines.map((l, i) => {
     const post = money(l.unitPrice * l.qty);
     const pre = t.rows[i] ? t.rows[i].lineSubtotal : post;   // pre-tax (divide-out for taxable)
-    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, priceFlag: l.priceFlag, suspects: l.suspects, category: l.category, agreement: 'MSR', pre, tax: money(post - pre), post };
+    // The split rides OUT again: this block is what reconcileBlockToInvoice bills from
+    // and what the persisted remittance report reopens with. Drop it here and the saved
+    // invoice reports a different tax than the report on screen a moment earlier.
+    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, ...taxSplit(l), priceFlag: l.priceFlag, suspects: l.suspects, category: l.category, agreement: 'MSR', pre, tax: money(post - pre), post };
   });
   const preTax = money(t.taxableSubtotal + t.nonTaxableSubtotal);
   const tax = t.tax;
@@ -1372,7 +1484,10 @@ export function reconcileBlockToInvoice(block, source, dateIso) {
       const post = money(Number(l && (l.post != null ? l.post : (Number(l.unitPrice) * qty + Number(l.vendorTax || 0)))));
       return { name, desc, qty, unitPrice: money(post / qty), category: 'labor', taxable: false, agreement, ...flags };
     }
-    return { name, desc, qty, unitPrice: money(Number(l && l.unitPrice)), category: 'labor', taxable: !!(l && l.taxable), agreement, ...flags };
+    // MSR carries the SPLIT onto the saved invoice -- it is the tax base, and the saved
+    // invoice is the artifact that matters. The AMH branch above deliberately gets none:
+    // D7 rules AMH untaxed, and its cost-basis columns are not a tax basis.
+    return { name, desc, qty, unitPrice: money(Number(l && l.unitPrice)), category: 'labor', taxable: !!(l && l.taxable), agreement, ...taxSplit(l), ...flags };
   });
   return {
     number: String((block && block.invoiceNum) || '').trim(),
@@ -1429,6 +1544,18 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
     const curIsSentinel = SENTINELS.has(String(l.name || ''));
     const flagged = !!(res.priceFlag || res.suspects);
     const change = (field, from, to) => { changes.push({ lineIdx: idx, field, from, to }); };
+    // Adopt the re-resolved SPLIT exactly like name/taxable are adopted. Saved invoices
+    // predate the split, D3 rules that they recompute, and this is the only repair path --
+    // without it a pre-existing invoice stays split-less forever and keeps reporting the
+    // whole-price tax. Logged through change() so the repair is visible like any other
+    // field. Money is untouched: on a tax-inclusive line the total is the face either way,
+    // only the reported service/tax split moves. Non-inclusive agreements re-resolve with
+    // no split at all, so AMH/General adopt nothing.
+    const adoptSplit = () => {
+      const s = taxSplit(res);
+      if (s.material !== undefined && s.material !== l.material) { change('material', l.material == null ? null : l.material, s.material); next.material = s.material; }
+      if (s.labor !== undefined && s.labor !== l.labor) { change('labor', l.labor == null ? null : l.labor, s.labor); next.labor = s.labor; }
+    };
     // Price-off suspect: surface the flag for review, NEVER auto-rewrite the money.
     if (flagged && res.priceFlag && !l.priceFlag) { change('priceFlag', l.priceFlag || null, res.priceFlag); next.priceFlag = res.priceFlag; next.suspects = res.suspects; }
     if (curIsSentinel) {
@@ -1439,12 +1566,14 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
       if (res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
       if (res.category && res.category !== l.category) { change('category', l.category, res.category); next.category = res.category; }
       if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+      adoptSplit();
     } else if (!flagged) {
       // CONFIRMED real name, clean re-resolve: snap to the canonical library name + taxable;
       // keep the stored category. Never clobber a real name with a sentinel (library item
       // may have been removed) and never touch a price-flagged confirmed line.
       if (!resIsSentinel && res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
       if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+      adoptSplit();
     }
     return next;
   });

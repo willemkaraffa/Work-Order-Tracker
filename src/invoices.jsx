@@ -11,6 +11,7 @@ import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherView
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog, renamePage, deletePage, mergeCatalogAsPage,
   addPage, removePage, renamePageInStore, addSection } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
+import { catalogTax } from './constants.js';   // per-catalog tax policy (taxableInclusive)
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
 // policy live in orders-logic.js / constants.js so the money math is unit-tested.
@@ -22,6 +23,21 @@ if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals
 // different catalog and/or page. Catalog defaults to the tab the user was viewing;
 // sub-category is internal-only (exportLibrary whitelists fields, so it never reaches
 // xlsx). onSubmit gets the full field bag; the parent decides add vs patch vs move.
+// One Material/Labor field value, as submitted. The field is text: a number, the literal
+// 'Included' sentinel (that side is BUNDLED into the other, not 0), or blank. A numeric
+// input MUST leave here as a NUMBER: computeInvoiceTotals' laborShare checks
+// `typeof === 'number'` strictly -- deliberately, so a malformed value can never be
+// coerced into a tax figure -- so a hand-entered string split would read as ABSENT and
+// the line would silently fall back to the whole-price divide-out. NOT exported: this
+// module self-mounts the App on import (app.jsx createRoot), so a fixture-free logic test
+// cannot load it -- test/msr-tax-accuracy.test.js pins this conversion by source contract
+// and proves its consequences on the money core.
+function splitVal(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (s === '') return '';
+  const n = Number(s);
+  return Number.isFinite(n) ? n : s;      // 'Included' stays a STRING
+}
 function ServiceItemModal({ mode = 'add', initial, defaultCatalog, catalogs, subCats, lib, onSubmit, onClose }) {
   const isEdit = mode === 'edit';
   const [name, setName] = React.useState(isEdit && initial ? (initial.name || '') : '');
@@ -60,7 +76,7 @@ function ServiceItemModal({ mode = 'add', initial, defaultCatalog, catalogs, sub
     onSubmit({
       name: name.trim(), desc: desc.trim(),
       price: price === '' ? 0 : parseFloat(price) || 0,
-      material: material.trim(), labor: labor.trim(),
+      material: splitVal(material), labor: splitVal(labor),
       // Taxable is per-item for every catalog now: AMH is mostly tax-inclusive
       // (non-taxable) but its service calls ($75 plumb / $90 HVAC) are taxable.
       taxable,
@@ -268,8 +284,11 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, ma
     const item = { name, desc, price, taxable, manual: true };
     if (subCategory) item.subCategory = subCategory;
     if (itemPage) item.page = itemPage; // L2 page
-    if (material) item.material = material;
-    if (labor) item.labor = labor;
+    // Cleared is '' (splitVal), not falsy-in-general: a numeric 0 is a REAL split figure
+    // (material 0 = the price is all labor = fully tax-bearing), so a truthiness test
+    // would silently drop it and send the line back to the whole-price divide-out.
+    if (material !== '') item.material = material;
+    if (labor !== '') item.labor = labor;
     if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
       setSubCats([...(subCats || []), subCategory]);
     }
@@ -292,7 +311,9 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, ma
     const patch = {
       name, desc, price, taxable, manual: true,
       subCategory: subCategory || undefined, page: itemPage || undefined,
-      material: material || undefined, labor: labor || undefined,
+      // '' (cleared) removes the field; 0 is a real figure and must survive. See addFromModal.
+      material: material === '' ? undefined : material,
+      labor: labor === '' ? undefined : labor,
     };
     if (catalog === from) {
       updateItem(idx, patch);
@@ -955,6 +976,12 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
         unitPrice: money(Number(l.unitPrice)),
         category: l.category === 'material' ? 'material' : 'labor',
         taxable: !!l.taxable,
+        // The material/labor split IS the tax base for a tax-inclusive line
+        // (computeInvoiceTotals reads exactly these names). Drop it here and a saved MSR
+        // invoice reloads with no split and silently falls back to the whole-price
+        // divide-out. 'Included' is kept verbatim -- it is a string sentinel, not 0.
+        ...(l.material != null ? { material: l.material } : {}),
+        ...(l.labor != null ? { labor: l.labor } : {}),
         agreement: l.agreement || tabName,
         ...(l.edited ? { edited: true } : {}),   // Slice 5: honor manual-edit protection on recompute
       }));
@@ -1118,7 +1145,16 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
                     style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
                 </td>
                 <td style={{ padding: '4px 6px', textAlign: 'center' }}>
-                  <input type="checkbox" checked={!!l.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} />
+                  {/* On a tax-INCLUSIVE agreement (MSR) the tax figure is derived from the
+                      line's LABOR portion, so this flag no longer controls it -- shown
+                      INERT (a live control that controls nothing is worse than the bug).
+                      Not deleted: AMH and General lines still drive their tax from it. */}
+                  <input type="checkbox" checked={!!l.taxable}
+                    disabled={catalogTax(l.agreement || pm).taxableInclusive}
+                    title={catalogTax(l.agreement || pm).taxableInclusive
+                      ? 'MSR prices are tax-inclusive: tax is derived from the line’s labor portion (material is never taxed), not from this box.'
+                      : undefined}
+                    onChange={(e) => setLine(i, { taxable: e.target.checked })} />
                 </td>
                 <td style={{ padding: '4px 6px', textAlign: 'center' }}>
                   <button onClick={() => removeLine(i)} title="Remove" disabled={lines.length <= 1} style={{
@@ -1139,7 +1175,8 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
           <div style={{ width: 300, borderTop: '1px solid var(--border-1)', paddingTop: 10 }}>
             {isMSR && (
               <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 6 }}>
-                MSR: taxable prices are tax-inclusive; tax divided back out at {TAX_RATE}.
+                MSR: prices are tax-inclusive; tax is divided back out at {TAX_RATE} from the
+                LABOR portion only (material already bore tax at purchase).
               </div>
             )}
             {totalRow('Taxable subtotal', fmt(totals.taxableSubtotal))}
