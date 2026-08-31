@@ -148,11 +148,16 @@ Two defects DID surface from that probe.
    with `taxable:false`, billing a labor line as a non-taxable material (WO 03278789), and
    the on-price `Label breakers $25` confirmed against the General item but carried
    `category:'material'`. Both covered in `test/catalog-match.test.js`.
-2. OPEN, not fixed. `parseOtherCell` splits the OTHER cell on `$`, so any wording BEFORE
-   the amount is discarded. The Gailardia CO cell "Labor $150 to replace disconnect" is
-   read as desc "to replace disconnect". Here the verb survives and the line still files
-   as labor, so no money moves, but a wording whose only labor signal sits before the `$`
-   would be misfiled. Needs a decision on whether the pre-amount text should be prepended.
+2. NOT A DEFECT. Retracted 2026-08-31, same day it was filed. I claimed `parseOtherCell`
+   dropped a leading "Labor" from the Gailardia line, having guessed at the cell contents
+   instead of reading them. The cell says `$150 to replace disconnect` verbatim: the human
+   left "Labor" off when typing. The parser reproduced the sheet exactly.
+   The wider worry (wording before the `$` is discarded) does not occur in this data.
+   Surveyed 80 real MSR bid/CO sheets, `scratchpad/other-prefix-survey.js`:
+   `lines with $: 8211 | lines with wording before $: 0`. Amount-first is the convention,
+   8211 for 8211. Do NOT "harden" this without a reason: inside a multi-item cell
+   (`$85 Service Call $800 Labor to replace compressor`) the text before a `$` is the
+   PRIOR item's description, so a naive prepend steals one line's words for the next.
 3. OPEN, cosmetic. `selectBidItems` returns `statedTotal: 0` when the chosen candidate
    carries `statedTotal: null`, because `Number(null)` is 0 and passes `Number.isFinite`.
    Harmless today: the advisory that consumes it is gated on `> 0`.
