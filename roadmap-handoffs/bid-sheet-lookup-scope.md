@@ -109,8 +109,9 @@ Do NOT write a migration that guesses. Same reason as above.
 
 ## Acceptance
 
-- Gailardia WO 03984200 reports `no-wo-folder` and tells the user what to do. Silence is
-  the failure; a guess would be worse.
+- ~~Gailardia WO 03984200 reports `no-wo-folder` and tells the user what to do.~~ STALE as
+  of 2026-08-31, see the correction below. The general point stands for any WO that really
+  has no folder: silence is the failure; a guess would be worse.
 - The 179 that work today must be unchanged. Measure before and after with the same walk.
 - No work order gains line items whose total contradicts a paid remittance amount.
   MEASURED 2026-08-31 in `test/reconcile-msr.test.js` ("acceptance 3" cases): a block whose
@@ -118,3 +119,40 @@ Do NOT write a migration that guesses. Same reason as above.
   (`orderId && status === 'match' && lines.length`) withholds it. An unmatched paid row is
   never billable even when it carries lines. `selectBidItems` picking the sheet set closest
   to paid was already covered in `test/bid-select.test.js`; this covers what happens after.
+
+## CORRECTION 2026-08-31: Gailardia is NOT a `no-wo-folder` case any more
+
+The 08-28 filing above (and the acceptance bullet) named WO 03984200 as the worked
+example of a missing folder. That is no longer true on disk, and repeating it sent a live
+test after a bug that is not there. Probed with the SHIPPED `allBidCoSheets` +
+`readSheetOtherItems` + `selectBidItems`, extracted out of main.js and run without
+electron (`scratchpad/probe-gailardia.tmp.js`):
+
+```
+folderExists = true          sheets found = 2
+  2026-07-31\5015 Gailardia Dr CO 31-07.xlsx   rows=8
+  5015 Gailardia Dr Bid 23-07.xlsx             rows=5
+selectBidItems -> 8 items, sum 3289.58         reason = null
+```
+
+`WO 03984200\` exists, holds the bid, and holds a dated `2026-07-31\` subfolder with the
+CO. `allBidCoSheets` recurses, so the CO is found and wins on mtime. Someone filed the
+sheets correctly between 08-28 and now. The 71-WO backlog above may be similarly stale;
+re-measure it before quoting the number again.
+
+Two defects DID surface from that probe.
+
+1. FIXED. `label` was missing from `ACTION_VERB` (`src/orders-logic.js`), so a "Label ..."
+   line hit the verbless branch of `isMaterialWording` and was filed as material. Live
+   effect on the real store: `Label Breakers and Disconnect $50` resolved to `Materials!`
+   with `taxable:false`, billing a labor line as a non-taxable material (WO 03278789), and
+   the on-price `Label breakers $25` confirmed against the General item but carried
+   `category:'material'`. Both covered in `test/catalog-match.test.js`.
+2. OPEN, not fixed. `parseOtherCell` splits the OTHER cell on `$`, so any wording BEFORE
+   the amount is discarded. The Gailardia CO cell "Labor $150 to replace disconnect" is
+   read as desc "to replace disconnect". Here the verb survives and the line still files
+   as labor, so no money moves, but a wording whose only labor signal sits before the `$`
+   would be misfiled. Needs a decision on whether the pre-amount text should be prepended.
+3. OPEN, cosmetic. `selectBidItems` returns `statedTotal: 0` when the chosen candidate
+   carries `statedTotal: null`, because `Number(null)` is 0 and passes `Number.isFinite`.
+   Harmless today: the advisory that consumes it is gated on `> 0`.

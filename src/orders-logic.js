@@ -1128,7 +1128,12 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
 // ("drain line", "drain pan", "drain assembly") than a verb ("drain the system"), so
 // treating it as a verb wrongly filed those materials as Labor. Real drain work still
 // carries a true verb (clear/replace/clean the drain) and stays Labor.
-const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap)\w*/i;
+// "label" IS a verb here: on this catalog it only ever appears as the act ("Label
+// Breakers", "Label disconnect"), never as a thing bought. Missing it billed
+// "Label Breakers and Disconnect $50" as a NON-TAXABLE material (real WO 03278789) and
+// filed the confirmed 25.00 line as 'material'. A bought label still leads with
+// "Material -", which wins before this test runs.
+const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap|label)\w*/i;
 function isMaterialWording(desc) {
   // A line LEADING with "Material"/"Materials" is a material (non-taxable), whatever
   // follows -- user rule: bias combined "Material to replace ..." lines to material; the

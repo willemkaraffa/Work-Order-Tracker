@@ -44,6 +44,8 @@ const GENERAL = [
   { name: 'Toilet Fill Valve Replacement', desc: '', price: 35, taxable: true },
   { name: 'Water Heater Replacement', desc: '', price: 950, taxable: true },
   { name: 'Shower Cartridge Replacement', desc: '', price: 95, taxable: true },
+  // Real live General item. "Label ..." lines are the act of labelling, i.e. LABOR.
+  { name: 'Label Breakers', desc: '', price: 25, taxable: true },
   // Sized to the live General catalog range so a lone rare token (capacitor) clears
   // MATCH_SOLO_IDF (4.0) exactly as it does against the real ~150-item library.
   ...filler(150),
@@ -314,6 +316,32 @@ test('terse route needs BOTH conditions: full coverage alone does NOT let it in'
   const l = resolveBidLine('Replace toilet', 20, TERSE, null, 'MSR');
   assert.strictEqual(l.priceFlag, undefined);
   assert.strictEqual(l.suspects, undefined);
+});
+
+// ---- "label" is an ACTION VERB (was missing -> labor lines filed as material) ----
+
+test('label line at the library price -> confirmed, category LABOR not material', () => {
+  const l = resolveBidLine('Label breakers', 25, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Label Breakers');
+  assert.strictEqual(l.category, 'labor');
+  assert.strictEqual(l.taxable, true);
+});
+
+test('label line off the library price -> Labor! sentinel, TAXABLE (real WO 03278789)', () => {
+  // Was 'Materials!' + taxable:false, which billed a labor line as a non-taxable
+  // material. The price is off 25, so it stays a flagged sentinel; only the side moves.
+  const l = resolveBidLine('Label Breakers and Disconnect', 50, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Labor!');
+  assert.strictEqual(l.category, 'labor');
+  assert.strictEqual(l.taxable, true);
+  assert.ok(l.suspects && l.suspects.some(s => s.name === 'Label Breakers'));
+});
+
+test('a BOUGHT label still reads material -- the "Material" lead wins first', () => {
+  const l = resolveBidLine('Material - breaker labels', 10, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Materials!');
+  assert.strictEqual(l.category, 'material');
+  assert.strictEqual(l.taxable, false);
 });
 
 console.log('catalog-match test');
