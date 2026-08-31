@@ -122,12 +122,21 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const match = ens ? { order: ens, matchBy: 'woId' } : matchMsrRow(row, orders);
           let items = [];
           let stated = null;
+          // WHY-not, carried to the block: an empty read here used to fall through as a
+          // bare 'no-items' with nothing the user could act on, while the invoice editor
+          // explained the same read. main.js sets r.reason; a thrown/failed read becomes
+          // 'read-failed:<msg>' instead of being swallowed by the catch.
+          let reason = null;
           if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
             try {
               const r = await window.woFolder.readBidLineItems(match.order, row.amount);
               if (r && r.ok && Array.isArray(r.items)) items = r.items;
               if (r && Number.isFinite(Number(r.statedTotal))) stated = Number(r.statedTotal);
-            } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
+              if (!r || !r.ok) reason = 'read-failed:' + ((r && r.error) || 'unknown');
+              else if (r.reason) reason = r.reason;
+            } catch (e) { reason = 'read-failed:' + (e.message || e); }
+          } else if (match.order) {
+            reason = 'no-desktop';   // web build: no woFolder IPC bridge
           }
           // Resolve each read line against the MSR library so its taxable flag drives the
           // per-line divide-out breakdown (reuses the resolveBidLine matcher). Shape in:
@@ -135,7 +144,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const resolved = bidItemsToInvoiceLines(
             items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice })),
             msrLib, 'MSR', genLib);
-          return reconcileMsrRow(row, match, resolved, stated);
+          return reconcileMsrRow(row, match, resolved, stated, reason);
         }));
       }
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';

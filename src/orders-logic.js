@@ -1318,7 +1318,22 @@ export function matchMsrRow(row, orders) {
 //   off        computed != paid (bid on file incomplete, or a genuine discrepancy)
 //   no-items   matched WO but no bid-sheet items (likely a service-call-only fix)
 //   unmatched  no WO found for this remittance line
-export function reconcileMsrRow(row, match, bidItems, statedTotal) {
+// WHY read-bid-lineitems returned nothing (main.js sets res.reason on an ok read;
+// callers pass 'read-failed:<msg>' for a failed one). ONE wording shared by both
+// readers -- the invoice editor banner and the remittance report flag -- so a silent
+// empty can never come back on one path while the other explains itself. Unknown or
+// absent reason -> null, and the caller says nothing extra.
+export function bidReadReasonText(reason) {
+  const r = String(reason || '');
+  if (r === 'no-wo-folder') return 'This WO has no folder yet, so no bid sheet was read. Use "Go to folder" to create it, then put the bid sheet inside. A sheet filed anywhere else is not read: one property holds many WOs, so it cannot be attributed.';
+  if (r === 'no-bid-sheet') return "No bid or CO sheet in this WO's folder.";
+  if (r === 'sheets-had-no-rows') return "Found a bid sheet in this WO's folder but read zero line items from it.";
+  if (r === 'no-desktop') return 'Bid sheets can only be read in the desktop app.';
+  if (r.indexOf('read-failed:') === 0) return 'Could not read the bid sheet: ' + r.slice(12) + '.';
+  return null;
+}
+
+export function reconcileMsrRow(row, match, bidItems, statedTotal, reason) {
   const paid = money(Number(row && row.amount));
   const items = Array.isArray(bidItems) ? bidItems : [];
   // Per-line tax breakdown via the tested money core. `taxable` comes from the caller
@@ -1367,6 +1382,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
   } else if (!lines.length) {
     status = 'no-items';
     flags.push('Paid ' + paid.toFixed(2) + ' but no bid-sheet items found -- likely a service-call-only correction; enter the line manually.');
+    // ...and SAY WHICH empty state it is. Without this the bulk remittance path showed an
+    // unexplained empty WO while the invoice editor explained the identical read.
+    const why = bidReadReasonText(reason);
+    if (why) flags.push(why);
   } else if (Math.abs(computed - paid) < 0.005) {
     status = 'match';
   } else {

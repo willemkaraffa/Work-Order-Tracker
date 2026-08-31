@@ -80,6 +80,22 @@ rows, so a user could not tell "nothing to read" from "you have not made the fol
   the sheet inside, and says plainly that a sheet filed elsewhere is not read because one
   property holds many WOs.
 
+## SHIPPED 2026-08-31: the BULK remittance path says why too
+
+The 08-28 pass wired the reason into the invoice editor only. `src/remittances.jsx` read
+the same IPC and dropped `reason` on the floor, inside a `catch` that swallowed a failed
+read entirely, so bulk itemization still showed an unexplained empty WO. Both readers now
+share ONE wording.
+
+- `bidReadReasonText(reason)` in `src/orders-logic.js` owns the text for every reason, so
+  the two paths cannot drift. Adds `no-desktop` (web build, no `woFolder` bridge) and
+  `read-failed:<msg>` (a thrown or `ok:false` read, previously silent on BOTH paths).
+- `src/remittances.jsx` captures `reason` per row and passes it to `reconcileMsrRow`,
+  which appends the why as a second flag on a `no-items` block. Status/total/selection
+  are untouched; it only explains.
+- `src/invoices.jsx` now calls the shared helper and also reports a failed read, which it
+  previously returned on with no banner at all.
+
 ## What is left, and it is DATA, not code
 
 71 work orders have a legacy sheet parked outside their WO folder. Gailardia's sits in a
@@ -97,3 +113,8 @@ Do NOT write a migration that guesses. Same reason as above.
   the failure; a guess would be worse.
 - The 179 that work today must be unchanged. Measure before and after with the same walk.
 - No work order gains line items whose total contradicts a paid remittance amount.
+  MEASURED 2026-08-31 in `test/reconcile-msr.test.js` ("acceptance 3" cases): a block whose
+  lines sum under, over, or one cent off the paid amount reports `off`, and the bill gate
+  (`orderId && status === 'match' && lines.length`) withholds it. An unmatched paid row is
+  never billable even when it carries lines. `selectBidItems` picking the sheet set closest
+  to paid was already covered in `test/bid-select.test.js`; this covers what happens after.

@@ -5,7 +5,7 @@
 // the esbuild bridge. Exit: 0 pass / 1 fail.
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
-const { normWoNum, normAddress, matchMsrRow, reconcileMsrRow } = loadEsm('src/orders-logic.js');
+const { normWoNum, normAddress, matchMsrRow, reconcileMsrRow, bidReadReasonText } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -201,6 +201,86 @@ test('reconcileMsrRow: statedTotal == computed -> no advisory flag', () => {
   const rep = reconcileMsrRow(r, m, [{ desc: 'Service Call', unitPrice: 85, qty: 1 }], 85);
   assert.strictEqual(rep.status, 'match');
   assert.ok(!rep.flags.some(f => /verify line capture/.test(f)));
+});
+
+// ---- SAY WHY an empty read is empty (remittance path used to swallow it) ----
+
+test('bidReadReasonText: each main.js reason has wording; unknown -> null', () => {
+  assert.ok(/no folder yet/i.test(bidReadReasonText('no-wo-folder')));
+  assert.ok(/No bid or CO sheet/i.test(bidReadReasonText('no-bid-sheet')));
+  assert.ok(/zero line items/i.test(bidReadReasonText('sheets-had-no-rows')));
+  assert.ok(/desktop app/i.test(bidReadReasonText('no-desktop')));
+  assert.ok(/Could not read the bid sheet: EBUSY\./.test(bidReadReasonText('read-failed:EBUSY')));
+  assert.strictEqual(bidReadReasonText(null), null);
+  assert.strictEqual(bidReadReasonText('something-else'), null);
+});
+
+test('reconcileMsrRow: no-items carries the reason flag (no-wo-folder)', () => {
+  const r = row({ woId: '02615338', amount: 85 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [], null, 'no-wo-folder');
+  assert.strictEqual(rep.status, 'no-items');
+  assert.strictEqual(rep.flags.length, 2);
+  assert.ok(/no folder yet/i.test(rep.flags[1]));
+});
+
+test('reconcileMsrRow: a FAILED read reports the error, not silence', () => {
+  const r = row({ woId: '02615338', amount: 85 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [], null, 'read-failed:EPERM');
+  assert.ok(rep.flags.some(f => /Could not read the bid sheet: EPERM/.test(f)));
+});
+
+test('reconcileMsrRow: unknown/absent reason -> only the base no-items flag (no drift)', () => {
+  const r = row({ woId: '02615338', amount: 85 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [], null);
+  assert.strictEqual(rep.flags.length, 1);
+  assert.ok(/service-call-only/i.test(rep.flags[0]));
+});
+
+// ---- Acceptance item 3: "no WO gains line items whose total contradicts a paid
+// remittance amount". The bill gate in remittances.jsx is
+// `b.orderId && b.status === 'match' && b.lines.length`, so the property to hold is:
+// a block whose lines do NOT sum to paid must never report status 'match'.
+
+const billable = (b) => !!(b.orderId && b.status === 'match' && b.lines.length);
+
+test('acceptance 3: lines under the paid amount -> off, NOT billable', () => {
+  const r = row({ woId: '02045937', amount: 1343 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'Water Heater', unitPrice: 1200, qty: 1 }]);
+  assert.strictEqual(rep.status, 'off');
+  assert.strictEqual(billable(rep), false);
+});
+
+test('acceptance 3: lines over the paid amount -> off, NOT billable', () => {
+  const r = row({ woId: '02045937', amount: 1200 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'Water Heater', unitPrice: 1343, qty: 1 }]);
+  assert.strictEqual(rep.status, 'off');
+  assert.strictEqual(billable(rep), false);
+});
+
+test('acceptance 3: one cent of drift is enough to withhold the bill', () => {
+  const r = row({ woId: '02045937', amount: 1343 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'Water Heater', unitPrice: 1343.01, qty: 1 }]);
+  assert.strictEqual(rep.status, 'off');
+  assert.strictEqual(billable(rep), false);
+});
+
+test('acceptance 3: qty-extended lines summing to paid -> match, billable', () => {
+  const r = row({ woId: '02045937', amount: 600 });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [
+    { desc: 'Clean Condenser', unitPrice: 150, qty: 2 },
+    { desc: 'Service Call', unitPrice: 300, qty: 1 },
+  ]);
+  assert.strictEqual(rep.status, 'match');
+  assert.strictEqual(rep.computed, 600);
+  assert.strictEqual(billable(rep), true);
+});
+
+test('acceptance 3: an UNMATCHED paid row is never billable even with lines', () => {
+  const r = row({ woId: '09999999', amount: 500, addressRaw: '10 Elsewhere Rd' });
+  const rep = reconcileMsrRow(r, matchMsrRow(r, ORDERS), [{ desc: 'Repair', unitPrice: 500, qty: 1 }]);
+  assert.strictEqual(rep.status, 'unmatched');
+  assert.strictEqual(rep.orderId, null);
+  assert.strictEqual(billable(rep), false);
 });
 
 console.log('reconcile-msr test');

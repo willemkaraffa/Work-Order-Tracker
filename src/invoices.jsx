@@ -9,7 +9,7 @@ import {
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog, renamePage, deletePage, mergeCatalogAsPage,
-  addPage, removePage, renamePageInStore, addSection } from './orders-logic.js';
+  addPage, removePage, renamePageInStore, addSection, bidReadReasonText } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 import { catalogTax } from './constants.js';   // per-catalog tax policy (taxableInclusive)
 
@@ -892,13 +892,15 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     if (!order || !window.woFolder || !window.woFolder.readBidLineItems) return;
     let cancelled = false;
     window.woFolder.readBidLineItems(order).then(res => {
-      if (cancelled || !res || !res.ok) return;
+      if (cancelled || !res) return;
+      // Bid sheets are read ONLY from this WO's own folder. Report WHICH empty state this
+      // is instead of autofilling nothing in silence (main.js sets res.reason; a failed
+      // read used to return here saying nothing at all). bidReadReasonText is shared with
+      // the remittance report so both readers explain an empty read identically.
+      if (!res.ok) { setCaptureMsg(bidReadReasonText('read-failed:' + (res.error || 'unknown'))); return; }
       if (!Array.isArray(res.items) || !res.items.length) {
-        // Bid sheets are read ONLY from this WO's own folder. Report WHICH empty state
-        // this is instead of autofilling nothing in silence (main.js sets res.reason).
-        if (res.reason === 'no-wo-folder') setCaptureMsg('This WO has no folder yet, so no bid sheet was read. Use "Go to folder" to create it, then put the bid sheet inside. A sheet filed anywhere else is not read: one property holds many WOs, so it cannot be attributed.');
-        else if (res.reason === 'no-bid-sheet') setCaptureMsg("No bid or CO sheet in this WO's folder.");
-        else if (res.reason === 'sheets-had-no-rows') setCaptureMsg("Found a bid sheet in this WO's folder but read zero line items from it.");
+        const why = bidReadReasonText(res.reason);
+        if (why) setCaptureMsg(why);
         return;
       }
       // Route through bidItemsToInvoiceLines (shape {name=desc, qty, price}) so
