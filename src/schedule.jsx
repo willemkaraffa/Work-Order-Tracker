@@ -6,12 +6,12 @@ import React from 'react';
 import { statusColor } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
-  groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle,
+  groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle, orderMatchesQuery,
 } from './orders-logic.js';
-import { TypeIcon, Seg, ActionBtn, BinderTabs } from './primitives.jsx';
+import { TypeIcon, Seg, ActionBtn, BinderTabs, NoteFlagBtn } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG,
-  navBtnStyle, HeaderChips,
+  navBtnStyle, HeaderChips, Modal, confirmDialog,
   itinTodayStr, itinShiftDay, itinSlots, itinSnapSlot, itinFmtTime,
   itinDayLabel, itinDayMonth,
 } from './app.jsx';
@@ -232,6 +232,202 @@ function useAutosave(onAdd, onUpdate, detachOnBlank) {
   return { text, id, onChange, flush, bind, clear };
 }
 
+// ── Admin S4: the flag modals ───────────────────────────────────────────────
+// A note gains meaning AFTER it is written, by flagging it. Locked decision 3:
+// the modals are small, PER FLAG, and never one combined form. They only
+// COLLECT fields -- the schema and every coercion live in normalizeFlags, so
+// nothing here restates the shape.
+//
+// The contact flag is deliberately absent (S4 ruling 3: deferred to S7).
+// normalizeFlags keeps tolerating a contact key either way.
+
+// ms epoch <-> the value a datetime-local input wants. Recovered from the
+// pre-S3b EntryModal: Date.parse reads a bare local datetime string back as
+// local. Empty string both ways means "no reminder".
+function msToLocalInput(ms) {
+  if (typeof ms !== 'number') return '';
+  const d = new Date(ms), pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+    + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function localInputToMs(v) {
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+}
+
+// The house field/label look, also recovered from the deleted EntryModal.
+const fld = {
+  display: 'block', marginTop: 4, width: '100%', padding: '8px', borderRadius: 8,
+  border: '1px solid var(--border-1)', background: 'var(--bg-canvas)', color: 'var(--text-1)',
+  fontFamily: 'inherit', fontSize: 14, boxSizing: 'border-box',
+};
+const lbl = { fontSize: 12, color: 'var(--text-3)' };
+const warnStyle = { fontSize: 12, color: 'var(--danger, #d9534f)' };
+
+// One frame for all five modals: the Modal shell the EntryModal used, plus the
+// only footer a flag ever needs. "Remove flag" shows only when the flag is
+// already set, so the same modal both applies and clears it.
+function FlagFrame({ title, isSet, canSave, onSave, onRemove, onClose, children }) {
+  return (
+    <Modal open onClose={onClose} title={title} width={460}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {children}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          {isSet && onRemove && <ActionBtn onClick={onRemove}>Remove flag</ActionBtn>}
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+          <ActionBtn primary disabled={canSave === false} onClick={onSave}>Save</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Every modal below seeds its fields from the note ONCE, in useState (rule A2:
+// the caller mounts it only while it is open, on a note that already exists, so
+// the initializer can never run against a null note and then go stale behind
+// it). There is no effect re-syncing them back to the record -- that is A1.
+
+function TaskFlagModal({ note, onSave, onRemove, onClose }) {
+  const cur = (note.flags && note.flags.task) || null;
+  const [done, setDone] = React.useState(!!(cur && cur.done));
+  const [due, setDue] = React.useState((cur && cur.due) || '');
+  return (
+    <FlagFrame title="Task" isSet={!!cur} onClose={onClose} onRemove={onRemove}
+      onSave={() => onSave({ done, due: due || null })}>
+      <label style={{ ...lbl, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="checkbox" checked={done} onChange={(e) => setDone(e.target.checked)} />
+        <span style={{ fontSize: 14, color: 'var(--text-1)' }}>Done</span>
+      </label>
+      <label style={lbl}>Due date (blank = backlog)
+        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} style={fld} />
+      </label>
+    </FlagFrame>
+  );
+}
+
+function ReminderFlagModal({ note, onSave, onRemove, onClose }) {
+  const cur = (note.flags && note.flags.reminder) || null;
+  const [at, setAt] = React.useState(msToLocalInput(cur ? cur.at : null));
+  // normalizeFlags drops a reminder whose `at` is not a number, so a blank
+  // field would silently save nothing. Say so instead of writing nothing.
+  const ms = localInputToMs(at);
+  return (
+    <FlagFrame title="Reminder" isSet={!!cur} canSave={ms !== null} onClose={onClose} onRemove={onRemove}
+      onSave={() => onSave({ at: ms })}>
+      <label style={lbl}>Remind me at
+        <input type="datetime-local" value={at} onChange={(e) => setAt(e.target.value)} autoFocus style={fld} />
+      </label>
+      {ms === null && <div style={warnStyle}>A reminder needs a date and time.</div>}
+    </FlagFrame>
+  );
+}
+
+function CalendarFlagModal({ note, onSave, onRemove, onClose }) {
+  const cur = (note.flags && note.flags.calendar) || null;
+  // A calendar note OCCUPIES a day and can never be stored undated -- the store
+  // defaults it to today anyway, so seed today rather than move it silently.
+  const [date, setDate] = React.useState((cur && cur.date) || itinTodayStr());
+  const [start, setStart] = React.useState((cur && cur.start) || '');
+  const [end, setEnd] = React.useState((cur && cur.end) || '');
+  return (
+    <FlagFrame title="Calendar" isSet={!!cur} canSave={!!date} onClose={onClose} onRemove={onRemove}
+      onSave={() => onSave({ date, start: start || null, end: end || null })}>
+      <label style={lbl}>Day
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={fld} />
+      </label>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <label style={{ ...lbl, flex: 1 }}>Start
+          <input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={fld} />
+        </label>
+        <label style={{ ...lbl, flex: 1 }}>End
+          <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={fld} />
+        </label>
+      </div>
+      {!date && <div style={warnStyle}>A calendar note needs a day.</div>}
+    </FlagFrame>
+  );
+}
+
+// S4 ruling 1 added `po`; ruling 2 governs the address. `prefillAddress` is the
+// linked WO's address, resolved by the caller. It only SEEDS an EMPTY field:
+// the user can overwrite it, and whatever is in the field is what gets STORED,
+// so the note stays self-contained if the WO's address later changes.
+// Deliberately not derived at render, deliberately not read-only.
+function PartsFlagModal({ note, prefillAddress, onSave, onRemove, onClose }) {
+  const cur = (note.flags && note.flags.parts) || null;
+  const [part, setPart] = React.useState((cur && cur.part) || '');
+  const [status, setStatus] = React.useState((cur && cur.status) || '');
+  const [distributor, setDistributor] = React.useState((cur && cur.distributor) || '');
+  const [address, setAddress] = React.useState((cur && cur.address) || prefillAddress || '');
+  const [po, setPo] = React.useState((cur && cur.po) || '');
+  return (
+    <FlagFrame title="Parts order" isSet={!!cur} onClose={onClose} onRemove={onRemove}
+      onSave={() => onSave({
+        part: part || null, status: status || null, distributor: distributor || null,
+        address: address || null, po: po || null,
+      })}>
+      <label style={lbl}>Part
+        <input value={part} onChange={(e) => setPart(e.target.value)} autoFocus style={fld} />
+      </label>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <label style={{ ...lbl, flex: 1 }}>Status
+          <input value={status} onChange={(e) => setStatus(e.target.value)} placeholder="ordered / in / picked up" style={fld} />
+        </label>
+        <label style={{ ...lbl, flex: 1 }}>PO / cost number
+          <input value={po} onChange={(e) => setPo(e.target.value)} style={fld} />
+        </label>
+      </div>
+      <label style={lbl}>Distributor
+        <input value={distributor} onChange={(e) => setDistributor(e.target.value)} style={fld} />
+      </label>
+      <label style={lbl}>Ship-to address
+        <input value={address} onChange={(e) => setAddress(e.target.value)} style={fld} />
+      </label>
+    </FlagFrame>
+  );
+}
+
+// The WO link is a LINK, not a flag key: it writes note.woId. The picker
+// filters with the SHIPPED orderMatchesQuery (WO number, address, city, client,
+// tech) -- no new matcher.
+function WoLinkModal({ note, orders, onPick, onClose }) {
+  const [q, setQ] = React.useState('');
+  const hits = React.useMemo(
+    () => (orders || []).filter(o => orderMatchesQuery(o, q)).slice(0, 40),
+    [orders, q]);
+  return (
+    <Modal open onClose={onClose} title="Link a work order" width={460}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <label style={lbl}>Search by WO number, address, client or tech
+          <input value={q} onChange={(e) => setQ(e.target.value)} autoFocus style={fld} />
+        </label>
+        <div style={{ maxHeight: 260, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {hits.map(o => (
+            <button key={o.id} type="button" onClick={() => onPick(o.id)} style={{
+              textAlign: 'left', padding: '7px 9px', borderRadius: 8, cursor: 'pointer',
+              border: '1px solid ' + (o.id === note.woId ? 'var(--accent)' : 'var(--border-1)'),
+              background: 'var(--bg-surface)', color: 'var(--text-1)',
+              fontFamily: 'inherit', fontSize: 13,
+            }}>
+              <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
+              <span style={{ color: 'var(--text-2)' }}>{o.address ? ' - ' + o.address : ''}{o.city ? ', ' + o.city : ''}</span>
+            </button>
+          ))}
+          {!hits.length && (
+            <div style={{ padding: 8, color: 'var(--text-3)', fontSize: 12 }}>
+              {q.trim() ? 'No work order matches that.' : 'Type to search.'}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          {note.woId && <ActionBtn onClick={() => onPick(null)}>Unlink</ActionBtn>}
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // The ADMIN module: a ring binder, not a calendar. Four sub-modules behind
 // binder tabs -- Scratchpad (a full-height notepad, the landing tab), Journal
 // (every note, newest first, with a pinned + undated-task quick-nav), Calendar
@@ -239,17 +435,24 @@ function useAutosave(onAdd, onUpdate, detachOnBlank) {
 // Contacts (S7).
 //
 // Admin S3b deleted EntryModal, the "+ New" button and the backlog rail by
-// explicit ruling: calendar chips are READ-ONLY until S4 ships flag modals.
-// The note is the primitive; a calendar entry is one thing a note becomes.
+// explicit ruling. S4 pays back the two capabilities it named as debt: a flag
+// ROW on every note the module has selected (task / reminder / calendar /
+// parts / journal / WO link, each behind its own small modal), ticking a task
+// done straight off its calendar chip, and deleting a note from here.
+// The note is the primitive; a calendar entry is one thing a note becomes, so
+// a chip is no longer a dead end -- it opens the note in the Journal.
 //
 // The calendar still reads EVERY WO that carries a schedule, not just active
 // ones: S1 retention keeps schedules on completed WOs, so past days read as
 // history and not-live jobs just render muted.
 export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, setTech, focus, onClearFocus, onOpenWO,
-  onOpenMaps, notes, onAddNote, onUpdateNote }) {
+  onOpenMaps, notes, onAddNote, onUpdateNote, onDeleteNote }) {
   // The binder tab. Lands on Scratchpad: writing is the point of the module.
   const [tab, setTab] = React.useState('scratchpad');
-  const [view, setView] = React.useState('week');
+  // S5 slice 1: Month, not Week. Week packed too much into too small a cell for
+  // a view opened infrequently; Month is what shows a job or note set for later.
+  // Day and Week stay one click away in the Seg switch below.
+  const [view, setView] = React.useState('month');
   const [anchor, setAnchor] = React.useState(itinTodayStr());
   const [highlightId, setHighlightId] = React.useState(null);
   const highlightRef = React.useRef(null);
@@ -424,6 +627,83 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     jrn.clear();
   };
 
+  // The note the PAD currently owns, DERIVED from the hook's id and never
+  // mirrored into state (rule A1). The flag row hangs off it; a pad holding no
+  // note yet has nothing to flag.
+  const padNote = React.useMemo(() => (notes || []).find(n => n && n.id === pad.id) || null, [notes, pad.id]);
+
+  // ── S4 flags ───────────────────────────────────────────────────────────
+  // WHICH modal is open, as { noteId, flag }. Modal open/close is genuine
+  // user-driven state. The flag VALUES are not: every modal reads them straight
+  // off the note record, so there is no useState mirror and no effect syncing
+  // one back (rule A1). flagNote is DERIVED, so a note deleted underneath an
+  // open modal simply stops rendering it.
+  const [flagOpen, setFlagOpen] = React.useState(null);
+  const flagNote = React.useMemo(
+    () => (flagOpen ? (notes || []).find(n => n && n.id === flagOpen.noteId) || null : null),
+    [notes, flagOpen]);
+  const closeFlag = () => setFlagOpen(null);
+
+  // THE FLAG WRITE. Every flag mutation in this module funnels through here.
+  //
+  // LOAD-BEARING INVARIANT, the same one useAutosave already enforces for its
+  // own rebinds: a write on a note an editor CURRENTLY OWNS must FLUSH THAT
+  // EDITOR FIRST. Without it the editor's armed idle timer fires AFTER the flag
+  // write, carrying the pre-flag body, and two writes race on one id -- the
+  // exact hazard bind()/clear() exist to prevent, in a new shape. The flush
+  // goes through the EXISTING hook: never a second debounce, never a new timer,
+  // or the module ends up with two write disciplines that drift apart.
+  const writeNote = (id, patch) => {
+    if (pad.id === id) pad.flush();
+    if (jrn.id === id) jrn.flush();
+    if (onUpdateNote) onUpdateNote(id, patch);
+  };
+  // A flags patch REPLACES the whole flags object (the store coerces
+  // { ...note, ...patch }), so it is always built by spreading what the note
+  // already has: flags are INDEPENDENT and setting one must never drop another.
+  // A null value REMOVES the key, which is what "not set" means.
+  const setFlag = (note, key, value) => {
+    const flags = { ...(note.flags || {}) };
+    if (value == null) delete flags[key]; else flags[key] = value;
+    writeNote(note.id, { flags });
+    closeFlag();
+  };
+  // S4 debt #1: tick a task done. Patches ONLY flags.task.done, so `ts` (the
+  // journal position, written-at) never moves.
+  const toggleTaskDone = (note) => {
+    const t = note && note.flags && note.flags.task;
+    if (!t) return;
+    setFlag(note, 'task', { ...t, done: !t.done });
+  };
+  // S4 debt #2: delete a note from this module. ONE delete path -- the store's
+  // own deleteNote, handed down as onDeleteNote. confirmDialog, never
+  // window.confirm (the native dialog is what wedges renderer input).
+  const removeNote = async (note) => {
+    if (!onDeleteNote || !note) return;
+    const yes = await confirmDialog('Delete this note?\n\n' + (noteTitle(note) || '(empty)'),
+      { danger: true, confirmLabel: 'Delete' });
+    if (!yes) return;
+    // Release the note from whichever editor holds it BEFORE it disappears.
+    // clear() flushes through the same hook, so nothing typed is lost on the
+    // way out, and no editor is left holding a dead id whose next idle tick
+    // would write into the void.
+    if (pad.id === note.id) pad.clear();
+    if (jrn.id === note.id) jrn.clear();
+    closeFlag();
+    onDeleteNote(note.id);
+  };
+  // A calendar chip is EDITABLE again: clicking it opens the note in the
+  // Journal, where the body editor and the flag row already live. No second
+  // editor is invented here. bind() flushes first, as always.
+  const openNoteInJournal = (note) => { setTab('journal'); jrn.bind(note); };
+  // S4 ruling 2: the parts modal's ship-to SEEDS from the linked WO. Resolved
+  // here, because this is where `orders` lives; the modal stores whatever the
+  // user leaves in the field.
+  const woAddress = (note) => {
+    const o = note && note.woId ? (orders || []).find(x => x && x.id === note.woId) : null;
+    return o ? [o.address, o.city].filter(Boolean).join(', ') : '';
+  };
+
   const isPad = view === 'scratchpad';
   const days = view === 'day' ? [anchor] : view === 'week' ? weekDays(anchor) : monthGrid(anchor);
   const total = days.reduce((n, d) => n + jobsOn(d).length, 0);
@@ -495,11 +775,13 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     );
   };
 
-  // Calendar entry chip. READ-ONLY as of S3b: ruling 5 deleted the entry editor,
-  // so a chip renders what the flags say and nothing clicks. Reads flags
-  // DIRECTLY -- noteToEntryForm is gone from this module because projecting a
-  // note through the legacy entry form is what let an unflagged jotting acquire
-  // kind 'task'. Same "plain function returning JSX" rule as `card` above.
+  // Calendar entry chip. EDITABLE again as of S4, in the two ways the slice
+  // owes: a task chip carries a tick box that marks it done in place, and
+  // clicking the chip opens the note in the Journal (body editor + flag row).
+  // Reads flags DIRECTLY -- noteToEntryForm stays gone from this module because
+  // projecting a note through the legacy entry form is what let an unflagged
+  // jotting acquire kind 'task'. Same "plain function returning JSX" rule as
+  // `card` above. stopPropagation because the month cell behind it navigates.
   const entryChip = (note, compact) => {
     const f = (note && note.flags) || {};
     const isTask = !!f.task;
@@ -508,14 +790,24 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     const label = noteTitle(note);
     return (
       <div key={note.id}
+        onClick={(ev) => {
+          ev.stopPropagation();                                   // the month cell behind navigates
+          if (ev.target && ev.target.type === 'checkbox') return; // the tick box owns its own click
+          openNoteInJournal(note);
+        }}
         title={label + (note.tech ? ' - ' + note.tech : '') + (note.woId ? ' - ' + note.woId : '')}
         style={{
           border: '1px dashed var(--border-2)', borderLeft: '4px solid ' + (isTask ? 'var(--text-3)' : 'var(--accent)'),
-          borderRadius: 6, background: 'var(--bg-surface-2, var(--bg-surface))',
+          borderRadius: 6, background: 'var(--bg-surface-2, var(--bg-surface))', cursor: 'pointer',
           padding: compact ? '2px 4px' : '4px 7px', fontSize: compact ? 11 : 12,
           display: 'flex', gap: 5, alignItems: 'center', whiteSpace: 'nowrap', overflow: 'hidden',
           opacity: done ? 0.5 : 1,
         }}>
+        {isTask && (
+          <input type="checkbox" checked={done} title={done ? 'Mark not done' : 'Mark done'}
+            onChange={() => toggleTaskDone(note)}
+            style={{ margin: 0, flexShrink: 0, cursor: 'pointer' }} />
+        )}
         {start && <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-2)' }}>{itinFmtTime(start)}</span>}
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', textDecoration: done ? 'line-through' : 'none' }}>
           {label || '(untitled)'}
@@ -569,6 +861,45 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
             ))}
           </div>
         )}
+      </div>
+    );
+  };
+
+  // ONE flag row, shared by the Scratchpad column and the Journal panel. A
+  // plain function returning JSX, NOT a component defined in render (rule A5).
+  // Journal is a straight toggle: it is a bare boolean, so a modal for it would
+  // be a form with no fields. No contact button -- ruling 3 defers it to S7.
+  const flagBar = (note) => {
+    const f = note.flags || {};
+    const open = (flag) => () => setFlagOpen({ noteId: note.id, flag });
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
+        padding: '0 10px 10px', flexShrink: 0 }}>
+        <NoteFlagBtn label="Task" on={!!f.task} onClick={open('task')}
+          title={f.task
+            ? 'Task' + (f.task.due ? ', due ' + f.task.due : ', no due date') + (f.task.done ? ' (done)' : '')
+            : 'Make this a task'} />
+        <NoteFlagBtn label="Remind" on={!!f.reminder} onClick={open('reminder')}
+          title={f.reminder ? 'Reminder at ' + new Date(f.reminder.at).toLocaleString() : 'Set a reminder'} />
+        <NoteFlagBtn label="Calendar" on={!!f.calendar} onClick={open('calendar')}
+          title={f.calendar
+            ? 'On the calendar ' + f.calendar.date + (f.calendar.start ? ' at ' + f.calendar.start : '')
+            : 'Put this on a day'} />
+        <NoteFlagBtn label="Parts" on={!!f.parts} onClick={open('parts')}
+          title={f.parts
+            ? 'Parts order: ' + ([f.parts.part, f.parts.status, f.parts.po].filter(Boolean).join(' - ') || 'no details yet')
+            : 'Record a parts order'} />
+        <NoteFlagBtn label="Journal" on={!!f.journal}
+          onClick={() => setFlag(note, 'journal', f.journal ? null : true)}
+          title={f.journal ? 'Starred into the journal - click to unstar' : 'Star this into the journal'} />
+        {/* The label never becomes the WO number: the jump row right below
+            already carries a button labelled with it, and two same-labelled
+            buttons doing different things in one panel is a trap. The ring
+            says linked, the tooltip says to what. */}
+        <NoteFlagBtn label="Link WO" on={!!note.woId} onClick={open('wo')}
+          title={note.woId ? 'Linked to ' + note.woId + ' - click to change' : 'Link a work order'} />
+        <div style={{ flex: 1 }} />
+        <NoteFlagBtn label="Delete" title="Delete this note" onClick={() => removeNote(note)} />
       </div>
     );
   };
@@ -649,6 +980,15 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
               ? scratch.map(n => padRow(n, pad.id, editInComposer))
               : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing yet. The pad is waiting.</div>}
           </div>
+          {/* The pad's OWN note, flaggable the moment it exists. This is the
+              module's premise: write first, add the meaning afterwards. */}
+          {padNote && (<>
+            <div style={{ padding: '8px 10px 6px', borderTop: '1px solid var(--border-1)', flexShrink: 0,
+              fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+              This note
+            </div>
+            {flagBar(padNote)}
+          </>)}
         </aside>
 
         {/* JOURNAL. Body: every note, newest first, jottings included. Column:
@@ -701,9 +1041,9 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   style={{ ...padStyle, fontSize: 13, padding: '10px 12px' }}
                 />
               </div>
-              {/* Jump row. S4 hangs its flag buttons HERE, alongside these two --
-                  that is why it is a wrapping flex row and not a two-button bar.
-                  No flag UI is invented in this slice. */}
+              {/* The flag row S3b reserved this spot for. */}
+              {flagBar(jNote)}
+              {/* Jump row: the links, kept separate from the flags above. */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 10px 10px', flexShrink: 0 }}>
                 {jNote.woId && (
                   <ActionBtn title={'Open ' + jNote.woId} onClick={() => onOpenWO && onOpenWO(jNote.woId)}>
@@ -846,6 +1186,37 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         )}
 
       </div>
+
+      {/* FLAG MODALS. Mounted ONLY while open, on a note that is DERIVED from
+          the store, and keyed on that note's id -- so each modal's useState
+          seeds run against the note it belongs to and a second note can never
+          inherit the first one's draft (rule A2). Every save routes through
+          setFlag / writeNote, which flush the editors first. */}
+      {flagNote && flagOpen.flag === 'task' && (
+        <TaskFlagModal key={'task-' + flagNote.id} note={flagNote} onClose={closeFlag}
+          onSave={(v) => setFlag(flagNote, 'task', v)}
+          onRemove={() => setFlag(flagNote, 'task', null)} />
+      )}
+      {flagNote && flagOpen.flag === 'reminder' && (
+        <ReminderFlagModal key={'reminder-' + flagNote.id} note={flagNote} onClose={closeFlag}
+          onSave={(v) => setFlag(flagNote, 'reminder', v)}
+          onRemove={() => setFlag(flagNote, 'reminder', null)} />
+      )}
+      {flagNote && flagOpen.flag === 'calendar' && (
+        <CalendarFlagModal key={'calendar-' + flagNote.id} note={flagNote} onClose={closeFlag}
+          onSave={(v) => setFlag(flagNote, 'calendar', v)}
+          onRemove={() => setFlag(flagNote, 'calendar', null)} />
+      )}
+      {flagNote && flagOpen.flag === 'parts' && (
+        <PartsFlagModal key={'parts-' + flagNote.id} note={flagNote} onClose={closeFlag}
+          prefillAddress={woAddress(flagNote)}
+          onSave={(v) => setFlag(flagNote, 'parts', v)}
+          onRemove={() => setFlag(flagNote, 'parts', null)} />
+      )}
+      {flagNote && flagOpen.flag === 'wo' && (
+        <WoLinkModal key={'wo-' + flagNote.id} note={flagNote} orders={orders} onClose={closeFlag}
+          onPick={(id) => { writeNote(flagNote.id, { woId: id }); closeFlag(); }} />
+      )}
     </div>
   );
 }

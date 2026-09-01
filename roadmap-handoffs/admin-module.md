@@ -306,9 +306,43 @@ write path does not rewrite the store per keystroke.
 body only. Saves on blur or Enter. No modal. The backlog panel already built is
 reused.
 
-**S4 — Flags.** Flag buttons with hover tooltips. Small per-flag modals. WO
-picker on the WO flag reuses `orderMatchesQuery`. Parts flag carries its four
-fields.
+**S4 — Flags.** IN FLIGHT, not green. Flag buttons with hover tooltips, small
+per-flag modals, WO picker reusing `orderMatchesQuery`, and the two capabilities
+S3b named as debt: ticking a task done off its calendar chip, and deleting a
+note from this module.
+
+Rulings by the user, 2026-08-31:
+1. **The parts flag gains `po`** (a cost / PO number), so it is
+   `{part, status, distributor, address, po}`. Added through the existing
+   `noteStr` coercion, so a pre-S4 record loads with `po` null. No migration.
+2. **The parts ship-to address auto-fills from a linked WO and STAYS EDITABLE.**
+   It SEEDS an empty field from the linked work order's address; whatever the
+   user leaves in the field is what is STORED, so the note stays self-contained
+   if the WO address later changes. Not derived at render, not read-only.
+3. **The contact flag is DEFERRED to S7.** No contact button ships;
+   `normalizeFlags` keeps tolerating a `contact` key.
+
+Where the flag write lives: `writeNote` in `ScheduleModule`. It FLUSHES whichever
+editor owns the note before writing, through the existing `useAutosave` hook,
+never a second debounce. Probed in both orderings: with the flush the store
+holds the current body at the instant the flag lands; without it the store holds
+the PRE-FLAG body for the whole `PAD_IDLE_MS` window, which that constant's own
+comment calls the crash window. The harder half is DELETE: an unreleased editor
+keeps typing into a dead id and every write vanishes silently, so `removeNote`
+calls `pad.clear()` / `jrn.clear()` before `onDeleteNote`.
+
+OPEN, blocking green:
+- `test/admin-s4-flags.test.js` still fails: after the Reminder modal saves, the
+  Calendar flag modal does not render on the next click (its "Remove flag"
+  button is absent and the subtree reads dead). Root cause NOT established; the
+  verify-thrash guard stopped further runs at the two-attempt limit.
+- `test/schedule.test.js` asserts the behaviour S4 deliberately RETIRES: "a
+  calendar chip carries no checkbox (chips are read-only)" and "clicking a chip
+  opens no editor". Both are now false by ruling. That file is OUTSIDE the S4
+  scope and needs its own update.
+- `test/admin-s3-scratchpad.test.js` broke on a real ambiguity S4 introduced:
+  two buttons labelled with the same WO number in one panel. Fixed in scope, the
+  flag button is always labelled "Link WO" and names the WO in its tooltip.
 
 **S5 — Journal.** Union view, newest-first, filterable. Scratchpad (unflagged,
 undated) as its own sub-tab. Full-text search over `body` — new code, not reuse.

@@ -485,8 +485,10 @@ async function mountedChecks() {
 // the "+ New" button, entry delete and the backlog rail. The assertions that
 // proved those behaviours were removed with them -- keeping one would assert
 // that a feature the human ordered removed still exists. What remains is every
-// assertion about calendar RENDERING, SOURCING, EXCLUSION and the TECH FILTER,
-// unchanged. The two undated tasks stay in the fixture on purpose: they now
+// assertion about calendar RENDERING, SOURCING and EXCLUSION, plus the TECH
+// FILTER, unchanged. S4 then made chips EDITABLE again (tick box + open in the
+// Journal), so the two read-only assertions were REPLACED by assertions of that
+// new behaviour rather than deleted. The two undated tasks stay in the fixture on purpose: they now
 // prove an EXCLUSION (an undated task appears on no calendar day) instead of a
 // backlog rail.
 
@@ -539,13 +541,24 @@ async function entryChecks() {
   ok('entries: an undated task appears on no calendar day', !chip('Call vendor') && !chip('File permit'),
     Array.from(container.querySelectorAll('div[title]')).map(d => d.getAttribute('title')).join(','));
 
-  // [3] chips are READ-ONLY: no checkbox, and clicking one opens nothing
-  ok('entries: a calendar chip carries no checkbox (chips are read-only)',
-    !container.querySelector('input[type="checkbox"]'));
+  // [3] S4 made chips EDITABLE again (architect ruled WIDEN 2026-08-31, so the
+  //     old read-only assertions here are RETIRED, not repaired). A task chip
+  //     carries a tick box; an event chip does not; clicking a chip binds that
+  //     note in the Journal editor, which is why the tab click below is needed
+  //     before the tech filter can be reached again.
+  ok('entries: a task chip carries a tick box',
+    !!chip('Order parts').querySelector('input[type="checkbox"]'));
+  ok('entries: an event chip carries no tick box',
+    !chip('Team meeting').querySelector('input[type="checkbox"]'));
   click(chip('Team meeting')); await flush();
-  ok('entries: clicking a chip opens no editor',
-    container.textContent.indexOf('Edit entry') === -1 && container.textContent.indexOf('New entry') === -1,
-    container.textContent.slice(0, 200));
+  // The flag row renders only while a note is bound, so 'Link WO' is the proof
+  // that the click landed on THIS note's editor and not merely on a tab.
+  ok('entries: clicking a chip opens the note in the Journal editor',
+    !!byLabel('Link WO'),
+    Array.from(container.querySelectorAll('button')).map(b => b.textContent.trim()).join(' | '));
+  // Back to the calendar. byLabel takes the FIRST match and the tab strip renders
+  // above the note flag row (which also has a 'Calendar' button), so this is the tab.
+  click(byLabel('Calendar')); await flush();
 
   // [4] tech filter: tagged entry hides, untagged stays
   const sel = container.querySelector('select');

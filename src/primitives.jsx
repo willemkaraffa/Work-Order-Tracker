@@ -98,6 +98,25 @@ export function FlagGlyph({ kind }) {
   );
 }
 
+// Admin S4: one button in a NOTE's flag row (task / reminder / calendar /
+// parts / journal / WO link). Deliberately NOT FlagGlyph above -- that one is a
+// work order's emergency/warranty badge and shares nothing with this but the
+// word "flag". `on` means the flag is SET on the note, which is the only state
+// this draws; the value itself always comes from the note record.
+export function NoteFlagBtn({ label, title, on, onClick }) {
+  return (
+    <button type="button" onClick={onClick} title={title}
+      style={{
+        height: 24, padding: '0 9px', borderRadius: 999,
+        border: '1px solid ' + (on ? 'var(--accent)' : 'var(--border-2)'),
+        background: on ? 'var(--bg-row-sel)' : 'var(--bg-surface)',
+        color: on ? 'var(--accent)' : 'var(--text-3)',
+        fontFamily: 'inherit', fontSize: 11, fontWeight: 700,
+        letterSpacing: '0.03em', cursor: 'pointer', whiteSpace: 'nowrap',
+      }}>{label}</button>
+  );
+}
+
 export function StatusPill({ status, size = 'md' }) {
   const colors = useStatusColors();
   const c = statusColor(status, colors);
