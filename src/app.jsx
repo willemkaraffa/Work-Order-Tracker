@@ -5520,6 +5520,34 @@ function App() {
     noteHistory(id, 'note deleted');
   }, [storeDeleteNote, noteHistory]);
 
+  // Admin S4 ruling 4: the Admin module was wired to the RAW store mutators, so
+  // a note added, edited or deleted THERE skipped the work order trail that S1
+  // ruled every note handler owes it. These three restore it for all three verbs
+  // at once, rather than leaving three exceptions. The signatures are the
+  // module's, not the detail pane's: (record) / (noteId, patch) / (noteId). A
+  // note with no woId writes no history, which is the S1 rule unchanged.
+  const scheduleAddNote = React.useCallback((record) => {
+    const id = storeAddNote(record);
+    if (record && record.woId) noteHistory(record.woId, 'note added', record.type);
+    return id;
+  }, [storeAddNote, noteHistory]);
+  // patch.woId WINS: linking a WO is itself an update, and the entry belongs to
+  // the work order being linked. On unlink (patch.woId null) it falls back to
+  // the note's current woId, so the WO losing the note records it.
+  const scheduleUpdateNote = React.useCallback((noteId, patch) => {
+    const n = (notes || []).find(x => x && x.id === noteId);
+    storeUpdateNote(noteId, patch);
+    const woId = (patch && patch.woId) || (n && n.woId);
+    if (woId) noteHistory(woId, 'note edited');
+  }, [notes, storeUpdateNote, noteHistory]);
+  // The lookup happens BEFORE the delete: afterwards the record is gone and the
+  // woId with it.
+  const scheduleDeleteNote = React.useCallback((noteId) => {
+    const n = (notes || []).find(x => x && x.id === noteId);
+    storeDeleteNote(noteId);
+    if (n && n.woId) noteHistory(n.woId, 'note deleted');
+  }, [notes, storeDeleteNote, noteHistory]);
+
   const togglePinNote = React.useCallback((id, noteId) => {
     const target = notes.find(n => n.id === noteId);
     const willPin = !(target && target.pinned);
@@ -6457,8 +6485,9 @@ function App() {
               onOpenWO={openWO}
               onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
               notes={notes}
-              onAddNote={storeAddNote}
-              onUpdateNote={storeUpdateNote}
+              onAddNote={scheduleAddNote}
+              onUpdateNote={scheduleUpdateNote}
+              onDeleteNote={scheduleDeleteNote}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
