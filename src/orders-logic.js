@@ -101,6 +101,74 @@ export function ageDaysFor(o) {
   return daysSince(o.dateCreated);
 }
 
+// Date a WO ORIGINALLY entered the Invoices queue: the FIRST 'sent to billing'
+// history entry. Deliberately not the aging base (InvoicesModule.ageOf takes the
+// MOST RECENT such entry, so a reopen-and-resend restarts the aging clock, while
+// this column must not move). Local date, not UTC, so an evening send does not
+// display as tomorrow. Returns '' when the WO has no such entry (pre-change11
+// records); callers fall back to dateCreated.
+export function sentToInvoiceIso(o) {
+  const h = (o && Array.isArray(o.history)) ? o.history : [];
+  for (const e of h) {
+    if (!e || !e.ts) continue;
+    if (!/sent to billing/i.test(String(e.action || ''))) continue;
+    const d = new Date(e.ts);
+    if (isNaN(d.getTime())) continue;
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + mm + '-' + dd;
+  }
+  return '';
+}
+
+// '$1,234.50' / '1234.5' / junk -> number. Was a local helper in invoices.jsx;
+// lifted here so the Bid totals tile and the Total-column sort agree on one parse.
+export function parseBidAmount(raw) {
+  if (raw == null) return 0;
+  const m = String(raw).replace(/,/g, '').match(/(-?\d+(?:\.\d{1,2})?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+// Numeric value behind the Invoices Total column: recorded invoice wins, else the
+// bid, else 0 (the "No Bid!" rows sort as free).
+export function invoiceRowTotal(o) {
+  if (o && o.invoice) return computeInvoiceTotals(o.invoice, o.pm).grandTotal;
+  return parseBidAmount(o && o.bidAmount);
+}
+
+// Column sort for the Invoices table. Rows here are RAW order records, so this
+// cannot reuse sortRows() in app.jsx: that one keys off ListPane row objects
+// (row.wo / ageDays / createdTs), fields these records do not have.
+// Blanks always sink to the bottom whichever way dir points, so flipping the
+// arrow never buries the populated rows under a wall of empty cells.
+export function sortInvoiceRows(orders, sort) {
+  const list = Array.isArray(orders) ? [...orders] : [];
+  const key = (sort && sort.key) || 'sent';
+  const dir = (sort && sort.dir) === 'asc' ? 1 : -1;
+  const woNum = (o) => parseInt(String((o && o.id) || '').replace(/[^0-9]/g, ''), 10) || 0;
+  const textOf = (o) => {
+    if (key === 'address') return (String((o && o.address) || '') + ' ' + String((o && o.city) || '')).trim();
+    if (key === 'client') return String((o && o.pm) || '').trim();
+    return String((o && o.invoice && o.invoice.number) || '').trim();   // 'invoice'
+  };
+  const blanksLast = (a, b) => (a ? -1 : (b ? 1 : 0));
+  return list.sort((a, b) => {
+    if (key === 'wo') return (woNum(a) - woNum(b)) * dir;
+    if (key === 'total') return (invoiceRowTotal(a) - invoiceRowTotal(b)) * dir;
+    if (key === 'sent') {
+      // ISO yyyy-mm-dd sorts correctly as a string. dateCreated fallback matches
+      // what the Sent cell displays, so the order never contradicts the column.
+      const av = sentToInvoiceIso(a) || String((a && a.dateCreated) || '');
+      const bv = sentToInvoiceIso(b) || String((b && b.dateCreated) || '');
+      if (!av || !bv) return blanksLast(av, bv);
+      return av < bv ? -dir : (av > bv ? dir : 0);
+    }
+    const av = textOf(a), bv = textOf(b);
+    if (!av || !bv) return blanksLast(av, bv);
+    return av.localeCompare(bv) * dir;
+  });
+}
+
 export function migrateOrders(orders, storedPhases) {
   if (!Array.isArray(orders)) return orders;
   // Build a lookup of phase-name -> complete-flag from stored phases so the
@@ -454,7 +522,8 @@ export function groupByScheduleDate(orders) {
 // from storage; it survives only as a form projection (noteToEntryForm /
 // normalizeNote's legacy branch) so the Schedule editor keeps working.
 //   task: {done, due}  reminder: {at}  calendar: {date, start, end}
-//   parts: {part, status, distributor, address}  journal: true  contact: {contactId}
+//   parts: {part, status, distributor, address, po}  journal: true
+//   contact: {contactId}
 export const ENTRY_KINDS = ['task', 'event', 'reminder'];
 
 const noteDay  = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
@@ -475,9 +544,13 @@ function normalizeFlags(f) {
     };
   }
   if (src.parts) {
+    // S4 ruling 1 added `po` (the cost / PO number the team asks about). Same
+    // noteStr coercion as its siblings, so a record written before S4 simply
+    // loads with po null -- absent key IS the null, no migration.
     out.parts = {
       part: noteStr(src.parts.part), status: noteStr(src.parts.status),
       distributor: noteStr(src.parts.distributor), address: noteStr(src.parts.address),
+      po: noteStr(src.parts.po),
     };
   }
   if (src.journal) out.journal = true;

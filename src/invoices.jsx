@@ -9,7 +9,7 @@ import {
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog, renamePage, deletePage, mergeCatalogAsPage,
-  addPage, removePage, renamePageInStore, addSection, bidReadReasonText } from './orders-logic.js';
+  addPage, removePage, renamePageInStore, addSection, bidReadReasonText, sentToInvoiceIso, sortInvoiceRows, parseBidAmount } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
 import { catalogTax } from './constants.js';   // per-catalog tax policy (taxableInclusive)
 
@@ -1223,12 +1223,43 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
 // ── Invoices module (slice 3) ─────────────────────────────────────────────────
 // change11: Billing-queue view shows tab='sent' WOs only. Row click opens the
 // invoice editor for that WO. Shows recorded invoice # + grand total when present.
+// Sortable column header for the Invoices table. Module-level so it keeps its
+// identity across InvoicesModule renders (A5). Click cycles asc/desc on its own
+// key; clicking a different column starts that column at 'asc' except sent/total,
+// which start 'desc' (newest / biggest first is what those are asked for).
+function SortTh({ id, label, sort, onSort, width, align = 'left' }) {
+  const on = sort.key === id;
+  return (
+    <th
+      onClick={() => onSort(id)}
+      title={'Sort by ' + label}
+      style={{
+        textAlign: align, padding: '6px', fontWeight: 600, width,
+        color: on ? 'var(--text-1)' : 'var(--text-3)', cursor: 'pointer', userSelect: 'none',
+      }}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 11, color: on ? 'var(--accent)' : 'transparent' }}>
+        {sort.dir === 'asc' ? '↑' : '↓'}
+      </span>
+    </th>
+  );
+}
+
 export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId, onOpenInvoice, onWoAction, onRefreshAll }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [query, setQuery] = React.useState('');
   // change11: status filter dropped (only 'sent' exists now). Aging filter
   // retained for throughput review.
   const [agingFilter, setAgingFilter] = React.useState(null);     // null | '0-30' | '31-60' | '60+'
+  // Column sort. Local state, not settings.viewSorts: that map is keyed by WO-list
+  // view and its keys (age/status/lastNote) do not exist on this table.
+  const [sort, setSort] = React.useState({ key: 'sent', dir: 'desc' });
+  const onSort = React.useCallback((key) => {
+    setSort(s => s.key === key
+      ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: (key === 'sent' || key === 'total') ? 'desc' : 'asc' });
+  }, []);
   const selRef = React.useRef(null);
   React.useEffect(() => {
     if (selRef.current) selRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1277,7 +1308,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     if (bucket === '60+')   return days > 60;
     return true;
   };
-  const filtered = sentOrders.filter(o => matches(o) && inAgingBucket(ageOf(o), agingFilter));
+  const filtered = sortInvoiceRows(sentOrders.filter(o => matches(o) && inAgingBucket(ageOf(o), agingFilter)), sort);
   const aging = React.useMemo(() => {
     let a = 0, b = 0, c = 0;
     for (const o of sentOrders) {
@@ -1288,14 +1319,10 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sentOrders]);
   // change11: bid totals tile = sum of bidAmount across all sent WOs (used
-  // for throughput tracking). Parses '$NNN.NN' or bare numerics.
-  const parseBid = (raw) => {
-    if (raw == null) return 0;
-    const m = String(raw).replace(/,/g, '').match(/(-?\d+(?:\.\d{1,2})?)/);
-    return m ? parseFloat(m[1]) : 0;
-  };
+  // for throughput tracking). parseBidAmount ('$NNN.NN' or bare numerics) lives in
+  // orders-logic so the tile and the Total-column sort cannot drift apart.
   const bidTotal = React.useMemo(
-    () => sentOrders.reduce((s, o) => s + parseBid(o.bidAmount), 0),
+    () => sentOrders.reduce((s, o) => s + parseBidAmount(o.bidAmount), 0),
     [sentOrders]
   );
   return (
@@ -1389,11 +1416,12 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 90 }}>WO</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600 }}>Address</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Client</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Invoice #</th>
-                  <th style={{ textAlign: 'right', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Total</th>
+                  <SortTh id="wo" label="WO" width={90} sort={sort} onSort={onSort} />
+                  <SortTh id="address" label="Address" sort={sort} onSort={onSort} />
+                  <SortTh id="client" label="Client" width={70} sort={sort} onSort={onSort} />
+                  <SortTh id="sent" label="Sent" width={100} sort={sort} onSort={onSort} />
+                  <SortTh id="invoice" label="Invoice #" width={120} sort={sort} onSort={onSort} />
+                  <SortTh id="total" label="Total" width={110} align="right" sort={sort} onSort={onSort} />
                   <th style={{ width: 96 }} />
                 </tr>
               </thead>
@@ -1401,6 +1429,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
                 {filtered.map(o => {
                   const inv = o.invoice;
                   const isSel = o.id === selectedId;
+                  const sentIso = sentToInvoiceIso(o);
                   // change11: row total resolution. Recorded invoice wins.
                   // Else bidAmount. Else red "No Bid!" warning.
                   let totalCell;
@@ -1421,6 +1450,12 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
                       <td style={{ padding: '8px 6px', fontVariantNumeric: 'tabular-nums' }}>{o.id}</td>
                       <td style={{ padding: '8px 6px' }}>{o.address || ''}{o.city ? ', ' + o.city : ''}</td>
                       <td style={{ padding: '8px 6px' }}>{o.pm || ''}</td>
+                      {/* Date this WO ORIGINALLY hit the invoice queue (first
+                          'sent to billing' history entry). Muted dateCreated
+                          fallback for pre-change11 WOs with no such entry. */}
+                      <td style={{ padding: '8px 6px', fontVariantNumeric: 'tabular-nums', color: sentIso ? 'var(--text-2)' : 'var(--text-3)' }}>
+                        {sentIso || o.dateCreated || ''}
+                      </td>
                       <td style={{ padding: '8px 6px', color: inv ? 'var(--text-1)' : 'var(--text-3)' }}>
                         {inv && inv.number ? inv.number : 'not invoiced'}
                       </td>
