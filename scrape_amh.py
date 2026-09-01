@@ -415,10 +415,20 @@ def normalize_text(value: object) -> str:
 
 
 def choose_options_for_bid(bid: Optional[dict]) -> List[dict]:
+    """The options AMH actually approved. Live option objects carry NO isApproved key
+    (proven on WO 9831067) -- approval is in statusName, and the REJECTED option can be
+    the isPreferred one, so the old isPreferred fallback returned the unpaid price
+    ($269.50 captured vs $1714.50 paid). A Rejected option is never returned by ANY
+    branch. isApproved is kept first for payloads that do send it."""
     if not bid:
         return []
-    options = bid.get("options", []) or []
+    options = [o for o in (bid.get("options", []) or [])
+               if normalize_text(o.get("statusName")).lower() != "rejected"]
     approved = [o for o in options if o.get("isApproved")]
+    if approved:
+        return approved
+    approved = [o for o in options
+                if normalize_text(o.get("statusName")).lower() == "approved"]
     if approved:
         return approved
     preferred = [o for o in options if o.get("isPreferred")]
