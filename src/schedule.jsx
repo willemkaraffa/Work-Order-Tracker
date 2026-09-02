@@ -7,7 +7,9 @@ import { statusColor } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
   groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle, orderMatchesQuery,
+  noteMatchesQuery,
 } from './orders-logic.js';
+import { useTypeToSearch } from './search-hook.js';
 import { TypeIcon, Seg, ActionBtn, BinderTabs, NoteFlagBtn } from './primitives.jsx';
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG,
@@ -268,6 +270,18 @@ const warnStyle = { fontSize: 12, color: 'var(--danger, #d9534f)' };
 // only footer a flag ever needs. "Remove flag" shows only when the flag is
 // already set, so the same modal both applies and clears it.
 function FlagFrame({ title, isSet, canSave, onSave, onRemove, onClose, children }) {
+  // The flag modals close on Escape (the user asked for it). Modal itself still
+  // ignores Escape app-wide -- import and edit dialogs hold work that a stray
+  // keypress must not discard. Here the cost is one unsaved field, and the
+  // frame mounts only while open, so the listener exists only then. Cleanup
+  // removes exactly what was added (A7). onClose is a fresh arrow per render at
+  // the call sites, so it IS the honest dep: the listener rebinds with it
+  // rather than closing over a stale close.
+  React.useEffect(() => {
+    const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); onClose(); } };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
     <Modal open onClose={onClose} title={title} width={460}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -483,13 +497,17 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     if (focus.tech && techs.includes(focus.tech)) setTech(focus.tech);
     if (focus.date) setAnchor(focus.date);
     if (focus.highlightId != null) setHighlightId(focus.highlightId);
-    // S3b: the module lands on Scratchpad, so an inbound jump (WO command centre
-    // "Open in Schedule", a Maps route send) has to switch the binder to the
-    // Calendar tab or it would silently land on the notepad. Setting it HERE,
-    // in the same render pass that sets highlightId, is what keeps the
-    // scroll-into-view effect below correct: the chip's ref is attached by the
-    // time that effect re-runs (its dep list carries `tab`).
-    setTab('calendar');
+    // S3b: the module lands on Scratchpad, so an inbound JUMP (WO command centre
+    // "Open in Schedule", a Maps route send, jumpToSchedule) has to switch the
+    // binder to the Calendar tab or it would silently land on the notepad.
+    // Setting it HERE, in the same render pass that sets highlightId, is what
+    // keeps the scroll-into-view effect below correct: the chip's ref is
+    // attached by the time that effect re-runs (its dep list carries `tab`).
+    // Only an explicit jump takes over the binder. The module-entry auto-snap
+    // sets tech and day silently so the Calendar is already on the right day
+    // when the user goes there; hijacking the tab made the module open on
+    // Calendar instead of the Scratchpad it is supposed to land on.
+    if (focus.jump) setTab('calendar');
     if (onClearFocus) onClearFocus();
   }, [focus && focus.ts, techs, setTech, setAnchor, setHighlightId, onClearFocus]);
 
@@ -532,11 +550,23 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id))),
   [notes]);
   const [jFilter, setJFilter] = React.useState('all');
-  const journalShown = React.useMemo(
-    () => (jFilter === 'jottings'
+  const [jQuery, setJQuery] = React.useState('');
+  const jSearchRef = React.useRef(null);
+  // The box is a Journal filter, not a module-wide one: carrying its text to
+  // another tab and back leaves the user staring at a filtered list they no
+  // longer remember typing.
+  React.useEffect(() => { setJQuery(''); }, [tab]);
+  // Type-to-search, the same hook the other modules use. Disabled off the
+  // Journal tab so a keystroke meant for the Scratchpad pad is never stolen.
+  useTypeToSearch({ setValue: setJQuery, inputRef: jSearchRef, disabled: tab !== 'journal' });
+  const journalShown = React.useMemo(() => {
+    const base = jFilter === 'jottings'
       ? journal.filter(n => !n.woId && Object.keys(n.flags || {}).length === 0)
-      : journal),
-    [journal, jFilter]);
+      : journal;
+    const q = jQuery.trim();
+    if (!q) return base;
+    return base.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
+  }, [journal, jFilter, jQuery, orders]);
 
   // QUICK-NAV: the pinned notes AND the undated backlog tasks, MERGED into one
   // list so everything important is in one spot, each row marked with WHICH it
@@ -643,6 +673,32 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     () => (flagOpen ? (notes || []).find(n => n && n.id === flagOpen.noteId) || null : null),
     [notes, flagOpen]);
   const closeFlag = () => setFlagOpen(null);
+
+  // MODULE-LEVEL Escape. composerKey / journalKey only fire while focus sits in
+  // their textarea, so after clicking a note ROW the key went nowhere and the
+  // note stayed bound with no way back to the quick-nav. Binds ONCE with a
+  // stable handler and reads the live values off a ref updated each render, so
+  // the listener never closes over stale pad / jrn / tab / flagOpen (A6), and
+  // the cleanup removes exactly what was added (A7). A flag modal owns the
+  // screen when it is open (Modal deliberately ignores Escape), and a keypress
+  // already inside either textarea belongs to the handlers above -- both are
+  // skipped here so nothing double-fires. clear() flushes first, so nothing
+  // typed is lost.
+  const escRef = React.useRef(null);
+  escRef.current = { tab, pad, jrn, flagOpen };
+  React.useEffect(() => {
+    const onKey = (ev) => {
+      if (ev.key !== 'Escape') return;
+      const s = escRef.current;
+      if (!s || s.flagOpen) return;
+      const t = ev.target;
+      if (t && (t === composerRef.current || t === jPadRef.current)) return;
+      if (s.tab === 'journal' && s.jrn.id) { ev.preventDefault(); s.jrn.clear(); return; }
+      if (s.tab === 'scratchpad' && s.pad.id) { ev.preventDefault(); s.pad.clear(); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   // THE FLAG WRITE. Every flag mutation in this module funnels through here.
   //
@@ -1005,6 +1061,22 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                 options={[{ value: 'all', label: 'All' }, { value: 'jottings', label: 'Jottings' }]}
                 value={jFilter}
                 onChange={setJFilter}
+              />
+              <input
+                ref={jSearchRef}
+                type="text"
+                value={jQuery}
+                onChange={(e) => setJQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setJQuery(''); } }}
+                placeholder="Search notes"
+                title="Search notes, WO number or address"
+                style={{
+                  flex: 1, minWidth: 0, height: 30, padding: '0 10px',
+                  border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-canvas)', color: 'var(--text-1)',
+                  fontFamily: 'inherit', fontSize: 12,
+                  boxSizing: 'border-box',
+                }}
               />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

@@ -902,6 +902,15 @@ export function orderNumberMatches(row, q) {
 // '1' would otherwise match nearly every WO. Accepts an order or a display row
 // (both carry `phone` + `contacts`).
 export function phoneMatches(row, q) {
+  const raw = String(q == null ? '' : q).trim();
+  // A query carrying LETTERS is never a phone number. Without this guard the
+  // digits are stripped out of an ADDRESS and the remainder is matched as a
+  // phone: '615 N Hardee St' becomes '615' and hits every WO whose phone
+  // contains 615. Proven live on real data -- 15 hits where 3 were right, which
+  // reads to the user as "search does not narrow". Digits and the punctuation
+  // real phone numbers carry are allowed, so '615', '919-555', '(919) 555 1234'
+  // and '+1 919 555 1234' all still work.
+  if (!/^[\d\s().+-]+$/.test(raw)) return false;
   const norm = (v) => {
     const d = String(v || '').replace(/\D/g, '');
     return d.length === 11 && d[0] === '1' ? d.slice(1) : d;
@@ -935,6 +944,19 @@ export function orderMatchesQuery(o, q) {
   if (phoneMatches(o, needle)) return true;
   const has = (v) => String(v || '').toLowerCase().includes(needle);
   return has(o.address) || has(o.city) || has(o.pm) || has(o.tech);
+}
+
+// S5 slice 2: does a JOURNAL note match the search box? A note matches on its
+// own text, or on the work order it is linked to -- the user searches by WO
+// number or address as often as by wording. The WO half delegates to
+// orderMatchesQuery (number, address, city, PM, tech, phone) rather than
+// growing a second matcher that would drift from it. The order lookup is the
+// CALLER's job, which is what keeps this pure and testable.
+export function noteMatchesQuery(note, order, q) {
+  const needle = String(q == null ? '' : q).trim().toLowerCase();
+  if (!needle || !note) return false;
+  if (String(note.body || '').toLowerCase().includes(needle)) return true;
+  return order ? orderMatchesQuery(order, needle) : false;
 }
 
 // Orders matching q whose location is NOT in shownLocations (the tab(s) the

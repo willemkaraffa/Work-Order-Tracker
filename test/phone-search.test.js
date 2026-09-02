@@ -70,6 +70,24 @@ test('non-numeric query -> false (address/name search unaffected)', () => {
   assert.strictEqual(phoneMatches(WO, ''), false);
 });
 
+// THE regression, proven live: a query with letters AND digits had its digits
+// stripped out and matched as a phone, so '615 N Hardee St' searched for '615'
+// and returned every WO whose number contains it. Never again.
+const ADDR = { id: 'WO-005', phone: '(615)-555-0112' };
+const SHORT = { id: 'WO-006', phone: '(919)-555-0012' };
+test('mixed letters+digits query -> false (an address is not a phone)', () => {
+  assert.strictEqual(phoneMatches(ADDR, '615 N Hardee St'), false);
+  assert.strictEqual(phoneMatches(SHORT, '12 Oak Dr'), false);
+});
+
+const FORMATTED = { id: 'WO-007', phone: '(919)-555-1234' };
+test('the guard does not break real phone queries', () => {
+  assert.strictEqual(phoneMatches(FORMATTED, '(919) 555-1234'), true);
+  assert.strictEqual(phoneMatches(WO, '(919) 555-0148'), true);
+  assert.strictEqual(phoneMatches(WO, '919-555'), true);
+  assert.strictEqual(phoneMatches(ADDR, '615'), true);
+});
+
 test('null / undefined / phoneless row safe', () => {
   assert.strictEqual(phoneMatches(null, '9195550148'), false);
   assert.strictEqual(phoneMatches(undefined, '9195550148'), false);

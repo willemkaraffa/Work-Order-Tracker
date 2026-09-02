@@ -5300,7 +5300,7 @@ function App() {
     routeStops.forEach((id, i) => setSchedule(id, { date, start: slots[Math.min(i, slots.length - 1)] }, tech));
     setRouteStops([]);
     toast('Sent ' + routeStops.length + ' stop' + (routeStops.length === 1 ? '' : 's') + ' to ' + tech);
-    setItinFocus({ tech, date, ts: Date.now() });
+    setItinFocus({ tech, date, ts: Date.now(), jump: true });
     setCurrentModule('admin');
   }, [routeStops, orders, setSchedule, toast]);
 
@@ -5316,20 +5316,26 @@ function App() {
   // the calendar to its tech+day and ring-highlight it; unscheduled -> highlight
   // only (nothing to move to). Shared by switchModule (WO module entry) and the
   // Maps 'jumpItinerary' action so every entry point behaves the same.
-  const focusItinerary = React.useCallback((woId) => {
+  // `jump` = "take over the binder tab" (the module lands on Calendar). A
+  // deliberate jump does; module ENTRY does NOT -- it snaps the calendar
+  // silently and leaves the module on its Scratchpad.
+  const focusItinerary = React.useCallback((woId, jump = true) => {
     const o = orders.find(x => x.id === woId);
     if (!o) return;
     if (o.schedule && o.schedule.date) {
-      setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: woId, ts: Date.now() });
+      setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: woId, ts: Date.now(), jump });
     } else {
-      setItinFocus({ highlightId: woId, ts: Date.now() });
+      setItinFocus({ highlightId: woId, ts: Date.now(), jump });
     }
   }, [orders]);
 
   // Module entry side-effects: the schedule calendar auto-snaps to selectedWO's schedule
   // (if any); invoices highlights selectedWO row via selectedId prop.
   const switchModule = React.useCallback((m) => {
-    if (m === 'admin' && selectedWO) focusItinerary(selectedWO);
+    // Entering the module is NOT a jump: snap the calendar to the WO silently
+    // so it is on the right day when the user goes there, but land on the
+    // Scratchpad, which is where the module is supposed to open.
+    if (m === 'admin' && selectedWO) focusItinerary(selectedWO, false);
     // Maps: auto-select the active WO's marker on entry (mirror jumpToMap).
     if (m === 'maps' && selectedWO) setMapsSelected(selectedWO);
     setCurrentModule(m);
@@ -6059,7 +6065,7 @@ function App() {
       case 'jumpToSchedule': {
         const o = orders.find(x => x.id === id);
         if (o && o.schedule) {
-          setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now() });
+          setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now(), jump: true });
           setCurrentModule('admin');
         } else { toast('Not scheduled yet'); }
         break;
