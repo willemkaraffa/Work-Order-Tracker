@@ -1344,10 +1344,11 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
   );
 }
 
-export function MenuItem({ onClick, danger, disabled, children }) {
+export function MenuItem({ onClick, danger, disabled, title, children }) {
   const [hover, setHover] = React.useState(false);
   return (
     <div
+      title={title || undefined}
       onClick={disabled ? undefined : onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -1628,8 +1629,13 @@ export function WOContextMenu({
 
         {(showSchedule || tab !== 'trash') && <MenuDivider />}
 
-        {showSchedule && ctxRow?.scheduled && (
-          <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'jumpToSchedule'); onClose(); }}>Jump to schedule</MenuItem>
+        {/* greyed, not hidden: a missing row reads as a missing feature. Predicate is "has a schedule date" (not scheduled/isUpcomingSchedule) since retention keeps past-dated schedules and the handler jumps on o.schedule. */}
+        {showSchedule && (
+          <MenuItem
+            disabled={!ctxRow?.schedDate}
+            title={!ctxRow?.schedDate ? 'Not scheduled yet' : undefined}
+            onClick={() => { onWoAction && onWoAction(woId, 'jumpToSchedule'); onClose(); }}
+          >Jump to schedule</MenuItem>
         )}
         {showSchedule && (
           <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'openScheduleForm'); onClose(); }}>{ctxRow?.scheduled ? 'Reschedule' : 'Add to schedule'}</MenuItem>

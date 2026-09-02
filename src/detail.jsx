@@ -473,6 +473,7 @@ export function DetailPane({ data, onSendToInvoice, onMarkComplete, onReopen, on
             emergency: data.flags?.includes('emergency'),
             warranty: data.flags?.includes('warranty'),
             scheduled: !!data.scheduled,
+            schedDate: data.schedule ? data.schedule.date : null,
             status: data.status,
           }}
           bulkCount={1}

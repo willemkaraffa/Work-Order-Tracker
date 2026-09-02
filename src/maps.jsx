@@ -806,18 +806,23 @@ export function MapsModule({ activeOrders, notes, geocache, defaultView, selecte
         let left = ctxMenu.x;
         if (left + w > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - w - pad);
         if (top + h > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - h - pad);
-        const item = (label, onClick, danger) => (
-          <div
-            onClick={() => { onClick(); closeCtxMenu(); }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-            style={{
-              padding: '7px 12px', fontSize: 13,
-              color: danger ? 'var(--flag-emergency)' : 'var(--text-1)',
-              cursor: 'pointer', userSelect: 'none',
-            }}
-          >{label}</div>
-        );
+        const item = (label, onClick, danger, opts) => {
+          const disabled = !!(opts && opts.disabled);
+          return (
+            <div
+              title={opts && opts.title ? opts.title : undefined}
+              onClick={() => { if (disabled) return; onClick(); closeCtxMenu(); }}
+              onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+              onMouseLeave={(e) => { if (!disabled) e.currentTarget.style.background = 'transparent'; }}
+              style={{
+                padding: '7px 12px', fontSize: 13,
+                color: disabled ? 'var(--text-3)' : danger ? 'var(--flag-emergency)' : 'var(--text-1)',
+                cursor: disabled ? 'default' : 'pointer', userSelect: 'none',
+                opacity: disabled ? 0.5 : 1,
+              }}
+            >{label}</div>
+          );
+        };
         return (
           <div
             onClick={(e) => e.stopPropagation()}
@@ -852,7 +857,8 @@ export function MapsModule({ activeOrders, notes, geocache, defaultView, selecte
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   style={{ padding: '7px 12px', fontSize: 13, color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }}>Change status ▸</div>
               )}
-              {onWoAction && item('Jump to schedule', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
+              {onWoAction && item('Jump to schedule', () => onWoAction(ctxMenu.woId, 'jumpItinerary'), false,
+                (o && o.schedule && o.schedule.date) ? null : { disabled: true, title: 'Not scheduled yet' })}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
