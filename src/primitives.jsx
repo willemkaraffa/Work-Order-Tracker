@@ -103,15 +103,20 @@ export function FlagGlyph({ kind }) {
 // work order's emergency/warranty badge and shares nothing with this but the
 // word "flag". `on` means the flag is SET on the note, which is the only state
 // this draws; the value itself always comes from the note record.
-export function NoteFlagBtn({ label, title, on, onClick }) {
+// S5 S3: `icon` squares the pill off at its own height and enlarges the glyph,
+// for the composer toolbar where `label` IS the glyph and the title carries the
+// name. Word mode is still the default, so existing callers are untouched.
+export function NoteFlagBtn({ label, title, on, onClick, icon }) {
   return (
     <button type="button" onClick={onClick} title={title}
       style={{
-        height: 24, padding: '0 9px', borderRadius: 999,
+        height: 24, padding: icon ? 0 : '0 9px', width: icon ? 24 : undefined, borderRadius: 999,
+        display: icon ? 'inline-flex' : undefined,
+        alignItems: icon ? 'center' : undefined, justifyContent: icon ? 'center' : undefined,
         border: '1px solid ' + (on ? 'var(--accent)' : 'var(--border-2)'),
         background: on ? 'var(--bg-row-sel)' : 'var(--bg-surface)',
         color: on ? 'var(--accent)' : 'var(--text-3)',
-        fontFamily: 'inherit', fontSize: 11, fontWeight: 700,
+        fontFamily: 'inherit', fontSize: icon ? 13 : 11, fontWeight: 700,
         letterSpacing: '0.03em', cursor: 'pointer', whiteSpace: 'nowrap',
       }}>{label}</button>
   );

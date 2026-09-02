@@ -129,6 +129,10 @@ export const PAD_IDLE_MS = 800;
 //                  never jumps it up the journal
 //   detachOnBlank  true for the pad, where emptying it starts a NEW note;
 //                  false for the Journal, where emptying it must not deselect
+//
+// flush() RETURNS the note's id on every path (null when there is none yet).
+// That is what mint-then-flag rides on: one call both writes the pad and hands
+// back the id to flag, with no second save path.
 function useAutosave(onAdd, onUpdate, detachOnBlank) {
   const [text, setText] = React.useState('');
   const [id, setId] = React.useState(null);
@@ -146,18 +150,19 @@ function useAutosave(onAdd, onUpdate, detachOnBlank) {
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
     const p = ref.current;
     const body = String(p.body || '').trim();
-    if (!body) return;              // blank / whitespace-only writes nothing, ever
-    if (body === p.saved) return;   // unchanged since the last write
+    if (!body) return ref.current.id;              // blank / whitespace-only writes nothing, ever
+    if (body === p.saved) return ref.current.id;   // unchanged since the last write
     if (p.id) {
       if (onUpdate) onUpdate(p.id, { body });
       ref.current = { ...p, saved: body };
-      return;
+      return ref.current.id;
     }
     const minted = onAdd ? onAdd({ body }) : null;
     ref.current = { ...p, id: minted || null, saved: minted ? body : p.saved };
     // The mint can happen inside a fired timer or an unmount cleanup, so guard
     // the setState: React must not be told to update a component that is gone.
     if (minted && alive.current) setId(minted);
+    return ref.current.id;
   };
   // Keep the unmount cleanup pointing at the LATEST flush. A cleanup declared
   // with [] would otherwise close over the mount render's props forever.
@@ -899,37 +904,58 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // plain function returning JSX, NOT a component defined in render (rule A5).
   // Journal is a straight toggle: it is a bare boolean, so a modal for it would
   // be a form with no fields. No contact button -- ruling 3 defers it to S7.
-  const flagBar = (note) => {
-    const f = note.flags || {};
-    const open = (flag) => () => setFlagOpen({ noteId: note.id, flag });
+  // S3: it is now an ICON toolbar attached to the top edge of the writing
+  // field. `note` may be null (an unsaved pad); `mint` is optional.
+  const flagBar = (note, mint) => {
+    const f = (note && note.flags) || {};
+    // MINT-THEN-FLAG: pad text has no id until useAutosave mints one, so a flag
+    // click on unsaved text flushes through the EXISTING hook first (flush
+    // returns the id) and flags what it minted. Not a second save path, not a
+    // second debounce, and never greyed-until-saved. An empty pad mints
+    // nothing, so the click does nothing at all.
+    const target = () => (note ? note.id : (mint ? mint() : null));
+    const open = (flag) => () => { const id = target(); if (id) setFlagOpen({ noteId: id, flag }); };
+    // The star is a direct toggle, so it needs a note OBJECT, and a just-minted
+    // note is not in `notes` yet where this closure can see it. A note one
+    // flush old provably has no flags, so an empty flags object is exact.
+    const star = () => {
+      const id = target();
+      if (id) setFlag(note || { id, flags: {} }, 'journal', f.journal ? null : true);
+    };
+    // Glyphs, all already in use in this app. The gear also means Settings in
+    // the app header and the grid also names Service Items in the nav wing;
+    // both collisions are CROSS-SURFACE and accepted, because telling these
+    // seven apart inside one toolbar beats global glyph uniqueness -- every
+    // other geometric-shape candidate is an indistinguishable blob at 13px.
     return (
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6,
-        padding: '0 10px 10px', flexShrink: 0 }}>
-        <NoteFlagBtn label="Task" on={!!f.task} onClick={open('task')}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, flexShrink: 0,
+        padding: '6px 8px', background: 'var(--bg-surface)',
+        border: '1px solid var(--border-1)', borderBottom: 'none', borderRadius: '10px 10px 0 0' }}>
+        <NoteFlagBtn icon label="✓" on={!!f.task} onClick={open('task')}
           title={f.task
             ? 'Task' + (f.task.due ? ', due ' + f.task.due : ', no due date') + (f.task.done ? ' (done)' : '')
             : 'Make this a task'} />
-        <NoteFlagBtn label="Remind" on={!!f.reminder} onClick={open('reminder')}
+        <NoteFlagBtn icon label="◷" on={!!f.reminder} onClick={open('reminder')}
           title={f.reminder ? 'Reminder at ' + new Date(f.reminder.at).toLocaleString() : 'Set a reminder'} />
-        <NoteFlagBtn label="Calendar" on={!!f.calendar} onClick={open('calendar')}
+        <NoteFlagBtn icon label="▦" on={!!f.calendar} onClick={open('calendar')}
           title={f.calendar
             ? 'On the calendar ' + f.calendar.date + (f.calendar.start ? ' at ' + f.calendar.start : '')
             : 'Put this on a day'} />
-        <NoteFlagBtn label="Parts" on={!!f.parts} onClick={open('parts')}
+        <NoteFlagBtn icon label="⚙" on={!!f.parts} onClick={open('parts')}
           title={f.parts
             ? 'Parts order: ' + ([f.parts.part, f.parts.status, f.parts.po].filter(Boolean).join(' - ') || 'no details yet')
             : 'Record a parts order'} />
-        <NoteFlagBtn label="Journal" on={!!f.journal}
-          onClick={() => setFlag(note, 'journal', f.journal ? null : true)}
+        <NoteFlagBtn icon label={f.journal ? '★' : '☆'} on={!!f.journal} onClick={star}
           title={f.journal ? 'Starred into the journal - click to unstar' : 'Star this into the journal'} />
-        {/* The label never becomes the WO number: the jump row right below
-            already carries a button labelled with it, and two same-labelled
-            buttons doing different things in one panel is a trap. The ring
-            says linked, the tooltip says to what. */}
-        <NoteFlagBtn label="Link WO" on={!!note.woId} onClick={open('wo')}
-          title={note.woId ? 'Linked to ' + note.woId + ' - click to change' : 'Link a work order'} />
+        {/* The glyph never becomes the WO number: the jump row below already
+            carries a button labelled with it, and two same-labelled buttons
+            doing different things in one panel is a trap. The ring says
+            linked, the tooltip says to what. */}
+        <NoteFlagBtn icon label="#" on={!!(note && note.woId)} onClick={open('wo')}
+          title={note && note.woId ? 'Linked to ' + note.woId + ' - click to change' : 'Link a work order'} />
         <div style={{ flex: 1 }} />
-        <NoteFlagBtn label="Delete" title="Delete this note" onClick={() => removeNote(note)} />
+        {/* Delete stays OUT of the mint path: mint-then-delete is nonsense. */}
+        <NoteFlagBtn icon label="✕" title="Delete this note" onClick={() => note && removeNote(note)} />
       </div>
     );
   };
@@ -993,15 +1019,21 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           display: tab === 'scratchpad' ? 'flex' : 'none',
           flex: 1, minWidth: 0, minHeight: 0, padding: 14,
         }}>
-          <textarea
-            ref={composerRef}
-            value={pad.text}
-            onChange={pad.onChange}
-            onKeyDown={composerKey}
-            onBlur={pad.flush}
-            placeholder="Start writing. The pad saves itself. Clear it (or press Escape) to start a new note."
-            style={padStyle}
-          />
+          {/* Toolbar + field are ONE control: the toolbar always renders, even
+              with nothing written yet, because mint-then-flag is what makes an
+              ungated toolbar safe. */}
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            {flagBar(padNote, () => pad.flush())}
+            <textarea
+              ref={composerRef}
+              value={pad.text}
+              onChange={pad.onChange}
+              onKeyDown={composerKey}
+              onBlur={pad.flush}
+              placeholder="Start writing. The pad saves itself. Clear it (or press Escape) to start a new note."
+              style={{ ...padStyle, borderRadius: '0 0 10px 10px' }}
+            />
+          </div>
         </div>
         <aside style={{ ...asideStyle, display: tab === 'scratchpad' ? 'flex' : 'none' }}>
           {colHead('Jottings', scratch.length)}
@@ -1010,15 +1042,6 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
               ? scratch.map(n => padRow(n, pad.id, editInComposer))
               : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing yet. The pad is waiting.</div>}
           </div>
-          {/* The pad's OWN note, flaggable the moment it exists. This is the
-              module's premise: write first, add the meaning afterwards. */}
-          {padNote && (<>
-            <div style={{ padding: '8px 10px 6px', borderTop: '1px solid var(--border-1)', flexShrink: 0,
-              fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-              This note
-            </div>
-            {flagBar(padNote)}
-          </>)}
         </aside>
 
         {/* JOURNAL. Body: every note, newest first, jottings included. Column:
@@ -1077,18 +1100,19 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   newline, the text writes itself on the same idle debounce,
                   blur flushes, unchanged text writes nothing, Escape flushes
                   then deselects. */}
-              <div style={{ flex: 1, minHeight: 0, padding: 10, display: 'flex' }}>
+              <div style={{ flex: 1, minHeight: 0, padding: 10, display: 'flex', flexDirection: 'column' }}>
+                {/* No mint here: this editor only ever edits an EXISTING note,
+                    which is why its useAutosave is built with a null onAdd. */}
+                {flagBar(jNote)}
                 <textarea
                   ref={jPadRef}
                   value={jrn.text}
                   onChange={jrn.onChange}
                   onKeyDown={journalKey}
                   onBlur={jrn.flush}
-                  style={{ ...padStyle, fontSize: 13, padding: '10px 12px' }}
+                  style={{ ...padStyle, fontSize: 13, padding: '10px 12px', borderRadius: '0 0 10px 10px' }}
                 />
               </div>
-              {/* The flag row S3b reserved this spot for. */}
-              {flagBar(jNote)}
               {/* Jump row: the links, kept separate from the flags above. */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 10px 10px', flexShrink: 0 }}>
                 {jNote.woId && (

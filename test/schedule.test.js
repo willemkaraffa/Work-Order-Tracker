@@ -551,13 +551,13 @@ async function entryChecks() {
   ok('entries: an event chip carries no tick box',
     !chip('Team meeting').querySelector('input[type="checkbox"]'));
   click(chip('Team meeting')); await flush();
-  // The flag row renders only while a note is bound, so 'Link WO' is the proof
-  // that the click landed on THIS note's editor and not merely on a tab.
+  // S5 S3 turned the flag row into icons, so the flag name now lives ONLY in the
+  // title; and the pad's own toolbar is always mounted, so ONE such button is the
+  // pad and TWO means the Journal editor bound this note as well.
   ok('entries: clicking a chip opens the note in the Journal editor',
-    !!byLabel('Link WO'),
-    Array.from(container.querySelectorAll('button')).map(b => b.textContent.trim()).join(' | '));
-  // Back to the calendar. byLabel takes the FIRST match and the tab strip renders
-  // above the note flag row (which also has a 'Calendar' button), so this is the tab.
+    container.querySelectorAll('button[title="Link a work order"]').length === 2,
+    String(container.querySelectorAll('button[title="Link a work order"]').length));
+  // Back to the calendar. byLabel takes the FIRST match, which is the tab strip.
   click(byLabel('Calendar')); await flush();
 
   // [4] tech filter: tagged entry hides, untagged stays
@@ -575,11 +575,72 @@ async function entryChecks() {
   root.unmount();
 }
 
+// ─── Composer toolbar (jsdom) ────────────────────────────────────────────────
+// S5 S3 mint-then-flag, proved by RUNNING the click, not by reading the code.
+//
+// KNOWN LIMIT: jsdom has no layout, so the toolbar's visual attachment to the
+// field's top edge is NOT provable here. That is the live Electron look the
+// blueprint's done-gate already asks for.
+
+async function composerChecks() {
+  const dom = freshDom();
+  const { React, createRoot, ScheduleModule } = loadMountBridge();
+
+  const MINT = 'n-minted';
+  const added = [];
+  const notes = [];
+  const container = dom.window.document.getElementById('probe');
+  const root = createRoot(container);
+  const render = () => root.render(React.createElement(ScheduleModule, {
+    orders: [], techs: ['Alice'], statusColors: {}, statusTags: {},
+    tech: 'ALL', setTech: () => {}, focus: null, onClearFocus: () => {},
+    onOpenWO: () => {}, onOpenMaps: () => {},
+    notes,
+    // The real store mints and RETURNS an id; the note is only readable through
+    // `notes` afterwards, which is exactly what the flag modal reads.
+    onAddNote: (n) => { added.push(n.body); notes.push(normalizeNote(n, MINT, 1)); render(); return MINT; },
+    onUpdateNote: () => {},
+  }));
+  const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
+  const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  const pad = () => container.querySelector('textarea[placeholder]');
+  const taskIcon = () => container.querySelector('button[title="Make this a task"]');
+  const typeInto = (el, v) => {
+    const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value');
+    desc.set.call(el, v);
+    el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
+  const modalUp = () => container.textContent.indexOf('Due date (blank = backlog)') !== -1;
+
+  render(); await flush();
+
+  // [1] EMPTY pad: the toolbar is there (ungated is the point of the slice) and
+  //     the click mints nothing and opens nothing.
+  ok('composer: the toolbar renders on an empty pad', !!taskIcon());
+  click(taskIcon()); await flush();
+  ok('composer: a flag click on an EMPTY pad mints nothing and opens nothing',
+    added.length === 0 && !modalUp(), JSON.stringify({ added, modalUp: modalUp() }));
+
+  // [2] Typed but never idled: the flag click itself must mint FIRST. The modal
+  //     renders only for a note it can find in `notes`, so a modal on screen IS
+  //     the ordering proof -- had the flag run before the mint there would be no
+  //     note to open it against.
+  typeInto(pad(), 'call the supply house'); await flush();
+  click(taskIcon()); await flush();
+  ok('composer: a flag click on unsaved pad text mints the note first',
+    added.length === 1 && added[0] === 'call the supply house', JSON.stringify(added));
+  ok('composer: the flag modal then opens on the just-minted note', modalUp(),
+    container.textContent.slice(0, 200));
+
+  root.unmount();
+}
+
 // ─── Report ──────────────────────────────────────────────────────────────────
 
 (async () => {
   await mountedChecks();
   await entryChecks();
+  await composerChecks();
   console.log('schedule calendar math + mounted module');
   console.log('=======================================');
   let pass = 0, fail = 0;

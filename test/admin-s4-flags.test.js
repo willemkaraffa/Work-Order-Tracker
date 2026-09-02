@@ -196,6 +196,18 @@ function closeDom(dom) {
 // one button only IT owns ("Delete this note"), which is what keeps the
 // ambiguous labels -- Journal and Calendar are also BINDER TAB labels --
 // unambiguous without adding test hooks to shipped code.
+// S5 S3 turned the flag row into icons. Each flag's title has a SET and an
+// UNSET form, so a button is addressed by whichever of its two titles it wears.
+const FLAG_TITLES = {
+  Task: ['Task', 'Make this a task'],
+  Remind: ['Reminder at', 'Set a reminder'],
+  Calendar: ['On the calendar', 'Put this on a day'],
+  Parts: ['Parts order:', 'Record a parts order'],
+  Journal: ['Starred into the journal', 'Star this into the journal'],
+  'Link WO': ['Linked to', 'Link a work order'],
+  Delete: ['Delete this note'],
+};
+
 function domKit(dom, container) {
   const all = (sel) => Array.from(container.querySelectorAll(sel));
   const kit = {
@@ -210,6 +222,16 @@ function domKit(dom, container) {
     // checked, then dispatch), and React binds a checkbox onChange to the click
     // event -- so this is one path, not a synthetic double-fire.
     row: (t) => all('div[title]').find(d => d.getAttribute('title') === t),
+    // JOURNAL-BODY row lookup. DRIFT this repairs: the scratchpad aside is
+    // always mounted (display:none off its tab) and precedes the journal body
+    // in DOM order, so a container-wide div[title] search returned the PAD's
+    // copy of the same jotting; the click then ran editInComposer and bound the
+    // pad, and the whole journal block below silently exercised the pad editor
+    // while its comment claimed the pad was left unbound. Every list that is
+    // not the journal body sits inside an <aside>, so excluding those is the
+    // whole fix -- same trick journalAside() uses from the other end.
+    jrow: (t) => all('div[title]').filter(d => !d.closest('aside'))
+      .find(d => d.getAttribute('title') === t),
     btn: (label) => all('button').find(b => b.textContent.trim() === label),
     // The WO picker's rows carry the address after the number, so they are
     // matched on the prefix rather than the whole label.
@@ -222,16 +244,22 @@ function domKit(dom, container) {
     })[name] + '"]'),
     esc: (el) => el.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
     flagRows: () => all('button[title="Delete this note"]').map(b => b.parentElement),
-    // Two panels render a flag row: the PAD (index 0, still bound to whatever note
-    // was picked FIRST) and the Journal editor (last, bound to the note just
-    // clicked). Defaulting to index 0 silently aimed every flag click after the
-    // first `row()` at the WRONG note -- the Calendar modal then opened on an
+    // Two panels render a flag row: the PAD (index 0) and the Journal editor
+    // (last, bound to the note just clicked). Since S5 S3 the pad's toolbar is
+    // mounted UNCONDITIONALLY -- that is what mint-then-flag needs -- so index 0
+    // is always the pad, where it used to appear only once padNote existed.
+    // Defaulting to index 0 silently aimed every flag click after the first
+    // `row()` at the WRONG note -- the Calendar modal then opened on an
     // unflagged jotting, so no "Remove flag" existed and the click threw. Default
     // to the LAST row: it is the editor the preceding row() click actually bound.
+    // S5 S3: the buttons are ICONS, so the title is the only stable handle --
+    // it is the sole place the flag name still appears, in both states.
     flagBtn: (label, which) => {
       const rows = kit.flagRows();
       const r = which == null ? rows[rows.length - 1] : rows[which];
-      return r ? Array.from(r.querySelectorAll('button')).find(b => b.textContent.trim() === label) : null;
+      const pre = FLAG_TITLES[label] || [label];
+      return r ? Array.from(r.querySelectorAll('button'))
+        .find(b => pre.some(t => (b.getAttribute('title') || '').indexOf(t) === 0)) : null;
     },
     field: (labelText) => {
       const l = all('label').find(x => x.textContent.trim().startsWith(labelText));
@@ -279,20 +307,42 @@ async function flagRowChecks() {
   // unbound throughout, so exactly ONE flag row is ever mounted and the button
   // lookups stay unambiguous.
   k.click(k.tab('journal')); await tick();
-  ok('flags: NO flag row until a note is selected (nothing selected = nothing to flag)',
-    k.flagRows().length === 0, String(k.flagRows().length));
+  // S5 S3 SPLIT this case in two rather than let one count stand for both.
+  // The half that survives on its merits: the JOURNAL editor still renders
+  // nothing to flag until a note is bound, because the whole aside body is
+  // gated on jNote. Scoped to that aside (the last one: the scratchpad aside is
+  // always mounted and comes first in DOM order).
+  // Both halves of the pair are scoped to that aside on purpose: nothing
+  // selected means no journal flag row, selecting a note means exactly one. A
+  // container-wide count would just encode "pad toolbar plus journal row".
+  const journalAside = () => Array.from(container.querySelectorAll('aside')).pop();
+  const journalFlagRows = () => journalAside().querySelectorAll('button[title="Delete this note"]').length;
+  ok('flags: NO JOURNAL flag row until a note is selected (nothing selected = nothing to flag)',
+    journalFlagRows() === 0, String(journalFlagRows()));
+  // The half S3 deliberately reversed, stated outright so it reads as a
+  // DECISION: an ungated pad toolbar is mint-then-flag's precondition, since a
+  // flag click on unsaved text has to mint the note before it can flag it.
+  ok('S3: the pad toolbar is mounted with nothing selected (mint-then-flag needs it)',
+    k.flagRows().length === 1, String(k.flagRows().length));
 
-  k.click(k.row('plain jotting')); await tick();
-  ok('flags: selecting a note reveals its flag row', k.flagRows().length === 1, String(k.flagRows().length));
+  k.click(k.jrow('plain jotting')); await tick();
+  ok('flags: selecting a note reveals its flag row', journalFlagRows() === 1, String(journalFlagRows()));
 
-  const labels = Array.from(k.flagRows()[0].querySelectorAll('button')).map(b => b.textContent.trim());
+  // The SELECTED note's row is the last one, which is the same row flagBtn
+  // defaults to. Never re-simplify this back to [0]: the subject of these
+  // assertions was ALWAYS the selected note's row, and [0] only ever meant that
+  // by accident of the pad row not existing yet. 'plain jotting' carries no
+  // flags, so every title below is its unset form.
+  const editorRow = () => k.flagRows()[k.flagRows().length - 1];
+  const labels = Array.from(editorRow().querySelectorAll('button')).map(b => b.getAttribute('title'));
   ok('flags: the row ships task / reminder / calendar / parts / journal / WO link + delete',
-    labels.join('|') === 'Task|Remind|Calendar|Parts|Journal|Link WO|Delete', labels.join('|'));
+    labels.join('|') === 'Make this a task|Set a reminder|Put this on a day|Record a parts order|'
+      + 'Star this into the journal|Link a work order|Delete this note', labels.join('|'));
   ok('flags: there is NO contact button (ruling 3 defers contacts to S7)',
-    labels.indexOf('Contact') === -1, labels.join('|'));
+    labels.every(t => t.toLowerCase().indexOf('contact') === -1), labels.join('|'));
   ok('flags: every button carries a hover tooltip (a title attribute)',
-    Array.from(k.flagRows()[0].querySelectorAll('button')).every(b => (b.getAttribute('title') || '').length > 0),
-    JSON.stringify(Array.from(k.flagRows()[0].querySelectorAll('button')).map(b => b.getAttribute('title'))));
+    Array.from(editorRow().querySelectorAll('button')).every(b => (b.getAttribute('title') || '').length > 0),
+    JSON.stringify(labels));
 
   // ── task ──
   k.click(k.flagBtn('Task')); await tick();
@@ -332,7 +382,7 @@ async function flagRowChecks() {
 
   // ── parts: prefill from the linked WO (ruling 2) ──
   edits.length = 0;
-  k.click(k.row('linked jotting')); await tick();
+  k.click(k.jrow('linked jotting')); await tick();
   // The flag button keeps the label "Link WO" even when linked -- deliberate,
   // see the comment at src/schedule.jsx:891: the jump row right below already
   // carries a button labelled with the number, and two same-labelled buttons
@@ -361,7 +411,7 @@ async function flagRowChecks() {
 
   // ── independence, through the real UI ──
   edits.length = 0;
-  k.click(k.row('already dated')); await tick();
+  k.click(k.jrow('already dated')); await tick();
   k.click(k.flagBtn('Remind')); await tick();
   k.typeInto(k.field('Remind me at'), '2026-09-02T08:30'); await tick();
   k.click(k.btn('Save')); await tick();
