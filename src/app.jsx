@@ -472,7 +472,7 @@ function fmtCreated(d) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function fmtHistTime(ts) {
+export function fmtHistTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   const m = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -3430,9 +3430,9 @@ export function HeaderChips() {
 // fullscreen module-picker overlay.
 
 // ── Schedule helpers ──────────────────────────────────────────────────────────
-// Fixed 30-min slot grid (8:00 AM - 6:00 PM) shared by the schedule form and
-// the command-center DayTimeline rail. The Schedule module's calendar does NOT
-// use it (it lists jobs by start time instead). End times are intentionally not
+// Fixed 30-min slot grid (8:00 AM - 6:00 PM) used by the schedule form. Neither
+// the Schedule module's calendar nor the command-center rail uses it (they list
+// jobs by start time instead). End times are intentionally not
 // modeled (job length varies). schedule lives on the WO as {date,start}; tech
 // is order.tech (kept in sync by setSchedule).
 const ITIN_START_MIN = 8 * 60;   // 8:00 AM
@@ -6341,11 +6341,11 @@ function App() {
           overdueCfg={overdueCfg}
           onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
         />
+        {/* Keyed so Milestones re-collapses per WO; DetailPane is NOT keyed, so its activity log deliberately stays open across switches. */}
         <DayTimeline
+          key={selectedWO}
           wo={selectedRecord}
-          activeOrders={activeOrders}
-          statusColors={statusColors}
-          statusTags={statusTags}
+          phases={phases}
           onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('admin'); }}
         />
       </>}

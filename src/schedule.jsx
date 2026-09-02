@@ -5,7 +5,7 @@
 import React from 'react';
 import { statusColor } from './constants.js';
 import {
-  isLiveSchedule, weekDays, monthGrid, groupByScheduleDate,
+  isLiveSchedule, weekDays, monthGrid, groupByScheduleDate, deriveMilestones,
   groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle, orderMatchesQuery,
   noteMatchesQuery,
 } from './orders-logic.js';
@@ -14,105 +14,79 @@ import { TypeIcon, Seg, ActionBtn, BinderTabs, NoteFlagBtn } from './primitives.
 import {
   splitAddress, typeLetter, isOverdueSched, OVERDUE_CFG,
   navBtnStyle, HeaderChips, Modal, confirmDialog,
-  itinTodayStr, itinShiftDay, itinSlots, itinSnapSlot, itinFmtTime,
+  itinTodayStr, itinShiftDay, itinFmtTime, fmtHistTime,
   itinDayLabel, itinDayMonth,
 } from './app.jsx';
 
-// Read-only day timeline for the command-center right rail. Shows the WO's
-// assigned tech's full scheduled day (the WO's schedule date), auto-scrolled to
-// the WO's slot and ring-highlighted; "Open in Schedule" jumps to the full
-// module. Not scheduled -> a "Not Scheduled" placeholder + jump to schedule.
-// Keeps the fixed 30-min slot rail (itinSlots/itinSnapSlot); the calendar
-// module below deliberately does NOT.
-export function DayTimeline({ wo, activeOrders, statusColors, statusTags, onOpenItinerary }) {
-  const highlightRef = React.useRef(null);
+// Read-only schedule summary for the command-center right rail: the WO's day
+// and tech (click to jump to the full Schedule module) plus a Milestones
+// disclosure derived from o.history. Not scheduled -> the "Not Scheduled"
+// placeholder, which keeps the explicit jump button because it has no headline
+// to click. The 30-min slot rail is gone: the rest of the tech's day belongs to
+// the Schedule module, this rail answers "where is THIS WO".
+export function DayTimeline({ wo, phases, onOpenItinerary }) {
   const scheduled = !!(wo && wo.schedule && wo.schedule.date);
   const tech = wo && wo.tech;
   const date = scheduled ? wo.schedule.date : null;
-  const slots = React.useMemo(() => itinSlots(), []);
-  const tags = statusTags || {};
-  // Pinned to this WO's tech; `visited`-tagged statuses drop off the day.
-  const dayScheduled = React.useMemo(
-    () => (scheduled
-      ? (activeOrders || []).filter(o => o.schedule && o.schedule.date === date && o.tech === tech && tags[o.status] !== 'visited')
-      : []),
-    [activeOrders, date, tech, scheduled, tags]
-  );
-  const scheduledBySlot = React.useMemo(() => {
-    const map = {};
-    for (const o of dayScheduled) { const s = itinSnapSlot(o.schedule.start); (map[s] = map[s] || []).push(o); }
-    return map;
-  }, [dayScheduled]);
-  // Scroll the WO's card into view once it renders (the inset is the scroll parent).
-  React.useEffect(() => {
-    if (scheduled && highlightRef.current) highlightRef.current.scrollIntoView({ block: 'center' });
-  }, [wo && wo.id, scheduled, dayScheduled.length]);
-
-  const card = (o) => {
-    const { addr, city } = splitAddress(o);
-    const isHi = wo && o.id === wo.id;
-    return (
-      <div key={o.id} ref={isHi ? highlightRef : undefined} style={{
-        border: '1px solid var(--border-1)', borderLeft: '4px solid ' + statusColor(o.status, statusColors),
-        borderRadius: 8, background: 'var(--bg-surface)', padding: '6px 8px', fontSize: 12,
-        display: 'flex', flexDirection: 'column', gap: 2,
-        boxShadow: isHi ? '0 0 0 2px var(--accent)' : 'none',
-      }}>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{o.id}</span>
-          {o.emergency && <span style={{ color: 'var(--danger, #d9534f)', fontWeight: 700 }}>!</span>}
-          <TypeIcon kind={typeLetter(o.type)} />
-          {o.schedule && o.schedule.start && (
-            <span style={{ marginLeft: 'auto', fontVariantNumeric: 'tabular-nums',
-              color: isOverdueSched(o.schedule.date, o.schedule.start) ? OVERDUE_CFG.textColor : 'var(--text-2)' }}>
-              ◷ {itinFmtTime(o.schedule.start)}
-            </span>
-          )}
-        </div>
-        <div style={{ color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {addr || '(no address)'}{city ? ', ' + city : ''}
-        </div>
-      </div>
-    );
-  };
+  const [msOpen, setMsOpen] = React.useState(false);
+  const hist = wo && wo.history;
+  // Derived every render, never stored. See deriveMilestones.
+  const milestones = React.useMemo(() => deriveMilestones(wo, phases), [wo, hist, phases]);
 
   const labelStyle = { fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' };
-  const jumpBtn = onOpenItinerary && wo && (
-    <button onClick={() => onOpenItinerary(wo.id)} style={{
-      height: 22, padding: '0 8px', border: '1px solid var(--border-2)', borderRadius: 6,
-      background: 'var(--bg-surface-2)', color: 'var(--accent)', fontFamily: 'inherit',
-      fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-    }}>Open in Schedule →</button>
-  );
+  const headline = itinDayLabel(date) + ' · ' + (tech || 'Unassigned');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 12px 12px', borderTop: '1px solid var(--border-1)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
         <span style={labelStyle}>Schedule</span>
-        {jumpBtn}
+        {!scheduled && onOpenItinerary && wo && (
+          <button onClick={() => onOpenItinerary(wo.id)} style={{
+            height: 22, padding: '0 8px', border: '1px solid var(--border-2)', borderRadius: 6,
+            background: 'var(--bg-surface-2)', color: 'var(--accent)', fontFamily: 'inherit',
+            fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+          }}>Open in Schedule →</button>
+        )}
       </div>
       {!scheduled ? (
         <div style={{ height: 160, borderRadius: 8, border: '1px dashed var(--border-2)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-3)', fontSize: 13, fontWeight: 600 }}>
           Not Scheduled
         </div>
-      ) : (<>
-        <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{itinDayLabel(date)} · {tech || 'Unassigned'}</div>
-        <div style={{ maxHeight: 260, overflowY: 'auto', border: '1px solid var(--border-1)', borderRadius: 8 }}>
-          {slots.map(slot => {
-            const blocks = scheduledBySlot[slot] || [];
-            return (
-              <div key={slot} style={{ display: 'flex', alignItems: 'stretch', borderTop: '1px solid var(--border-1)', minHeight: 30 }}>
-                <div style={{ width: 64, flexShrink: 0, padding: '4px 6px', fontSize: 11, color: 'var(--text-3)',
-                  textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{itinFmtTime(slot)}</div>
-                <div style={{ flex: 1, padding: '3px 8px 3px 4px', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  {blocks.map(card)}
-                </div>
+      ) : onOpenItinerary ? (
+        // The headline IS the jump when there is one; degrades to plain text
+        // when no handler was passed.
+        <button onClick={() => onOpenItinerary(wo.id)} title="Open in Schedule" style={{
+          background: 'transparent', border: 'none', padding: '0', textAlign: 'left',
+          color: 'var(--accent)', fontFamily: 'inherit', fontSize: 12, cursor: 'pointer',
+        }}>{headline}</button>
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{headline}</div>
+      )}
+      {/* Collapsed by default, same idiom as DetailPane's activity log. */}
+      <div>
+        <button onClick={() => setMsOpen(o => !o)} title={msOpen ? 'Hide milestones' : 'Show milestones'} style={{
+          width: '100%', height: 26, padding: 0, display: 'flex', alignItems: 'center', gap: 6,
+          background: 'transparent', border: 'none', color: 'var(--text-2)', fontFamily: 'inherit',
+          fontSize: 12, fontWeight: 600, cursor: 'pointer', letterSpacing: '0.02em',
+        }}>
+          <span style={{ fontSize: 11 }}>{msOpen ? '▾' : '▸'}</span>
+          <span>Milestones</span>
+          {milestones.length > 0 && <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>· {milestones.length}</span>}
+        </button>
+        {msOpen && (
+          <div style={{ border: '1px solid var(--border-1)', borderRadius: 8, padding: '6px 8px',
+            maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3, fontSize: 12 }}>
+            {milestones.map((m, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{fmtHistTime(m.ts)}</span>
+                <span style={{ marginLeft: 'auto', textAlign: 'right', color: 'var(--text-1)' }}>{m.label}</span>
               </div>
-            );
-          })}
-        </div>
-      </>)}
+            ))}
+            {milestones.length === 0 && <div style={{ color: 'var(--text-3)' }}>No milestones yet.</div>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

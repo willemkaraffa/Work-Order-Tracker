@@ -435,6 +435,62 @@ export function isUpcomingSchedule(o, statusTags) {
   return isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr();
 }
 
+// Milestone rows for the WO command center: a curated VIEW of o.history, not a
+// stored field. Phase labels come from the user's configured `phases`, so the
+// rows track their status edits instead of a frozen stage list. Nothing here is
+// persisted -- re-derive on every render.
+// DELIBERATELY EXCLUDED: `unscheduled` / `auto-unscheduled (expired)`. Those are
+// the ABSENCE of a milestone, and a reschedule writes unschedule-then-schedule,
+// so including them rendered Unscheduled / In Progress / Scheduled-for triplets
+// and pushed the worst case from 28 rows to 32.
+// Returns oldest-first [{ ts, label }].
+export function deriveMilestones(o, phases) {
+  const hist = o && Array.isArray(o.history) ? o.history : [];
+  if (!hist.length) return [];
+  const byStatus = {};
+  for (const p of (Array.isArray(phases) ? phases : [])) {
+    for (const s of (p && Array.isArray(p.statuses) ? p.statuses : [])) byStatus[s] = p.name;
+  }
+  const out = [];
+  // Collapse key for the row before this one. Carried EXPLICITLY, never parsed
+  // back out of the label: phase names are user-editable, so a phase called
+  // "Ready for Approval" would lose its tail to any suffix-stripping regex and
+  // collapse into a different "Ready for ..." phase.
+  let prevBase = '';
+  for (const h of hist) {
+    if (!h) continue;
+    // ` (bulk)` variants are the same milestone as their plain form.
+    const action = String(h.action || '').replace(/ \(bulk\)$/, '');
+    const detail = String(h.detail || '');
+    let label = '', rowBase = '';
+    if (action === 'created' || action === 'imported') label = 'Created';
+    else if (action === 'status' || action === 'edit status') {
+      // detail is "<old> → <new>"; only the NEW status names a phase, and an
+      // unmapped status names none, so it emits nothing.
+      label = byStatus[detail.slice(detail.lastIndexOf('→') + 1).trim()] || '';
+    }
+    else if (action === 'scheduled') { label = 'Scheduled for ' + detail; rowBase = 'Scheduled'; }
+    else if (action === 'marked complete') label = 'Complete';
+    else if (action === 'sent to billing queue') label = 'Sent to billing';
+    else if (action === 'sent to Invoiced' || action === 'marked invoiced') label = 'Invoiced';
+    else if (action === 'marked Paid' || action === 'invoice billed from remittance') label = 'Paid';
+    else if (action === 'sent to Trash') label = 'Cancelled';
+    else if (action === 'restored from Trash' || action === 'back to Active') label = 'Reopened';
+    if (!label) continue;
+    // Collapse CONSECUTIVE same-base rows (a flip into a phase named Scheduled
+    // plus the `scheduled` write are one event). Non-consecutive repeats
+    // survive: re-entering a phase after a return trip is real history.
+    if (!rowBase) rowBase = label;
+    if (out.length && prevBase === rowBase) continue;
+    prevBase = rowBase;
+    out.push({ ts: h.ts, label });
+  }
+  // Older WOs never logged a creation entry; the first thing that happened to
+  // them stands in, so no WO reads as having no history at all.
+  if (!out.some(m => m.label === 'Created')) out.unshift({ ts: hist[0].ts, label: 'Created' });
+  return out;
+}
+
 // Is this overdue notification suppressed? Dismissals persist in
 // settings.dismissedOverdueIds keyed to the schedule DATE they were dismissed
 // for. A bare id set would silence a WO forever (notif ids are 'overdue-'+id,
