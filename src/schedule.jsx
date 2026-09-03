@@ -528,7 +528,6 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     .filter(n => n && n.id)
     .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id))),
   [notes]);
-  const [jFilter, setJFilter] = React.useState('all');
   const [jQuery, setJQuery] = React.useState('');
   const jSearchRef = React.useRef(null);
   // The box is a Journal filter, not a module-wide one: carrying its text to
@@ -538,45 +537,25 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // Type-to-search, the same hook the other modules use. Disabled off the
   // Journal tab so a keystroke meant for the Scratchpad pad is never stolen.
   useTypeToSearch({ setValue: setJQuery, inputRef: jSearchRef, disabled: tab !== 'journal' });
-  const journalShown = React.useMemo(() => {
-    const base = jFilter === 'jottings'
-      ? journal.filter(n => !n.woId && Object.keys(n.flags || {}).length === 0)
+  // J1: ONE derived list, feeding the rail. `jFilter` and `navFilter` were two
+  // filters over the same notes on one screen, so the body Seg retired and this
+  // is what is left:
+  //   all     -- the `journal` memo, newest first
+  //   pinned  -- the note record's EXISTING `pinned` field, newest first
+  //   tasks   -- backlogNotes in ITS OWN order (open before done, then oldest
+  //              first), deliberately NOT the journal sort, so it stays a
+  //              worklist rather than a feed
+  // All three honour the search box; the old split, where only the body list
+  // searched and the quick-nav did not, is gone.
+  const [navFilter, setNavFilter] = React.useState('all');
+  const navShown = React.useMemo(() => {
+    const base = navFilter === 'pinned' ? journal.filter(n => n.pinned)
+      : navFilter === 'tasks' ? backlogNotes(notes)
       : journal;
     const q = jQuery.trim();
     if (!q) return base;
     return base.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
-  }, [journal, jFilter, jQuery, orders]);
-
-  // QUICK-NAV: the pinned notes AND the undated backlog tasks, MERGED into one
-  // list so everything important is in one spot, each row marked with WHICH it
-  // is. `pinned` is the note record's EXISTING field (app.jsx already toggles
-  // it, detail.jsx already floats pinned notes first) -- there is no second
-  // starred/flagged concept here. backlogNotes is unchanged; only its old rail
-  // was retired. A note that is both appears ONCE carrying both markers.
-  const quickNav = React.useMemo(() => {
-    const taskIds = new Set(backlogNotes(notes).map(n => n.id));
-    const seen = new Set();
-    const out = [];
-    const push = (n) => {
-      if (!n || !n.id || seen.has(n.id)) return;
-      seen.add(n.id);
-      out.push({ note: n, pinned: !!n.pinned, task: taskIds.has(n.id) });
-    };
-    // Pinned first (the "starred email" the rail is modelled on), newest first,
-    // then whatever backlog tasks are not already pinned, in backlogNotes order
-    // (open before done, oldest first).
-    (notes || []).filter(n => n && n.id && n.pinned)
-      .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id)))
-      .forEach(push);
-    backlogNotes(notes).forEach(push);
-    return out;
-  }, [notes]);
-  const [navFilter, setNavFilter] = React.useState('all');
-  const quickNavShown = React.useMemo(
-    () => (navFilter === 'pinned' ? quickNav.filter(q => q.pinned)
-      : navFilter === 'tasks' ? quickNav.filter(q => q.task)
-      : quickNav),
-    [quickNav, navFilter]);
+  }, [journal, notes, navFilter, jQuery, orders]);
 
   // ── The two editors ───────────────────────────────────────────────────────
   // Both run the SAME autosave discipline (useAutosave above). The pad mints new
@@ -1057,47 +1036,13 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           </div>
         </aside>
 
-        {/* JOURNAL. Body: every note, newest first, jottings included. Column:
-            the merged pinned + undated-task quick-nav, swapped for the selected
-            note's body while a row is selected. */}
+        {/* JOURNAL, INVERTED by J1. The main pane is the NOTE: the editor moved
+            out of the aside INTACT (toolbar, textarea, jump row), with an empty
+            state when nothing is selected. The aside stays on the RIGHT so the
+            Journal and the Scratchpad match rather than mirror, and became the
+            NAVIGATOR: filters, search, list, top to bottom. */}
         {tab === 'journal' && (
-          <div style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 12,
-            display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-              <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
-                {journalShown.length} {journalShown.length === 1 ? 'note' : 'notes'}
-              </span>
-              <Seg
-                options={[{ value: 'all', label: 'All' }, { value: 'jottings', label: 'Jottings' }]}
-                value={jFilter}
-                onChange={setJFilter}
-              />
-              <input
-                ref={jSearchRef}
-                type="text"
-                value={jQuery}
-                onChange={(e) => setJQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setJQuery(''); } }}
-                placeholder="Search notes"
-                title="Search notes, WO number or address"
-                style={{
-                  flex: 1, minWidth: 0, height: 30, padding: '0 10px',
-                  border: '1px solid var(--border-2)', borderRadius: 6,
-                  background: 'var(--bg-canvas)', color: 'var(--text-1)',
-                  fontFamily: 'inherit', fontSize: 12,
-                  boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {journalShown.length
-                ? journalShown.map(n => padRow(n, jrn.id, selectJournal))
-                : <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No notes yet</div>}
-            </div>
-          </div>
-        )}
-        {tab === 'journal' && (
-          <aside style={asideStyle}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             {jNote ? (<>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
                 borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
@@ -1105,15 +1050,15 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   Note
                 </span>
                 <div style={{ flex: 1 }} />
-                <button onClick={closeJournal} title="Back to quick-nav"
+                <button onClick={closeJournal} title="Close this note"
                   style={{ ...navBtnStyle, padding: '2px 8px' }}>Back</button>
               </div>
-              {/* Body-only editor: the pad's behaviour in a narrower box, and
+              {/* Body-only editor: the pad's behaviour in a wider box, and
                   literally the pad's code -- same useAutosave. Enter is a
                   newline, the text writes itself on the same idle debounce,
                   blur flushes, unchanged text writes nothing, Escape flushes
-                  then deselects. */}
-              <div style={{ flex: 1, minHeight: 0, padding: 10, display: 'flex', flexDirection: 'column' }}>
+                  then deselects. J1 MOVED this block; it did not rewire it. */}
+              <div style={{ flex: 1, minHeight: 0, padding: 12, display: 'flex', flexDirection: 'column' }}>
                 {/* No mint here: this editor only ever edits an EXISTING note,
                     which is why its useAutosave is built with a null onAdd. */}
                 {flagBar(jNote)}
@@ -1123,11 +1068,11 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   onChange={jrn.onChange}
                   onKeyDown={journalKey}
                   onBlur={jrn.flush}
-                  style={{ ...padStyle, fontSize: 13, padding: '10px 12px', borderRadius: '0 0 10px 10px' }}
+                  style={{ ...padStyle, borderRadius: '0 0 10px 10px' }}
                 />
               </div>
               {/* Jump row: the links, kept separate from the flags above. */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 10px 10px', flexShrink: 0 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 12px 12px', flexShrink: 0 }}>
                 {jNote.woId && (
                   <ActionBtn title={'Open ' + jNote.woId} onClick={() => onOpenWO && onOpenWO(jNote.woId)}>
                     {jNote.woId}
@@ -1139,26 +1084,61 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   </ActionBtn>
                 )}
               </div>
-            </>) : (<>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
-                borderBottom: '1px solid var(--border-1)', flexShrink: 0, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                  Quick-nav
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{quickNavShown.length}</span>
-                <div style={{ flex: 1 }} />
-                <Seg
-                  options={[{ value: 'all', label: 'All' }, { value: 'pinned', label: 'Pinned' }, { value: 'tasks', label: 'Tasks' }]}
-                  value={navFilter}
-                  onChange={setNavFilter}
-                />
+            </>) : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 24, color: 'var(--text-3)', fontSize: 13, textAlign: 'center' }}>
+                Pick a note on the right to read it here.
               </div>
-              <div style={listStyle}>
-                {quickNavShown.length
-                  ? quickNavShown.map(q => padRow(q.note, jrn.id, selectJournal))
-                  : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing pinned, no open tasks</div>}
-              </div>
-            </>)}
+            )}
+          </div>
+        )}
+        {tab === 'journal' && (
+          <aside style={asideStyle}>
+            {/* Glyphs stay consistent with the flag work on purpose: Tasks is the
+                task flag's own U+2713, Pinned is the pinned dot's own U+2691.
+                Bigger than the 24px flag pills because this is navigation, not a
+                toggle. Clients is J2 and is deliberately NOT rendered dead. */}
+            <div style={{ flexShrink: 0, padding: '10px 10px 8px', borderBottom: '1px solid var(--border-1)',
+              display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* ONE count, bound to navShown, so it answers the filter AND the
+                  search together -- more than either retired count did alone. */}
+              <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+                {navShown.length} {navShown.length === 1 ? 'note' : 'notes'}
+              </span>
+              <Seg
+                equal
+                options={[
+                  { value: 'tasks', label: '✓ Tasks' },
+                  { value: 'pinned', label: '⚑ Pinned' },
+                  { value: 'all', label: '☰ All' },
+                ]}
+                value={navFilter}
+                onChange={setNavFilter}
+              />
+              <input
+                ref={jSearchRef}
+                type="text"
+                value={jQuery}
+                onChange={(e) => setJQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setJQuery(''); } }}
+                placeholder="Search notes"
+                title="Search notes, WO number or address"
+                style={{
+                  width: '100%', height: 30, padding: '0 10px',
+                  border: '1px solid var(--border-2)', borderRadius: 6,
+                  background: 'var(--bg-canvas)', color: 'var(--text-1)',
+                  fontFamily: 'inherit', fontSize: 12,
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={listStyle}>
+              {navShown.length
+                ? navShown.map(n => padRow(n, jrn.id, selectJournal))
+                : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>
+                  {navFilter === 'tasks' ? 'No open tasks' : navFilter === 'pinned' ? 'Nothing pinned' : 'No notes yet'}
+                </div>}
+            </div>
           </aside>
         )}
 

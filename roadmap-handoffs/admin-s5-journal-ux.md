@@ -1,7 +1,8 @@
 # Admin S5 -- Journal / Scratchpad UX rework
 
-Blueprint. No code written yet. Accepted by the user 2026-09-01, in the session
-that closed S4's last test failure and shipped ruling 4 (`6cde4ce`).
+Blueprint. Accepted by the user 2026-09-01, in the session that closed S4's last
+test failure and shipped ruling 4 (`6cde4ce`). S1, S2, S3 and J1 are BUILT and
+live-tested; J2 is the one slice still to write.
 
 This is a UX rework of the **Scheduling & Admin** module (`src/schedule.jsx`),
 not a data change. Nothing here needs a new note field: every value the new views
@@ -78,32 +79,56 @@ field**, like a normal text editor toolbar, in the Scratchpad.
   FLUSHES that editor first (`writeNote`, `src/schedule.jsx:654`). The toolbar
   sits on the pad itself, so this path gets more traffic, not less.
 
-### S4 -- "WO Notes" filter
+### J1 -- Invert the Journal (BUILT)
 
-The Journal filter strip is `All | Jottings` (`src/schedule.jsx:1002`). It gains
-a third: **WO Notes**.
+The Journal did not read as a journal: the note was relegated to a side panel
+and the pane the eye lands on was a list. J1 swaps the two jobs.
 
-- WO Notes lists notes **folded under each work order**, header `WO# Address`.
-- Collapsed by default (see the collapse rule below).
-- This is where notes on invoiced / closed WOs stay reachable once S5 restricts
-  the pinned list.
+- **Main pane = the note.** The editor moved out of the aside INTACT: flagBar
+  toolbar, textarea, jump row, plus an empty state when nothing is selected.
+  It was MOVED, not rewired -- same `useAutosave` instance built with a null
+  `onAdd` (this editor only ever edits an existing note), same `flagBar(jNote)`
+  with no mint callback, same Escape handling, same jump row.
+- **Aside = the navigator**, still on the RIGHT so the Journal and the Scratchpad
+  MATCH rather than mirror. Top to bottom: filter buttons, search box, list.
+- **One filter, not two.** `jFilter` (the body's All / Jottings `Seg`) RETIRED.
+  The rail's `navFilter` is the only filter over these notes now.
+- **One derived list** feeds the rail, and all three filters honour the search
+  box (the old split, where only the body list searched, is gone):
+  - All: the `journal` memo, newest first.
+  - Pinned: notes carrying `note.pinned`, newest first.
+  - Tasks: `backlogNotes(notes)` in ITS OWN order (open before done, then oldest
+    first). Deliberately NOT the journal sort: it is a worklist, not a feed.
+- The old `quickNav` `{ note, pinned, task }` wrapper retired with it. `padRow`
+  derives its own flag dots from the note, so nothing downstream needs those
+  booleans carried alongside.
+- **Rail buttons** use the existing `Seg` with `equal` so they fill the 260px
+  rail. Labels are a glyph plus its word, deliberately more prominent than the
+  24px flag pills, and the glyphs are the flag work's own: Tasks U+2713 (the task
+  flag's glyph), Pinned U+2691 (the pinned dot's glyph), All U+2630.
 
-### S5 -- Journal main pane becomes a tree, pinned restricted to active WOs
+### J2 -- The Clients tree (NOT BUILT)
 
-Two parts, one slice because they only make sense together.
+The user's rail set is **Clients, Tasks, Pinned, All**. J1 shipped the last
+three. Clients is this slice, and J1 deliberately does NOT render a dead button
+for it.
 
-**a. The tree.** The Journal main pane becomes
-`Client -> Property Address -> WO#`. Clicking a WO# box jumps to that WO's entry
-in **WO Notes**, expanded.
+- Clients is a tree in the rail: `Client -> Property Address -> WO#`. The field
+  reuse table above already fixes every field it needs; do not add one.
+- Selecting a WO# fills the main pane with that WO's notes.
+- **The collapse rule below governs this slice.** It is the mitigation for the
+  risk J1 exists to answer: a tree re-clutters the very surface this rework
+  quietened, unless collapse-by-default actually holds.
 
-**b. Pinned means active.** The quick-nav pinned list is restricted to **ACTIVE
-work orders only**. Tasks and Pinned both stay in quick-nav
-(`src/schedule.jsx:1065`) -- they are not moving. Notes on invoiced or closed WOs
-are not lost; they live under WO Notes.
+**Record this before it is rediscovered as a bug:** a note with no `note.woId`
+has no client, so it CANNOT appear anywhere under the Clients tree. Those notes
+stay reachable under **All**, which is where the retired Jottings population
+lives now. An empty Clients tree for a pad-written note is correct behaviour,
+not a missing link.
 
 ---
 
-## The collapse rule (applies to S4 and S5)
+## The collapse rule (governs J2)
 
 **Every level is collapsed on open.** Two exceptions, both explicit:
 
@@ -111,7 +136,7 @@ are not lost; they live under WO Notes.
 2. the branch routed to from a WO# entry (that one opens expanded).
 
 The user named this rule directly. It is also the mitigation for the one risk
-flagged against S5: a three-level tree re-clutters the very pane this rework
+flagged against the tree: three levels re-clutter the very surface this rework
 exists to quieten, unless collapse-by-default actually holds. If a slice ships
 with levels expanded by default, that slice has failed its own purpose.
 

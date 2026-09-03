@@ -223,16 +223,19 @@ function domKit(dom, container) {
     // checked, then dispatch), and React binds a checkbox onChange to the click
     // event -- so this is one path, not a synthetic double-fire.
     row: (t) => all('div[title]').find(d => d.getAttribute('title') === t),
-    // JOURNAL-BODY row lookup. DRIFT this repairs: the scratchpad aside is
-    // always mounted (display:none off its tab) and precedes the journal body
-    // in DOM order, so a container-wide div[title] search returned the PAD's
-    // copy of the same jotting; the click then ran editInComposer and bound the
-    // pad, and the whole journal block below silently exercised the pad editor
-    // while its comment claimed the pad was left unbound. Every list that is
-    // not the journal body sits inside an <aside>, so excluding those is the
-    // whole fix -- same trick journalAside() uses from the other end.
-    jrow: (t) => all('div[title]').filter(d => !d.closest('aside'))
-      .find(d => d.getAttribute('title') === t),
+    // JOURNAL-LIST row lookup. DRIFT this repairs: the scratchpad aside is
+    // always mounted (display:none off its tab) and precedes the journal list in
+    // DOM order, so a container-wide div[title] search returned the PAD's copy of
+    // the same jotting; the click then ran editInComposer and bound the pad, and
+    // the whole journal block below silently exercised the pad editor while its
+    // comment claimed the pad was left unbound. J1 then INVERTED the Journal, so
+    // the list is now the LAST aside (the rail) rather than the main pane, and
+    // scoping to it is what keeps this pointed at the journal.
+    jrow: (t) => {
+      const rail = Array.from(container.querySelectorAll('aside')).pop();
+      return rail ? Array.from(rail.querySelectorAll('div[title]'))
+        .find(d => d.getAttribute('title') === t) : null;
+    },
     btn: (label) => all('button').find(b => b.textContent.trim() === label),
     // The WO picker's rows carry the address after the number, so they are
     // matched on the prefix rather than the whole label.
@@ -310,14 +313,17 @@ async function flagRowChecks() {
   k.click(k.tab('journal')); await tick();
   // S5 S3 SPLIT this case in two rather than let one count stand for both.
   // The half that survives on its merits: the JOURNAL editor still renders
-  // nothing to flag until a note is bound, because the whole aside body is
-  // gated on jNote. Scoped to that aside (the last one: the scratchpad aside is
-  // always mounted and comes first in DOM order).
-  // Both halves of the pair are scoped to that aside on purpose: nothing
-  // selected means no journal flag row, selecting a note means exactly one. A
-  // container-wide count would just encode "pad toolbar plus journal row".
+  // nothing to flag until a note is bound, because the whole editor block is
+  // gated on jNote. Both halves of the pair are scoped to the pane that holds
+  // that editor: nothing selected means no journal flag row, selecting a note
+  // means exactly one. A container-wide count would just encode "pad toolbar
+  // plus journal row".
   const journalAside = () => Array.from(container.querySelectorAll('aside')).pop();
-  const journalFlagRows = () => journalAside().querySelectorAll('button[aria-label="Delete this note"]').length;
+  // J1 INVERTED the Journal: the editor moved OUT of the aside into the main
+  // pane, which is the rail's immediately preceding sibling. Counting in the
+  // aside would now count zero forever and prove nothing.
+  const journalPane = () => { const a = journalAside(); return a ? a.previousElementSibling : null; };
+  const journalFlagRows = () => { const p = journalPane(); return p ? p.querySelectorAll('button[aria-label="Delete this note"]').length : -1; };
   ok('flags: NO JOURNAL flag row until a note is selected (nothing selected = nothing to flag)',
     journalFlagRows() === 0, String(journalFlagRows()));
   // The half S3 deliberately reversed, stated outright so it reads as a

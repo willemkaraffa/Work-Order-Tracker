@@ -549,18 +549,17 @@ async function binderChecks() {
     el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   };
   const byLabel = (l) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === l);
-  // The Journal carries TWO filters and both offer an 'All'. byLabel finds the
-  // BODY one (it comes first in the DOM); navBtn is scoped to the visible aside,
-  // which is the quick-nav.
+  // J1 left the Journal with ONE filter, on the rail (the body Seg retired), and
+  // its buttons read "glyph word", so navBtn matches the WORD. jAside is the
+  // visible aside, which on this tab is the rail.
   const jAside = () => Array.from(container.querySelectorAll('aside')).filter(vis)[0];
-  const navBtn = (l) => Array.from(jAside().querySelectorAll('button')).find(b => b.textContent.trim() === l);
+  const navBtn = (l) => Array.from(jAside().querySelectorAll('button'))
+    .find(b => b.textContent.trim().split(' ').pop() === l);
   const rows = () => Array.from(container.querySelectorAll('div[title]')).filter(vis);
   const rowTitles = () => rows().map(d => d.getAttribute('title'));
   const rowByTitle = (t) => rows().find(d => d.getAttribute('title') === t);
-  // On the Journal tab the SAME note is on screen twice -- once in the body
-  // list, once in the quick-nav -- so every row helper must say which it means.
-  const bodyRows = () => rows().filter(d => !(jAside() && jAside().contains(d)));
-  const bodyTitles = () => bodyRows().map(d => d.getAttribute('title'));
+  // J1 INVERTED the Journal: the list lives on the RAIL and the main pane holds
+  // the note, so a note is on screen once, not twice, and navRows is the list.
   const navRows = () => (jAside() ? Array.from(jAside().querySelectorAll('div[title]')) : []);
   const navTitles = () => navRows().map(d => d.getAttribute('title'));
   // S5: the quick-nav WORD markers were retired when padRow gained derived flag
@@ -594,10 +593,11 @@ async function binderChecks() {
 
   // [2] JOURNAL body: every note, newest first, jottings included
   click(byLabel('Journal')); await tick();
+  // J1: the every-note list MOVED from the main pane to the rail's All filter.
   ok('journal: body lists EVERY note, newest first, jottings included',
-    bodyTitles().join('|')
+    navTitles().join('|')
       === 'newest jotting|tenant called back|pinned policy note|Chase the permit|Call vendor|older jotting',
-    bodyTitles().join('|'));
+    navTitles().join('|'));
 
   // [3] QUICK-NAV: pinned AND undated tasks, merged, each marked
   ok('quick-nav: a pinned note is marked Pinned', marksOf('pinned policy note').join(',') === '⚑',
@@ -608,29 +608,32 @@ async function binderChecks() {
     marksOf('Chase the permit').join(','));
   ok('quick-nav: a note that is BOTH appears exactly ONCE (merged, not concatenated)',
     navTitles().filter(t => t === 'Chase the permit').length === 1, navTitles().join('|'));
-  ok('quick-nav: it holds pinned + undated tasks and nothing else',
-    navTitles().join('|') === 'pinned policy note|Chase the permit|Call vendor', navTitles().join('|'));
+  // RETIRED by J1, not weakened: the merged pinned+tasks list is gone, All now
+  // lists every note by design, and this case's two halves are asserted verbatim
+  // by the Pinned and Tasks filter cases immediately below.
 
   // [4] the marker filter
   click(navBtn('Pinned')); await tick();
   ok('quick-nav: the Pinned filter keeps only pinned entries',
     navTitles().join('|') === 'pinned policy note|Chase the permit', navTitles().join('|'));
   click(navBtn('Tasks')); await tick();
+  // Same SET as before; the order is backlogNotes' own (open before done, then
+  // oldest first), which J1 keeps deliberately instead of the journal sort.
   ok('quick-nav: the Tasks filter keeps only undated tasks',
-    navTitles().join('|') === 'Chase the permit|Call vendor', navTitles().join('|'));
+    navTitles().join('|') === 'Call vendor|Chase the permit', navTitles().join('|'));
   click(navBtn('All')); await tick();
 
-  // Journal body category filter: jottings as their own category.
-  click(byLabel('Jottings')); await tick();
-  ok('journal: the Jottings filter narrows the body to unflagged, WO-less notes',
-    bodyTitles().join('|') === 'newest jotting|pinned policy note|older jotting', bodyTitles().join('|'));
-  click(byLabel('All')); await tick();
+  // The Journal's Jottings Seg RETIRED with J1 (one filter, on the rail), so the
+  // case that drove it is gone with it. The jottings category itself is still
+  // proved above, on the Scratchpad column that owns it.
 
-  // [5] selection swaps the column for a body-only editor
+  // [5] selection opens the editor in the main pane
   click(rowByTitle('tenant called back')); await tick();
-  ok('journal: selecting a row swaps the quick-nav for the note editor',
-    !!jPad() && jPad().value === 'tenant called back' && container.textContent.indexOf('Quick-nav') === -1,
-    String(jPad() && jPad().value));
+  // J1: selection no longer SWAPS the rail away -- the rail is permanent and the
+  // editor opens in the main pane, so the claim is now "editor opens, rail stays".
+  ok('journal: selecting a row opens the note editor and the rail stays',
+    !!jPad() && jPad().value === 'tenant called back' && navRows().length > 0,
+    String(jPad() && jPad().value) + ' rail=' + navRows().length);
   ok('journal: a WO-linked note offers the WO and Map jumps',
     !!byLabel('WO-9') && !!byLabel('Map'));
   click(byLabel('WO-9')); await tick();
@@ -661,7 +664,8 @@ async function binderChecks() {
   ok('journal: a second blur with unchanged text writes nothing more', edits.length === 2, JSON.stringify(edits));
 
   click(byLabel('Back')); await tick();
-  ok('journal: Back restores the quick-nav', container.textContent.indexOf('Quick-nav') !== -1 && !jPad());
+  ok('journal: Back closes the editor, the rail is untouched', !jPad() && navRows().length > 0,
+    String(navRows().length));
 
   // [6] THE SWITCH-MID-WRITE CASE. The worst bug available in this design is a
   // timer armed for note A firing after the panel has rebound to note B, writing
@@ -691,8 +695,8 @@ async function binderChecks() {
     edits.length === beforeEsc + 1 && edits[beforeEsc][0] === 'j-pad-old'
       && edits[beforeEsc][1].body === 'older jotting, via the journal',
     JSON.stringify(edits.slice(beforeEsc)));
-  ok('journal: Escape then restores the quick-nav',
-    container.textContent.indexOf('Quick-nav') !== -1 && !jPad());
+  ok('journal: Escape then closes the editor, the rail is untouched',
+    !jPad() && navRows().length > 0, String(navRows().length));
 
   // The unchanged-text guard still holds: browsing costs no writes.
   const beforeBrowse = edits.length;
