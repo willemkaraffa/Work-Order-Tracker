@@ -563,10 +563,12 @@ async function binderChecks() {
   const bodyTitles = () => bodyRows().map(d => d.getAttribute('title'));
   const navRows = () => (jAside() ? Array.from(jAside().querySelectorAll('div[title]')) : []);
   const navTitles = () => navRows().map(d => d.getAttribute('title'));
+  // S5: the quick-nav WORD markers were retired when padRow gained derived flag
+  // dots, so the marker is now the glyph and its colour, not the word.
   const marksOf = (t) => {
     const r = navRows().find(d => d.getAttribute('title') === t);
     return r ? Array.from(r.querySelectorAll('span')).map(s => s.textContent.trim())
-      .filter(x => x === 'Pinned' || x === 'Task') : ['<no quick-nav row>'];
+      .filter(x => x === '⚑' || x === '✓') : ['<no quick-nav row>'];
   };
   // The pad is identified by its placeholder; the journal editor is the other
   // textarea. Never by index, which would silently follow a DOM reorder.
@@ -598,11 +600,11 @@ async function binderChecks() {
     bodyTitles().join('|'));
 
   // [3] QUICK-NAV: pinned AND undated tasks, merged, each marked
-  ok('quick-nav: a pinned note is marked Pinned', marksOf('pinned policy note').join(',') === 'Pinned',
+  ok('quick-nav: a pinned note is marked Pinned', marksOf('pinned policy note').join(',') === '⚑',
     marksOf('pinned policy note').join(','));
-  ok('quick-nav: an undated task is marked Task', marksOf('Call vendor').join(',') === 'Task',
+  ok('quick-nav: an undated task is marked Task', marksOf('Call vendor').join(',') === '✓',
     marksOf('Call vendor').join(','));
-  ok('quick-nav: a note that is BOTH carries both markers', marksOf('Chase the permit').join(',') === 'Pinned,Task',
+  ok('quick-nav: a note that is BOTH carries both markers', marksOf('Chase the permit').join(',') === '✓,⚑',
     marksOf('Chase the permit').join(','));
   ok('quick-nav: a note that is BOTH appears exactly ONCE (merged, not concatenated)',
     navTitles().filter(t => t === 'Chase the permit').length === 1, navTitles().join('|'));

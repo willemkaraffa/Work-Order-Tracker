@@ -552,11 +552,11 @@ async function entryChecks() {
     !chip('Team meeting').querySelector('input[type="checkbox"]'));
   click(chip('Team meeting')); await flush();
   // S5 S3 turned the flag row into icons, so the flag name now lives ONLY in the
-  // title; and the pad's own toolbar is always mounted, so ONE such button is the
-  // pad and TWO means the Journal editor bound this note as well.
+  // button's accessible name; and the pad's own toolbar is always mounted, so ONE
+  // such button is the pad and TWO means the Journal editor bound this note too.
   ok('entries: clicking a chip opens the note in the Journal editor',
-    container.querySelectorAll('button[title="Link a work order"]').length === 2,
-    String(container.querySelectorAll('button[title="Link a work order"]').length));
+    container.querySelectorAll('button[aria-label="Link a work order"]').length === 2,
+    String(container.querySelectorAll('button[aria-label="Link a work order"]').length));
   // Back to the calendar. byLabel takes the FIRST match, which is the tab strip.
   click(byLabel('Calendar')); await flush();
 
@@ -604,7 +604,7 @@ async function composerChecks() {
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
   const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
   const pad = () => container.querySelector('textarea[placeholder]');
-  const taskIcon = () => container.querySelector('button[title="Make this a task"]');
+  const taskIcon = () => container.querySelector('button[aria-label="Make this a task"]');
   const typeInto = (el, v) => {
     const desc = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value');
     desc.set.call(el, v);

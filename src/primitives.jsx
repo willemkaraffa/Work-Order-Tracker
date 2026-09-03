@@ -104,21 +104,72 @@ export function FlagGlyph({ kind }) {
 // word "flag". `on` means the flag is SET on the note, which is the only state
 // this draws; the value itself always comes from the note record.
 // S5 S3: `icon` squares the pill off at its own height and enlarges the glyph,
-// for the composer toolbar where `label` IS the glyph and the title carries the
-// name. Word mode is still the default, so existing callers are untouched.
-export function NoteFlagBtn({ label, title, on, onClick, icon }) {
+// for the composer toolbar where `label` IS the glyph and the tooltip carries
+// the name. Word mode is still the default, so existing callers are untouched.
+// S5 S3 live pass, two faults: `color` (a hex, optional) makes the LIT state say
+// WHICH flag is set instead of one accent for all six -- with no hex the accent
+// treatment below is unchanged, so every other caller is untouched. And the
+// native tooltip is gone: it renders UNDER the pointer, which is exactly where
+// the cursor hides it, so the tip is drawn here and anchored to the cursor.
+export function NoteFlagBtn({ label, title, on, onClick, icon, color }) {
+  // `pos` is the live cursor, null when not hovered. It BOTH mounts the tip and
+  // keys the measuring effect, so the ref-attached node and its effect deps move
+  // together (rule A3). NO delay and NO timer: an instant tip needs neither, and
+  // that is also why there is nothing to clean up (rule A7). Do not add one.
+  const [pos, setPos] = React.useState(null);
+  const tipRef = React.useRef(null);
+  const sizeRef = React.useRef(null);
+  // Flip before paint: LEFT of the cursor when the tip would run off the right
+  // edge (the Journal toolbar sits near it, so this is not theoretical), BELOW
+  // when it would run off the top. Written onto the node rather than into state,
+  // so a mousemove costs one render instead of two. Keyed on `pos` AND `title`:
+  // position depends on the cursor, width depends on the text, and a click can
+  // change the second without touching the first (the star swaps its label in
+  // place, with no mousemove to re-run this). The SIZE is measured once per
+  // title and cached for the same reason, inverted: re-measuring on every
+  // mousemove forces a synchronous layout for no new information. Invalidate
+  // that cache on `title` and never on `pos`, or a stale width comes back.
+  React.useLayoutEffect(() => {
+    const el = tipRef.current;
+    if (!el || !pos) return;
+    let size = sizeRef.current;
+    if (!size || size.title !== title) {
+      const r = el.getBoundingClientRect();
+      size = { title, w: r.width, h: r.height };
+      sizeRef.current = size;
+    }
+    const below = pos.y - 12 - size.h < 4;
+    const left = pos.x + 14 + size.w > window.innerWidth - 4
+      ? Math.max(4, pos.x - 14 - size.w) : pos.x + 14;
+    el.style.left = left + 'px';
+    el.style.top = (below ? pos.y + 18 : pos.y - 12) + 'px';
+    el.style.transform = below ? 'none' : 'translateY(-100%)';
+  }, [pos, title]);
   return (
-    <button type="button" onClick={onClick} title={title}
+    <button type="button" onClick={onClick} aria-label={title}
+      onMouseMove={(e) => setPos({ x: e.clientX, y: e.clientY })}
+      onMouseLeave={() => setPos(null)}
       style={{
         height: 24, padding: icon ? 0 : '0 9px', width: icon ? 24 : undefined, borderRadius: 999,
         display: icon ? 'inline-flex' : undefined,
         alignItems: icon ? 'center' : undefined, justifyContent: icon ? 'center' : undefined,
-        border: '1px solid ' + (on ? 'var(--accent)' : 'var(--border-2)'),
-        background: on ? 'var(--bg-row-sel)' : 'var(--bg-surface)',
-        color: on ? 'var(--accent)' : 'var(--text-3)',
+        border: '1px solid ' + (on ? (color || 'var(--accent)') : 'var(--border-2)'),
+        background: on ? (color ? hexToRgba(color, 0.18) : 'var(--bg-row-sel)') : 'var(--bg-surface)',
+        color: on ? (color || 'var(--accent)') : 'var(--text-3)',
         fontFamily: 'inherit', fontSize: icon ? 13 : 11, fontWeight: 700,
         letterSpacing: '0.03em', cursor: 'pointer', whiteSpace: 'nowrap',
-      }}>{label}</button>
+      }}>
+      {label}
+      {pos && title && (
+        <span ref={tipRef} style={{
+          position: 'fixed', left: pos.x + 14, top: pos.y - 12, transform: 'translateY(-100%)',
+          zIndex: 1200, pointerEvents: 'none', whiteSpace: 'nowrap',
+          padding: '3px 7px', borderRadius: 6, border: '1px solid var(--border-2)',
+          background: 'var(--bg-surface-2)', color: 'var(--text-1)',
+          fontSize: 11, fontWeight: 600, letterSpacing: 0,
+        }}>{title}</span>
+      )}
+    </button>
   );
 }
 

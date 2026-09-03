@@ -196,8 +196,9 @@ function closeDom(dom) {
 // one button only IT owns ("Delete this note"), which is what keeps the
 // ambiguous labels -- Journal and Calendar are also BINDER TAB labels --
 // unambiguous without adding test hooks to shipped code.
-// S5 S3 turned the flag row into icons. Each flag's title has a SET and an
-// UNSET form, so a button is addressed by whichever of its two titles it wears.
+// S5 S3 turned the flag row into icons, and the cursor-anchored tooltip moved
+// the name from `title` to `aria-label`. Each flag's label has a SET and an
+// UNSET form, so a button is addressed by whichever of its two it wears.
 const FLAG_TITLES = {
   Task: ['Task', 'Make this a task'],
   Remind: ['Reminder at', 'Set a reminder'],
@@ -243,7 +244,7 @@ function domKit(dom, container) {
       calendar: 'Scheduled jobs and dated notes', contacts: 'Clients, distributors and PMs',
     })[name] + '"]'),
     esc: (el) => el.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
-    flagRows: () => all('button[title="Delete this note"]').map(b => b.parentElement),
+    flagRows: () => all('button[aria-label="Delete this note"]').map(b => b.parentElement),
     // Two panels render a flag row: the PAD (index 0) and the Journal editor
     // (last, bound to the note just clicked). Since S5 S3 the pad's toolbar is
     // mounted UNCONDITIONALLY -- that is what mint-then-flag needs -- so index 0
@@ -252,14 +253,14 @@ function domKit(dom, container) {
     // `row()` at the WRONG note -- the Calendar modal then opened on an
     // unflagged jotting, so no "Remove flag" existed and the click threw. Default
     // to the LAST row: it is the editor the preceding row() click actually bound.
-    // S5 S3: the buttons are ICONS, so the title is the only stable handle --
-    // it is the sole place the flag name still appears, in both states.
+    // S5 S3: the buttons are ICONS, so the aria-label is the only stable handle
+    // -- it is the sole place the flag name still appears, in both states.
     flagBtn: (label, which) => {
       const rows = kit.flagRows();
       const r = which == null ? rows[rows.length - 1] : rows[which];
       const pre = FLAG_TITLES[label] || [label];
       return r ? Array.from(r.querySelectorAll('button'))
-        .find(b => pre.some(t => (b.getAttribute('title') || '').indexOf(t) === 0)) : null;
+        .find(b => pre.some(t => (b.getAttribute('aria-label') || '').indexOf(t) === 0)) : null;
     },
     field: (labelText) => {
       const l = all('label').find(x => x.textContent.trim().startsWith(labelText));
@@ -316,7 +317,7 @@ async function flagRowChecks() {
   // selected means no journal flag row, selecting a note means exactly one. A
   // container-wide count would just encode "pad toolbar plus journal row".
   const journalAside = () => Array.from(container.querySelectorAll('aside')).pop();
-  const journalFlagRows = () => journalAside().querySelectorAll('button[title="Delete this note"]').length;
+  const journalFlagRows = () => journalAside().querySelectorAll('button[aria-label="Delete this note"]').length;
   ok('flags: NO JOURNAL flag row until a note is selected (nothing selected = nothing to flag)',
     journalFlagRows() === 0, String(journalFlagRows()));
   // The half S3 deliberately reversed, stated outright so it reads as a
@@ -334,14 +335,14 @@ async function flagRowChecks() {
   // by accident of the pad row not existing yet. 'plain jotting' carries no
   // flags, so every title below is its unset form.
   const editorRow = () => k.flagRows()[k.flagRows().length - 1];
-  const labels = Array.from(editorRow().querySelectorAll('button')).map(b => b.getAttribute('title'));
+  const labels = Array.from(editorRow().querySelectorAll('button')).map(b => b.getAttribute('aria-label'));
   ok('flags: the row ships task / reminder / calendar / parts / journal / WO link + delete',
     labels.join('|') === 'Make this a task|Set a reminder|Put this on a day|Record a parts order|'
       + 'Star this into the journal|Link a work order|Delete this note', labels.join('|'));
   ok('flags: there is NO contact button (ruling 3 defers contacts to S7)',
     labels.every(t => t.toLowerCase().indexOf('contact') === -1), labels.join('|'));
-  ok('flags: every button carries a hover tooltip (a title attribute)',
-    Array.from(editorRow().querySelectorAll('button')).every(b => (b.getAttribute('title') || '').length > 0),
+  ok('flags: every button carries a hover tooltip (an aria-label)',
+    Array.from(editorRow().querySelectorAll('button')).every(b => (b.getAttribute('aria-label') || '').length > 0),
     JSON.stringify(labels));
 
   // ── task ──
@@ -388,9 +389,10 @@ async function flagRowChecks() {
   // carries a button labelled with the number, and two same-labelled buttons
   // doing different things in one panel is a trap. So linkage shows in the
   // TITLE, and the NUMBER labels the jump button.
+  const linkLabel = () => { const b = k.flagBtn('Link WO'); return b ? b.getAttribute('aria-label') : null; };
   ok('wo link: a linked note says so in the flag title, and the jump row carries the number',
-    (k.flagBtn('Link WO') || {}).title === 'Linked to WO-1 - click to change' && !!k.btn('WO-1'),
-    JSON.stringify([(k.flagBtn('Link WO') || {}).title, !!k.btn('WO-1')]));
+    linkLabel() === 'Linked to WO-1 - click to change' && !!k.btn('WO-1'),
+    JSON.stringify([linkLabel(), !!k.btn('WO-1')]));
   k.click(k.flagBtn('Parts')); await tick();
   ok('parts: the ship-to address PREFILLS from the linked work order',
     k.field('Ship-to address').value === '9 Elm St, Trenton', k.field('Ship-to address').value);

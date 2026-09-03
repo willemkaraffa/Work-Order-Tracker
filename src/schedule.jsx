@@ -3,7 +3,7 @@
 // by the WO command center. Shared WO helpers import from app.jsx (live ES
 // bindings; app.jsx <-> schedule.jsx cycle is eval-safe).
 import React from 'react';
-import { statusColor } from './constants.js';
+import { statusColor, FLAG_COLORS } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate, deriveMilestones,
   groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle, orderMatchesQuery,
@@ -656,15 +656,18 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // MODULE-LEVEL Escape. composerKey / journalKey only fire while focus sits in
   // their textarea, so after clicking a note ROW the key went nowhere and the
   // note stayed bound with no way back to the quick-nav. Binds ONCE with a
-  // stable handler and reads the live values off a ref updated each render, so
-  // the listener never closes over stale pad / jrn / tab / flagOpen (A6), and
-  // the cleanup removes exactly what was added (A7). A flag modal owns the
-  // screen when it is open (Modal deliberately ignores Escape), and a keypress
-  // already inside either textarea belongs to the handlers above -- both are
-  // skipped here so nothing double-fires. clear() flushes first, so nothing
-  // typed is lost.
+  // stable handler and reads the live values off a ref refreshed after each
+  // render, so the listener never closes over stale pad / jrn / tab / flagOpen
+  // (A6), and the cleanup removes exactly what was added (A7). The refresh is a
+  // LAYOUT effect, not a render-body write: writing a ref during render is not
+  // pure, and a layout effect still lands before any keypress can reach the
+  // handler, so there is no frame where Escape reads last render's values.
+  // A flag modal owns the screen when it is open (Modal deliberately ignores
+  // Escape), and a keypress already inside either textarea belongs to the
+  // handlers above -- both are skipped here so nothing double-fires. clear()
+  // flushes first, so nothing typed is lost.
   const escRef = React.useRef(null);
-  escRef.current = { tab, pad, jrn, flagOpen };
+  React.useLayoutEffect(() => { escRef.current = { tab, pad, jrn, flagOpen }; });
   React.useEffect(() => {
     const onKey = (ev) => {
       if (ev.key !== 'Escape') return;
@@ -857,8 +860,23 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // render and drop focus mid-click.
   //   activeId -- the row currently loaded in an editor, drawn with a ring
   //   onPick   -- what a click does (load into the pad / select in the journal)
-  //   marks    -- quick-nav markers, e.g. ['Pinned', 'Task']
-  const padRow = (note, activeId, onPick, marks) => {
+  // S5: the row draws its own DOTS -- the same glyph the toolbar uses for each
+  // SET flag, in its FLAG_COLORS hue -- so the colour coding reaches the LIST
+  // and not just the one note an editor holds. Derived from the note at render,
+  // never stored. This RETIRED the old `marks` parameter: only the quick-nav
+  // passed it, and its ['Pinned', 'Task'] is two of these dots in less space.
+  const padRow = (note, activeId, onPick) => {
+    const f = note.flags || {};
+    const dots = [];
+    if (f.task) dots.push(['task', '✓', FLAG_COLORS.task]);
+    if (f.reminder) dots.push(['reminder', '◷', FLAG_COLORS.reminder]);
+    if (f.calendar) dots.push(['calendar', '▦', FLAG_COLORS.calendar]);
+    if (f.parts) dots.push(['parts', '⚙', FLAG_COLORS.parts]);
+    if (f.journal) dots.push(['journal', '★', FLAG_COLORS.journal]);
+    if (note.woId) dots.push(['wo', '#', FLAG_COLORS.wo]);
+    // Pinned is not a flag and owns no hue: the accent is what says pinned
+    // everywhere else in this module.
+    if (note.pinned) dots.push(['pinned', '⚑', 'var(--accent)']);
     const lines = String(note.body || '').split('\n');
     const first = lines.findIndex(l => l.trim());
     const rest = first < 0 ? '' : lines.slice(first + 1).join(' ').trim();
@@ -884,15 +902,10 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
             {rest}
           </div>
         )}
-        {marks && marks.length > 0 && (
+        {dots.length > 0 && (
           <div style={{ display: 'flex', gap: 5, marginTop: 2 }}>
-            {marks.map(m => (
-              <span key={m} style={{
-                fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase',
-                padding: '1px 6px', borderRadius: 999,
-                border: '1px solid ' + (m === 'Pinned' ? 'var(--accent)' : 'var(--border-2)'),
-                color: m === 'Pinned' ? 'var(--accent)' : 'var(--text-3)',
-              }}>{m}</span>
+            {dots.map(([key, glyph, hex]) => (
+              <span key={key} style={{ fontSize: 11, lineHeight: 1, color: hex }}>{glyph}</span>
             ))}
           </div>
         )}
@@ -931,27 +944,27 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, flexShrink: 0,
         padding: '6px 8px', background: 'var(--bg-surface)',
         border: '1px solid var(--border-1)', borderBottom: 'none', borderRadius: '10px 10px 0 0' }}>
-        <NoteFlagBtn icon label="✓" on={!!f.task} onClick={open('task')}
+        <NoteFlagBtn icon color={FLAG_COLORS.task} label="✓" on={!!f.task} onClick={open('task')}
           title={f.task
             ? 'Task' + (f.task.due ? ', due ' + f.task.due : ', no due date') + (f.task.done ? ' (done)' : '')
             : 'Make this a task'} />
-        <NoteFlagBtn icon label="◷" on={!!f.reminder} onClick={open('reminder')}
+        <NoteFlagBtn icon color={FLAG_COLORS.reminder} label="◷" on={!!f.reminder} onClick={open('reminder')}
           title={f.reminder ? 'Reminder at ' + new Date(f.reminder.at).toLocaleString() : 'Set a reminder'} />
-        <NoteFlagBtn icon label="▦" on={!!f.calendar} onClick={open('calendar')}
+        <NoteFlagBtn icon color={FLAG_COLORS.calendar} label="▦" on={!!f.calendar} onClick={open('calendar')}
           title={f.calendar
             ? 'On the calendar ' + f.calendar.date + (f.calendar.start ? ' at ' + f.calendar.start : '')
             : 'Put this on a day'} />
-        <NoteFlagBtn icon label="⚙" on={!!f.parts} onClick={open('parts')}
+        <NoteFlagBtn icon color={FLAG_COLORS.parts} label="⚙" on={!!f.parts} onClick={open('parts')}
           title={f.parts
             ? 'Parts order: ' + ([f.parts.part, f.parts.status, f.parts.po].filter(Boolean).join(' - ') || 'no details yet')
             : 'Record a parts order'} />
-        <NoteFlagBtn icon label={f.journal ? '★' : '☆'} on={!!f.journal} onClick={star}
+        <NoteFlagBtn icon color={FLAG_COLORS.journal} label={f.journal ? '★' : '☆'} on={!!f.journal} onClick={star}
           title={f.journal ? 'Starred into the journal - click to unstar' : 'Star this into the journal'} />
         {/* The glyph never becomes the WO number: the jump row below already
             carries a button labelled with it, and two same-labelled buttons
             doing different things in one panel is a trap. The ring says
             linked, the tooltip says to what. */}
-        <NoteFlagBtn icon label="#" on={!!(note && note.woId)} onClick={open('wo')}
+        <NoteFlagBtn icon color={FLAG_COLORS.wo} label="#" on={!!(note && note.woId)} onClick={open('wo')}
           title={note && note.woId ? 'Linked to ' + note.woId + ' - click to change' : 'Link a work order'} />
         <div style={{ flex: 1 }} />
         {/* Delete stays OUT of the mint path: mint-then-delete is nonsense. */}
@@ -1142,8 +1155,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
               </div>
               <div style={listStyle}>
                 {quickNavShown.length
-                  ? quickNavShown.map(q => padRow(q.note, jrn.id, selectJournal,
-                    [q.pinned ? 'Pinned' : null, q.task ? 'Task' : null].filter(Boolean)))
+                  ? quickNavShown.map(q => padRow(q.note, jrn.id, selectJournal))
                   : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing pinned, no open tasks</div>}
               </div>
             </>)}
