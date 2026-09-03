@@ -237,6 +237,9 @@ function domKit(dom, container) {
         .find(d => d.getAttribute('title') === t) : null;
     },
     btn: (label) => all('button').find(b => b.textContent.trim() === label),
+    // J1b rail filters read "glyph word" (the Seg), so they are addressed by the
+    // WORD; btn's exact match cannot see them.
+    seg: (word) => all('button').find(b => b.textContent.trim().split(' ').pop() === word),
     // The WO picker's rows carry the address after the number, so they are
     // matched on the prefix rather than the whole label.
     btnStarts: (t) => all('button').find(b => b.textContent.trim().startsWith(t)),
@@ -510,6 +513,8 @@ async function storeChecks() {
   // without the flush the store holds the PRE-FLAG body for the whole idle
   // window, which is the same window PAD_IDLE_MS documents as the crash window.
   k.click(k.tab('scratchpad')); await tick();
+  // J1b: the Scratchpad rail opens on TASKS, and every note below is a jotting.
+  k.click(k.seg('Jottings')); await tick();
   k.click(k.row('flag me')); await tick();
   k.typeInto(k.pad(), 'flag me, now edited'); await tick();
   ok('flush: nothing is written yet -- the pad timer is still armed',

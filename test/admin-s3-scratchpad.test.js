@@ -277,11 +277,18 @@ async function composerChecks() {
   ok('pad: the placeholder no longer promises Enter saves',
     (pad().placeholder || '').indexOf('Enter saves') === -1, pad().placeholder);
 
-  // The default body view is the scratchpad, newest first, task note excluded.
-  const rowTitles = Array.from(container.querySelectorAll('div[title]')).map(d => d.getAttribute('title'));
+  // J1b gave this rail a Seg and made TASKS the default, so the jottings list is
+  // one click away. The rail buttons read "glyph word", so match the word.
+  const segBtn = (w) => Array.from(container.querySelectorAll('button'))
+    .find(b => b.textContent.trim().split(' ').pop() === w);
+  const titlesNow = () => Array.from(container.querySelectorAll('div[title]')).map(d => d.getAttribute('title'));
+  ok('scratchpad rail: opens on Tasks, listing the open task and no jottings',
+    titlesNow().join(',') === 'Call vendor', titlesNow().join(','));
+  click(segBtn('Jottings')); await tick();
+  const rowTitles = titlesNow();
   ok('scratchpad view is the DEFAULT body view, newest first',
     rowTitles.indexOf('newest jotting') === 0 && rowTitles.indexOf('older jotting') === 1, rowTitles.join(','));
-  ok('scratchpad view does not list the task note (it stays in the quick-nav)',
+  ok('scratchpad view does not list the task note (it lives under Tasks now)',
     rowTitles.indexOf('Call vendor') === -1, rowTitles.join(','));
 
   // Enter is a NEWLINE. Nothing about a keystroke saves.
@@ -561,6 +568,12 @@ async function binderChecks() {
   // J1 INVERTED the Journal: the list lives on the RAIL and the main pane holds
   // the note, so a note is on screen once, not twice, and navRows is the list.
   const navRows = () => (jAside() ? Array.from(jAside().querySelectorAll('div[title]')) : []);
+  // The rail's own search box (J1b: it is the Journal's only filter now).
+  const typeSearch = (v) => {
+    const el = jAside().querySelector('input[type="text"]');
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(el, v);
+    el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  };
   const navTitles = () => navRows().map(d => d.getAttribute('title'));
   // S5: the quick-nav WORD markers were retired when padRow gained derived flag
   // dots, so the marker is now the glyph and its colour, not the word.
@@ -585,6 +598,8 @@ async function binderChecks() {
     String(dom.window.document.activeElement && dom.window.document.activeElement.tagName));
   // scratchpadNotes = zero flags AND no woId, so the WO-linked note is out and
   // the pinned-but-unflagged one is in. Newest first.
+  // J1b: the column opens on Tasks, so reach the jottings through the filter.
+  click(navBtn('Jottings')); await tick();
   ok('binder: the Scratchpad column shows the jottings only, newest first',
     rowTitles().join('|') === 'newest jotting|pinned policy note|older jotting',
     rowTitles().join('|'));
@@ -612,16 +627,20 @@ async function binderChecks() {
   // lists every note by design, and this case's two halves are asserted verbatim
   // by the Pinned and Tasks filter cases immediately below.
 
-  // [4] the marker filter
-  click(navBtn('Pinned')); await tick();
+  // [4] the marker filter. J1b retired BOTH rail buttons without retiring either
+  // claim: Pinned became a search KEYWORD on this rail, and Tasks moved to the
+  // Scratchpad rail, where it is the default. Same sets, new homes.
+  typeSearch('pinned'); await tick();
   ok('quick-nav: the Pinned filter keeps only pinned entries',
     navTitles().join('|') === 'pinned policy note|Chase the permit', navTitles().join('|'));
+  typeSearch(''); await tick();
+  // Order is backlogNotes' own (open before done, then oldest first), kept
+  // deliberately instead of the journal sort.
+  click(byLabel('Scratchpad')); await tick();
   click(navBtn('Tasks')); await tick();
-  // Same SET as before; the order is backlogNotes' own (open before done, then
-  // oldest first), which J1 keeps deliberately instead of the journal sort.
   ok('quick-nav: the Tasks filter keeps only undated tasks',
     navTitles().join('|') === 'Call vendor|Chase the permit', navTitles().join('|'));
-  click(navBtn('All')); await tick();
+  click(byLabel('Journal')); await tick();
 
   // The Journal's Jottings Seg RETIRED with J1 (one filter, on the rail), so the
   // case that drove it is gone with it. The jottings category itself is still

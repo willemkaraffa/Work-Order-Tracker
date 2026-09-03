@@ -521,7 +521,12 @@ async function entryChecks() {
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
   const click = (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
   const byLabel = (l) => Array.from(container.querySelectorAll('button')).find(b => b.textContent.trim() === l);
+  // Chips only, never rail rows: the Scratchpad rail is mounted on EVERY tab
+  // (hidden with display:none) and J1b made it list undated tasks by default, so
+  // a container-wide div[title] search reaches a rail row before the calendar
+  // chip it meant to find. Every list that is not the calendar sits in an aside.
   const chip = (t) => Array.from(container.querySelectorAll('div[title]'))
+    .filter(d => !d.closest('aside'))
     .find(d => (d.getAttribute('title') || '').indexOf(t) === 0);
 
   render(); await flush();

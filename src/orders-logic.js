@@ -1011,6 +1011,13 @@ export function orderMatchesQuery(o, q) {
 export function noteMatchesQuery(note, order, q) {
   const needle = String(q == null ? '' : q).trim().toLowerCase();
   if (!needle || !note) return false;
+  // J1b: `pinned` is a KEYWORD -- the Pinned rail button retired into the search
+  // box, still reading the note record's existing `pinned` field. UNION with the
+  // two matches below, never a replacement, so a note whose TEXT says pinned is
+  // still found and the keyword can hide nothing. Measured on the live 846-note
+  // store: zero bodies contain pinned / pin / pending / task / star, so the
+  // collision risk is nil today and the union is what keeps it harmless later.
+  if (needle === 'pinned' && note.pinned) return true;
   if (String(note.body || '').toLowerCase().includes(needle)) return true;
   return order ? orderMatchesQuery(order, needle) : false;
 }

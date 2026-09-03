@@ -52,6 +52,37 @@ test('a linked note whose WO and body both miss returns false', () => {
   assert.strictEqual(noteMatchesQuery(linked, WO, 'compressor'), false);
 });
 
+// J1b: `pinned` became a search KEYWORD when the Pinned rail button retired.
+// It is a UNION with the two matches above, which is the whole safety argument.
+const pinned = { id: 'n3', pinned: true, body: 'roof hatch key is with Dan' };
+const notPinned = { id: 'n4', body: 'left the invoice pinned to the door' };
+
+test('the pinned keyword matches a pinned note', () => {
+  assert.strictEqual(noteMatchesQuery(pinned, null, 'pinned'), true);
+  assert.strictEqual(noteMatchesQuery(pinned, null, '  PINNED '), true);
+});
+
+test('the pinned keyword does NOT match an unpinned note', () => {
+  assert.strictEqual(noteMatchesQuery(loose, null, 'pinned'), false);
+});
+
+test('the keyword is a UNION: an unpinned note whose BODY says pinned still matches', () => {
+  assert.strictEqual(noteMatchesQuery(notPinned, null, 'pinned'), true);
+});
+
+test('the keyword is exact: a prefix of it is still plain body matching', () => {
+  // 'pin' must NOT act as the keyword, so a pinned note whose body lacks it misses.
+  assert.strictEqual(noteMatchesQuery(pinned, null, 'pin'), false);
+  assert.strictEqual(noteMatchesQuery(notPinned, null, 'pin'), true);
+});
+
+test('the keyword takes nothing away: a pinned note still matches its own WO', () => {
+  const pinnedLinked = { id: 'n5', woId: '77021', pinned: true, body: 'ordered the blower' };
+  assert.strictEqual(noteMatchesQuery(pinnedLinked, WO, 'cedar'), true);
+  assert.strictEqual(noteMatchesQuery(pinnedLinked, WO, 'blower'), true);
+  assert.strictEqual(noteMatchesQuery(pinnedLinked, WO, 'alder'), false);
+});
+
 test('an unlinked note (no order) never matches a WO term', () => {
   assert.strictEqual(noteMatchesQuery(loose, null, 'cedar'), false);
   assert.strictEqual(noteMatchesQuery(loose, null, '03475941'), false);

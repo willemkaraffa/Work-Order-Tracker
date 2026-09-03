@@ -1,8 +1,8 @@
 # Admin S5 -- Journal / Scratchpad UX rework
 
 Blueprint. Accepted by the user 2026-09-01, in the session that closed S4's last
-test failure and shipped ruling 4 (`6cde4ce`). S1, S2, S3 and J1 are BUILT and
-live-tested; J2 is the one slice still to write.
+test failure and shipped ruling 4 (`6cde4ce`). S1, S2, S3, J1 and J1b are BUILT;
+J2 is the one slice still to write.
 
 This is a UX rework of the **Scheduling & Admin** module (`src/schedule.jsx`),
 not a data change. Nothing here needs a new note field: every value the new views
@@ -107,15 +107,55 @@ and the pane the eye lands on was a list. J1 swaps the two jobs.
   24px flag pills, and the glyphs are the flag work's own: Tasks U+2713 (the task
   flag's glyph), Pinned U+2691 (the pinned dot's glyph), All U+2630.
 
+### J1b -- Split the rails (BUILT)
+
+J1's live pass passed on look. The tooltip, the flag colours and the inset
+notepad all landed. J1b is what the same pass asked for next.
+
+- **The inset notepad treatment is LOCKED by user decision.** Detached from the
+  edges is settled; SIZE is the only part still open. Do not restyle it.
+- **Rail width 260 -> 340.** `asideStyle` in `src/schedule.jsx` is the single
+  source, so one number moves both rails. The reason is J2: the Clients tree
+  nests Client > Property Address > WO#, three deep, and 260 truncates an
+  address hard.
+- **Tasks moved OFF the Journal rail and ONTO the Scratchpad rail, as its
+  DEFAULT.** The pad is where work gets written down, so the open worklist is
+  what that rail should land on. Same `Seg` + `equal` treatment as J1, two
+  options: `✓ Tasks` then `☰ Jottings`. Tasks is `backlogNotes` in ITS own
+  order; Jottings is `scratchpadNotes`, unchanged.
+- **The Scratchpad rail gained a search box**, scoped to its own list, clearing
+  on tab change like the Journal's. A filtered list with no search is what J1
+  had just finished fixing on the other tab.
+- **MEASURED against the live 846-note store, and the user was told before
+  choosing:** Tasks 0, Jottings 4, Pinned 59. This rail therefore OPENS EMPTY
+  until task flags get used. That is a data state, not a defect (the task flag
+  shipped days ago), and the user reaffirmed Tasks-first knowing it. The empty
+  state says nothing is open, never anything that reads as broken.
+- **Pinned retired as a button and became a SEARCH KEYWORD.** It keeps its name
+  and keeps reading `note.pinned`; no new field. In `noteMatchesQuery`
+  (`src/orders-logic.js`), a needle of exactly `pinned` matches a pinned note as
+  a **UNION** with the existing body and WO matching, never a replacement, so a
+  note whose TEXT says pinned is still found and the keyword can hide nothing.
+  Measured on the same store: **zero of 846 bodies contain pinned, pin, pending,
+  task or star**, so collision risk is nil today and the union is what keeps it
+  harmless if that changes. Both search boxes teach the keyword in their
+  placeholder and title, because an undiscoverable filter is not a filter.
+- **The Journal rail lost its buttons entirely**: search box, count, list. With
+  Tasks and Pinned gone only All was left, and a one-option `Seg` is noise.
+  `navFilter` retired with them.
+
 ### J2 -- The Clients tree (NOT BUILT)
 
-The user's rail set is **Clients, Tasks, Pinned, All**. J1 shipped the last
-three. Clients is this slice, and J1 deliberately does NOT render a dead button
-for it.
+The user's original rail set was **Clients, Tasks, Pinned, All**. J1b resettled
+three of those elsewhere: Tasks lives on the Scratchpad rail, Pinned is a search
+keyword, and All is simply what the unfiltered Journal rail shows. So J2 adds a
+**two-option `Seg`, Clients versus All**, NOT the original four buttons, and
+brings back its own filter state (J1b retired `navFilter`).
 
 - Clients is a tree in the rail: `Client -> Property Address -> WO#`. The field
   reuse table above already fixes every field it needs; do not add one.
 - Selecting a WO# fills the main pane with that WO's notes.
+- The rail is 340 wide as of J1b, sized for exactly this nesting.
 - **The collapse rule below governs this slice.** It is the mitigation for the
   risk J1 exists to answer: a tree re-clutters the very surface this rework
   quietened, unless collapse-by-default actually holds.

@@ -520,6 +520,19 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // NOT tech-filtered like entriesOn: a scratchpad note is by definition
   // unflagged and the composer cannot set a tech, so the filter could never bite.
   const scratch = React.useMemo(() => scratchpadNotes(notes), [notes]);
+  // J1b: Tasks moved OFF the Journal rail and onto this one, and opens DEFAULT --
+  // the pad is where work gets written down, so the open worklist is what the
+  // rail should land on. Tasks is backlogNotes in ITS own order (open before
+  // done, then oldest first); Jottings is scratchpadNotes, unchanged. Both
+  // honour the search box.
+  const [sFilter, setSFilter] = React.useState('tasks');
+  const [sQuery, setSQuery] = React.useState('');
+  const scratchShown = React.useMemo(() => {
+    const base = sFilter === 'jottings' ? scratch : backlogNotes(notes);
+    const q = sQuery.trim();
+    if (!q) return base;
+    return base.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
+  }, [scratch, notes, sFilter, sQuery, orders]);
 
   // JOURNAL body: EVERY note, newest first, jottings included. Sorted on `ts`
   // (written-at), never `updated`, so editing an old note does not jump it --
@@ -533,29 +546,19 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // The box is a Journal filter, not a module-wide one: carrying its text to
   // another tab and back leaves the user staring at a filtered list they no
   // longer remember typing.
-  React.useEffect(() => { setJQuery(''); }, [tab]);
+  React.useEffect(() => { setJQuery(''); setSQuery(''); }, [tab]);
   // Type-to-search, the same hook the other modules use. Disabled off the
   // Journal tab so a keystroke meant for the Scratchpad pad is never stolen.
   useTypeToSearch({ setValue: setJQuery, inputRef: jSearchRef, disabled: tab !== 'journal' });
-  // J1: ONE derived list, feeding the rail. `jFilter` and `navFilter` were two
-  // filters over the same notes on one screen, so the body Seg retired and this
-  // is what is left:
-  //   all     -- the `journal` memo, newest first
-  //   pinned  -- the note record's EXISTING `pinned` field, newest first
-  //   tasks   -- backlogNotes in ITS OWN order (open before done, then oldest
-  //              first), deliberately NOT the journal sort, so it stays a
-  //              worklist rather than a feed
-  // All three honour the search box; the old split, where only the body list
-  // searched and the quick-nav did not, is gone.
-  const [navFilter, setNavFilter] = React.useState('all');
+  // J1 collapsed the Journal's two filters into one; J1b emptied it. Tasks left
+  // for the Scratchpad rail and Pinned became a search KEYWORD, so every note is
+  // the only view here and `navFilter` retired with the buttons -- J2 brings its
+  // own state back when Clients vs All exists. The search box is the filter now.
   const navShown = React.useMemo(() => {
-    const base = navFilter === 'pinned' ? journal.filter(n => n.pinned)
-      : navFilter === 'tasks' ? backlogNotes(notes)
-      : journal;
     const q = jQuery.trim();
-    if (!q) return base;
-    return base.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
-  }, [journal, notes, navFilter, jQuery, orders]);
+    if (!q) return journal;
+    return journal.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
+  }, [journal, jQuery, orders]);
 
   // ── The two editors ───────────────────────────────────────────────────────
   // Both run the SAME autosave discipline (useAutosave above). The pad mints new
@@ -953,19 +956,24 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   };
 
   const emptyLine = <div style={{ padding: 16, color: 'var(--text-3)', fontSize: 13 }}>No jobs scheduled</div>;
-  const colHead = (label, count) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
-      borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
-      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-        {label}
-      </span>
-      {count != null && <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{count}</span>}
-    </div>
-  );
+  // 340, not 260: J2's Clients tree nests Client > Property Address > WO#, three
+  // deep, and 260 truncates an address hard. ONE source, so both rails move.
   const asideStyle = {
-    width: 260, flexShrink: 0, borderLeft: '1px solid var(--border-1)',
+    width: 340, flexShrink: 0, borderLeft: '1px solid var(--border-1)',
     display: 'flex', flexDirection: 'column', minHeight: 0,
   };
+  // Both rails wear the same head: filter (where there is one), search, count.
+  const railHeadStyle = {
+    flexShrink: 0, padding: '10px 10px 8px', borderBottom: '1px solid var(--border-1)',
+    display: 'flex', flexDirection: 'column', gap: 8,
+  };
+  const searchStyle = {
+    width: '100%', height: 30, padding: '0 10px',
+    border: '1px solid var(--border-2)', borderRadius: 6,
+    background: 'var(--bg-canvas)', color: 'var(--text-1)',
+    fontFamily: 'inherit', fontSize: 12, boxSizing: 'border-box',
+  };
+  const SEARCH_TITLE = 'Search notes, WO number or address. The word pinned lists pinned notes.';
   const listStyle = {
     flex: 1, minHeight: 0, overflow: 'auto', padding: 8,
     display: 'flex', flexDirection: 'column', gap: 6,
@@ -1028,11 +1036,40 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           </div>
         </div>
         <aside style={{ ...asideStyle, display: tab === 'scratchpad' ? 'flex' : 'none' }}>
-          {colHead('Jottings', scratch.length)}
+          {/* Same rail treatment as the Journal. Tasks reuses the task flag's own
+              U+2713; Jottings takes U+2630, the list glyph, free this slice
+              because the Journal rail's All button retires in it. */}
+          <div style={railHeadStyle}>
+            <Seg
+              equal
+              options={[
+                { value: 'tasks', label: '✓ Tasks' },
+                { value: 'jottings', label: '☰ Jottings' },
+              ]}
+              value={sFilter}
+              onChange={setSFilter}
+            />
+            <input
+              type="text"
+              value={sQuery}
+              onChange={(e) => setSQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setSQuery(''); } }}
+              placeholder="Search notes or pinned"
+              title={SEARCH_TITLE}
+              style={searchStyle}
+            />
+            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+              {scratchShown.length} {scratchShown.length === 1 ? 'note' : 'notes'}
+            </span>
+          </div>
           <div style={listStyle}>
-            {scratch.length
-              ? scratch.map(n => padRow(n, pad.id, editInComposer))
-              : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>Nothing yet. The pad is waiting.</div>}
+            {scratchShown.length
+              ? scratchShown.map(n => padRow(n, pad.id, editInComposer))
+              : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>
+                {sFilter === 'tasks'
+                  ? 'Nothing open. Flag a note as a task and it lands here.'
+                  : 'Nothing yet. The pad is waiting.'}
+              </div>}
           </div>
         </aside>
 
@@ -1094,50 +1131,29 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         )}
         {tab === 'journal' && (
           <aside style={asideStyle}>
-            {/* Glyphs stay consistent with the flag work on purpose: Tasks is the
-                task flag's own U+2713, Pinned is the pinned dot's own U+2691.
-                Bigger than the 24px flag pills because this is navigation, not a
-                toggle. Clients is J2 and is deliberately NOT rendered dead. */}
-            <div style={{ flexShrink: 0, padding: '10px 10px 8px', borderBottom: '1px solid var(--border-1)',
-              display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {/* ONE count, bound to navShown, so it answers the filter AND the
-                  search together -- more than either retired count did alone. */}
-              <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                {navShown.length} {navShown.length === 1 ? 'note' : 'notes'}
-              </span>
-              <Seg
-                equal
-                options={[
-                  { value: 'tasks', label: '✓ Tasks' },
-                  { value: 'pinned', label: '⚑ Pinned' },
-                  { value: 'all', label: '☰ All' },
-                ]}
-                value={navFilter}
-                onChange={setNavFilter}
-              />
+            {/* J1b left this rail with NO filter buttons: Tasks moved to the
+                Scratchpad rail, Pinned became a search keyword, and Clients is
+                J2, so a one-option Seg would be pure noise. J2 adds Clients vs
+                All when the tree exists. */}
+            <div style={railHeadStyle}>
               <input
                 ref={jSearchRef}
                 type="text"
                 value={jQuery}
                 onChange={(e) => setJQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setJQuery(''); } }}
-                placeholder="Search notes"
-                title="Search notes, WO number or address"
-                style={{
-                  width: '100%', height: 30, padding: '0 10px',
-                  border: '1px solid var(--border-2)', borderRadius: 6,
-                  background: 'var(--bg-canvas)', color: 'var(--text-1)',
-                  fontFamily: 'inherit', fontSize: 12,
-                  boxSizing: 'border-box',
-                }}
+                placeholder="Search notes or pinned"
+                title={SEARCH_TITLE}
+                style={searchStyle}
               />
+              <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+                {navShown.length} {navShown.length === 1 ? 'note' : 'notes'}
+              </span>
             </div>
             <div style={listStyle}>
               {navShown.length
                 ? navShown.map(n => padRow(n, jrn.id, selectJournal))
-                : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>
-                  {navFilter === 'tasks' ? 'No open tasks' : navFilter === 'pinned' ? 'Nothing pinned' : 'No notes yet'}
-                </div>}
+                : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>No notes yet</div>}
             </div>
           </aside>
         )}
