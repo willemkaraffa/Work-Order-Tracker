@@ -1020,7 +1020,21 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // component here would remount every branch on each parent render and lose
   // the twisty mid-click. `open` is null on a leaf, which is what says "no
   // twisty"; `depth` is the only thing that differs between the levels.
-  const treeRow = ({ key, label, count, depth, open, active, onClick }) => (
+  // J4: `dim` greys a work order that carries no user note, and `meta` prints the
+  // invoice date on a sent row. Both are OPTIONAL, so the client and property
+  // levels call this exactly as they did before.
+  // J4 prints the invoice date on a SENT row that has one, and nothing anywhere
+  // else: an active WO has no invoice, and a sent WO without a date is exactly
+  // the row the sort already sank to the bottom.
+  const invoiceDateLabel = (o) => {
+    const d = o && o.tab === 'sent' && o.invoice && o.invoice.date;
+    if (!d) return null;
+    const [y, mo, dd] = String(d).split('-').map(Number);
+    if (!y || !mo || !dd) return null;
+    return new Date(y, mo - 1, dd, 12).toLocaleDateString();
+  };
+
+  const treeRow = ({ key, label, count, depth, open, active, dim, meta, onClick }) => (
     <button key={key} onClick={onClick} title={label}
       style={{
         width: '100%', display: 'flex', alignItems: 'center', gap: 7,
@@ -1028,7 +1042,7 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         background: active ? 'var(--accent)' : 'transparent',
         // J3 UX pass: the address line read too light to scan. Every level now
         // takes --text-1; DEPTH is carried by indent and weight alone.
-        color: active ? 'var(--accent-fg)' : 'var(--text-1)',
+        color: active ? 'var(--accent-fg)' : dim ? 'var(--text-3)' : 'var(--text-1)',
         border: 'none', borderRadius: 0, cursor: 'pointer', textAlign: 'left',
         // Subtle divider between items, which is what the same pass asked for.
         // The list sets gap 0 so these read as one ruled column.
@@ -1041,7 +1055,14 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {label}
       </span>
-      <span style={{ fontSize: 11, flexShrink: 0, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{count}</span>
+      {meta && (
+        <span style={{ fontSize: 11, flexShrink: 0, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{meta}</span>
+      )}
+      {/* A greyed WO has no notes to count, and printing 0 on every one of them
+          is noise, not information. The absence IS the count. */}
+      {count > 0 && (
+        <span style={{ fontSize: 11, flexShrink: 0, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{count}</span>
+      )}
     </button>
   );
 
@@ -1366,7 +1387,8 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                           open: searching || openProp === p.name, onClick: () => pickProp(p.name) })}
                         {(searching || openProp === p.name) && p.wos.map(w => treeRow({
                           key: w.id, label: w.id, count: w.count, depth: 2,
-                          open: null, active: jWo === w.id, onClick: () => pickWo(w.id),
+                          open: null, active: jWo === w.id, dim: w.count === 0,
+                          meta: invoiceDateLabel(w.order), onClick: () => pickWo(w.id),
                         }))}
                       </React.Fragment>
                     ))}

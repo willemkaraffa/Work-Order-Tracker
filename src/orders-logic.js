@@ -81,18 +81,31 @@ export function ageLevelForDays(n) {
 // 'sent' (see the tab model rework below), so it never reaches this function. Do not
 // re-add a 'paid' branch here; it would be dead code. A stale comment claiming paid
 // returned null is what led a review agent to "fix" an unreachable case.
+// WHEN a WO was completed. There is no such FIELD, so it is derived: the most
+// recent 'marked complete' / 'auto-flipped to complete' history entry. Null when
+// the WO carries neither (e.g. imported pre-change11) -- the caller decides what
+// a missing completion means, because the two callers disagree: the aging tint
+// falls back to dateCreated so it is not misleadingly fresh, while J4's sort
+// keeps the row in its band and drops it to the bottom.
+//
+// ONE completion rule. J4 needed the timestamp and ageDaysFor already owned the
+// scan; a second walk beside this one would be two rules drifting apart.
+export function completedTsFor(o) {
+  const h = o && Array.isArray(o.history) ? o.history : [];
+  for (let i = h.length - 1; i >= 0; i--) {
+    const a = String((h[i] && h[i].action) || '').toLowerCase();
+    if (a.includes('marked complete') || a.includes('auto-flipped to complete')) return h[i].ts;
+  }
+  return null;
+}
+
 export function ageDaysFor(o) {
   if (!o) return null;  // sparse/hand-edited records: o.tab would throw
   const tab = o.tab || 'active';
   if (tab === 'sent') return null;
   if (tab === 'complete') {
-    const h = Array.isArray(o.history) ? o.history : [];
-    for (let i = h.length - 1; i >= 0; i--) {
-      const a = String(h[i].action || '').toLowerCase();
-      if (a.includes('marked complete') || a.includes('auto-flipped to complete')) {
-        return Math.floor((Date.now() - h[i].ts) / 86400000);
-      }
-    }
+    const ts = completedTsFor(o);
+    if (ts) return Math.floor((Date.now() - ts) / 86400000);
     // Fallback: WO was on tab='complete' without a marked/auto-flipped entry
     // (e.g. imported pre-change11). Use dateCreated so the aging tint is not
     // misleadingly fresh.
@@ -1079,9 +1092,52 @@ export function noteTreeKeys(order) {
 // A note with no woId, or one whose woId names no order, has NO client and is
 // deliberately absent from this tree. Those stay reachable under All. That is
 // correct behaviour, not a missing link.
+// J4: a TRASHED work order never appears anywhere in this tree, not even as the
+// home of a note. Cancelled work is of no concern here (68 of 724 at spec time).
+// A note whose WO is trashed therefore drops out of Admin entirely: journalFolders
+// skips it too, because it carries a woId. That is the ruling, not an oversight.
+const isTrashedOrder = o => !!(o && (o.deleted || o.tab === 'trash'));
+
+// J4's sort BAND: active work first, then complete, then sent. The tab is the
+// band; within a band the key differs, which is why this is three comparisons
+// and not one.
+const TAB_BAND = { active: 0, complete: 1, sent: 2 };
+const bandOf = o => {
+  const b = TAB_BAND[(o && o.tab) || 'active'];
+  return b === undefined ? 0 : b;
+};
+// Position in the workflow, NOT alphabetical. An unknown status (user-renamed,
+// or legacy) sorts after every known one instead of jumping to the front.
+const statusPos = (o) => {
+  const i = DEFAULT_STATUSES.indexOf(String((o && o.status) || ''));
+  return i === -1 ? DEFAULT_STATUSES.length : i;
+};
+// Sent WOs are ordered by INVOICE date, and the dateless ones sink. That is the
+// common case, not an edge: `invoice` exists on 215 of 724 orders while 614 sit
+// in the sent tab, so roughly 400 sent WOs have no date to sort on.
+const invoiceMs = (o) => {
+  const d = o && o.invoice && o.invoice.date;
+  const t = d ? Date.parse(d) : NaN;
+  return Number.isNaN(t) ? null : t;
+};
+// Newest first inside COMPLETE and SENT (ruled by the user 2026-09-08), and the
+// dateless always last regardless of direction.
+const newestFirst = (a, b) => (a === null ? 1 : b === null ? -1 : b - a);
+
+// The J4 order for one property's work orders. Exported so the test can ask the
+// question directly instead of inferring it from a whole tree.
+export function sortTreeWos(orders) {
+  return [...(orders || [])].sort((a, b) =>
+    bandOf(a.order) - bandOf(b.order)
+    || (bandOf(a.order) === 0 ? statusPos(a.order) - statusPos(b.order) : 0)
+    || (bandOf(a.order) === 1 ? newestFirst(completedTsFor(a.order), completedTsFor(b.order)) : 0)
+    || (bandOf(a.order) === 2 ? newestFirst(invoiceMs(a.order), invoiceMs(b.order)) : 0)
+    || String(a.id).localeCompare(String(b.id)));
+}
+
 export function clientTree(notes, orders) {
   const byId = new Map();
-  for (const o of orders || []) if (o && o.id) byId.set(o.id, o);
+  for (const o of orders || []) if (o && o.id && !isTrashedOrder(o)) byId.set(o.id, o);
   const clients = new Map();
   for (const n of notes || []) {
     if (!n || !n.woId) continue;
@@ -1095,6 +1151,18 @@ export function clientTree(notes, orders) {
     p.wos.set(o.id, (p.wos.get(o.id) || 0) + 1);
     c.count++; p.count++;
   }
+  // J4: the CLIENT and PROPERTY levels stay note-derived -- that exclusion is
+  // what the S7 note in the blueprint contrasts itself against -- but a property
+  // the notes opened then lists EVERY work order standing at it, note or none.
+  // The zero-count ones are what the rail greys.
+  const propsOpened = new Set();
+  for (const c of clients.values()) for (const p of c.props.keys()) propsOpened.add(c.name + ' ' + p);
+  for (const o of byId.values()) {
+    const k = noteTreeKeys(o);
+    if (!propsOpened.has(k.client + ' ' + k.prop)) continue;
+    const p = clients.get(k.client).props.get(k.prop);
+    if (!p.wos.has(o.id)) p.wos.set(o.id, 0);
+  }
   const byName = (a, b) => String(a.name).localeCompare(String(b.name));
   return [...clients.values()].map(c => ({
     name: c.name,
@@ -1102,8 +1170,10 @@ export function clientTree(notes, orders) {
     props: [...c.props.values()].map(p => ({
       name: p.name,
       count: p.count,
-      wos: [...p.wos.entries()].map(([id, count]) => ({ id, count }))
-        .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+      // `order` rides along so the row can print an invoice date and the sort
+      // can read history without a second lookup. count 0 IS the greyed state:
+      // no parallel `noted` flag to fall out of step with it.
+      wos: sortTreeWos([...p.wos.entries()].map(([id, count]) => ({ id, count, order: byId.get(id) }))),
     })).sort(byName),
   })).sort(byName);
 }
