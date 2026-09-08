@@ -198,11 +198,11 @@ the slice.
 3. **The contact flag is DEFERRED to S7.** It needs contact records that do not
    exist yet. `normalizeFlags` keeps tolerating the key either way. HONOURED.
 4. **The `o.history` gap gets fixed for add, update AND delete together.** Ruled
-   after the gate went red. See the next section. NOT STARTED.
+   after the gate went red. See the next section. SHIPPED `6cde4ce`.
 
 ---
 
-## OPEN WORK ITEM ruled this session but not started: the `o.history` gap
+## Ruled this session, SHIPPED afterwards in `6cde4ce`: the `o.history` gap
 
 S1's overseer ruling was that note handlers append the order's `o.history` line
 for notes carrying a `woId`, because the trail belongs to the work order; a
@@ -228,8 +228,18 @@ line continues the pattern. **The user ruled: fix all three together**, so there
 is one consistent rule instead of three exceptions, rather than patching only the
 delete that S4 introduced.
 
-This needs `src/app.jsx` work and will widen scope again. Get the architect's
-scope ruling before touching it.
+This needed `src/app.jsx` work and did widen scope. DONE in `6cde4ce`, the
+session that closed S4's last test failure. Three wrappers at `src/app.jsx:5541`
+(`scheduleAddNote` / `scheduleUpdateNote` / `scheduleDeleteNote`) carry the
+MODULE's signatures, `(record)` / `(noteId, patch)` / `(noteId)`, not the detail
+pane's, and they are what `ScheduleModule` is wired to at `src/app.jsx:6500-6502`.
+`scheduleUpdateNote` lets `patch.woId` win, so linking a WO writes the entry to
+the WO being linked; `scheduleDeleteNote` reads the note BEFORE deleting it,
+since afterwards the `woId` is gone. A `woId`-null note still writes no history,
+which is the S1 rule unchanged.
+
+STILL UNCOVERED: no test names these three, or `noteHistory`. The fix is
+live-proven and committed, not test-pinned. Coverage is the open follow-up here.
 
 ---
 
@@ -395,8 +405,9 @@ whole output.
 
 ## What is NOT done
 
-- **Ruling 4 (the `o.history` gap for add + update + delete) is still NOT
-  STARTED.** Unchanged by this session.
+- ~~**Ruling 4 (the `o.history` gap for add + update + delete).**~~ SHIPPED
+  `6cde4ce` after this session. Its only remaining debt is TEST COVERAGE: no
+  test names the three wrappers or `noteHistory`.
 - **Live Electron pixels: still nobody.** Unchanged, and still the S4 done-gate.
 - The invoices work that this gate blocked (`src/orders-logic.js`,
   `src/invoices.jsx`, `test/sent-to-invoice-date.test.js`,
