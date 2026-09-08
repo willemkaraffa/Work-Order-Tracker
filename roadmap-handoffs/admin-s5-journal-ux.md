@@ -387,3 +387,28 @@ with levels expanded by default, that slice has failed its own purpose.
 Unchanged from the rest of the project: `npm run verify` green, plus a **live
 Electron look** for anything observable, because every slice here is observable
 by definition. A green suite alone does not close a UX slice.
+
+---
+
+## Unit coverage for J2 and J3 (LANDED)
+
+`test/journal-client-tree.test.js`, fixture-free, imports the SHIPPED exports
+through `test/_load.js`. 16 cases, all green. What it pins:
+
+- **clientTree (J2)**: three-deep grouping Client > Property > WO#, `noteTreeKeys`
+  field reuse (`pm` is the client, `address` + `city` the property, `id` the WO
+  number), the `(no client)` / `(no address)` fallbacks, two WOs at one address
+  sharing ONE property branch, the roll-up counts the rail prints, and the
+  deliberate ABSENCE of a note with no `woId` or with a `woId` naming no order.
+  Also that the tree groups only what it is HANDED, which is the contract the
+  search filter relies on, and that the WO pane's `notesForOrder` agrees with the
+  branch count.
+- **journalFolders (J3)**: non-WO notes only, Jottings ALWAYS first as the null
+  bucket (so no existing note needs migration), present even when empty, and
+  named folders alphabetical after it. Plus `folder` surviving `normalizeNote`'s
+  whitelist, and the user-note rule (`isImportedNote` tests the BODY, never the
+  id, against the one shared `IMPORTED_NOTE_PREFIX`).
+
+Rail RENDERING stays covered where it already was: `admin-s3-scratchpad.test.js`
+walks the live Clients route, and `admin-s4-flags.test.js` was repaired against
+the J3 restructure in the same commit that shipped it.
