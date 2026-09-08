@@ -7,7 +7,8 @@ import { statusColor, FLAG_COLORS } from './constants.js';
 import {
   isLiveSchedule, weekDays, monthGrid, groupByScheduleDate, deriveMilestones,
   groupNotesByDate, backlogNotes, scratchpadNotes, noteTitle, orderMatchesQuery,
-  noteMatchesQuery,
+  noteMatchesQuery, clientTree, noteTreeKeys, notesForOrder, isImportedNote,
+  journalFolders,
 } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 import { TypeIcon, Seg, ActionBtn, BinderTabs, NoteFlagBtn } from './primitives.jsx';
@@ -421,6 +422,40 @@ function WoLinkModal({ note, orders, onPick, onClose }) {
   );
 }
 
+// J3: pick the accordion a NON-WO note sits in. Folders are DERIVED from the
+// notes that cite them, so creating one is just typing a name on a note -- there
+// is no folder list to keep in step, and a folder empties out of existence when
+// its last note leaves. Jottings is the null bucket, never the string.
+function FolderModal({ note, folderNames, onPick, onClose }) {
+  const [name, setName] = React.useState('');
+  const clean = name.trim();
+  return (
+    <Modal open onClose={onClose} title="Move this note" width={380}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <label style={lbl}>New folder
+          <input value={name} onChange={(e) => setName(e.target.value)} autoFocus
+            onKeyDown={(e) => { if (e.key === 'Enter' && clean) { e.preventDefault(); onPick(clean); } }}
+            placeholder="Type a name, press Enter" style={fld} />
+        </label>
+        <div style={{ maxHeight: 220, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {[null, ...folderNames].map(key => (
+            <button key={key === null ? '(jottings)' : key} type="button" onClick={() => onPick(key)} style={{
+              textAlign: 'left', padding: '7px 9px', borderRadius: 8, cursor: 'pointer',
+              border: '1px solid ' + ((note.folder || null) === key ? 'var(--accent)' : 'var(--border-1)'),
+              background: 'var(--bg-surface)', color: 'var(--text-1)',
+              fontFamily: 'inherit', fontSize: 13,
+            }}>{key === null ? 'Jottings' : key}</button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          {clean && <ActionBtn onClick={() => onPick(clean)}>Create "{clean}"</ActionBtn>}
+          <ActionBtn onClick={onClose}>Cancel</ActionBtn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // The ADMIN module: a ring binder, not a calendar. Four sub-modules behind
 // binder tabs -- Scratchpad (a full-height notepad, the landing tab), Journal
 // (every note, newest first, with a pinned + undated-task quick-nav), Calendar
@@ -537,8 +572,12 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // JOURNAL body: EVERY note, newest first, jottings included. Sorted on `ts`
   // (written-at), never `updated`, so editing an old note does not jump it --
   // the same S1 rule scratchpadNotes follows. Derived, so useMemo, never state.
+  // J3's USER-NOTE RULE, applied ONCE here because every Admin surface derives
+  // from this memo: the tree, both search boxes and the WO note pane. Portal-
+  // imported WO information stays in the WO module's own detail pane, which
+  // reads notesForOrder directly and is deliberately untouched.
   const journal = React.useMemo(() => (notes || [])
-    .filter(n => n && n.id)
+    .filter(n => n && n.id && !isImportedNote(n))
     .sort((a, b) => (b.ts || 0) - (a.ts || 0) || String(b.id).localeCompare(String(a.id))),
   [notes]);
   const [jQuery, setJQuery] = React.useState('');
@@ -551,14 +590,70 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // Journal tab so a keystroke meant for the Scratchpad pad is never stolen.
   useTypeToSearch({ setValue: setJQuery, inputRef: jSearchRef, disabled: tab !== 'journal' });
   // J1 collapsed the Journal's two filters into one; J1b emptied it. Tasks left
-  // for the Scratchpad rail and Pinned became a search KEYWORD, so every note is
-  // the only view here and `navFilter` retired with the buttons -- J2 brings its
-  // own state back when Clients vs All exists. The search box is the filter now.
+  // for the Scratchpad rail and Pinned became a search KEYWORD, so All is what
+  // the unfiltered rail shows and the search box is the filter over it.
   const navShown = React.useMemo(() => {
     const q = jQuery.trim();
     if (!q) return journal;
     return journal.filter(n => noteMatchesQuery(n, n.woId ? (orders || []).find(o => o && o.id === n.woId) : null, q));
   }, [journal, jQuery, orders]);
+
+  // ── J2: the Clients tree ──────────────────────────────────────────────────
+  // TWO options. J1b resettled Tasks onto the Scratchpad rail and Pinned into
+  // the search box; J3 then retired All, which carried notes stripped of
+  // context while the tree already searched the whole client note index.
+  // JOURNAL took its place: the NON-WO notes, on the left, and the default.
+  // Both lists are built from navShown, the SEARCH-FILTERED pool, so their
+  // counts always match the list the user is looking at.
+  const [jNav, setJNav] = React.useState('journal');
+  const tree = React.useMemo(() => clientTree(navShown, orders), [navShown, orders]);
+  const treeCount = React.useMemo(() => tree.reduce((n, c) => n + c.count, 0), [tree]);
+  // THE COLLAPSE RULE. Every level starts collapsed (both null on mount), and
+  // one branch is open at a time per level -- "the branch that was open last" is
+  // literally what these two values hold. Deliberately NOT reset on tab change:
+  // coming back to the Journal must land where the user left it. User input, so
+  // real state, not a derived mirror (rule A1).
+  const [openClient, setOpenClient] = React.useState(null);
+  const [openProp, setOpenProp] = React.useState(null);
+  // The selected WO#. Its notes fill the main pane until a note is picked out of
+  // them, and picking from the All list clears it so a stale WO cannot sit
+  // behind an unrelated note.
+  const [jWo, setJWo] = React.useState(null);
+  const jWoNotes = React.useMemo(() => notesForOrder(navShown, jWo), [navShown, jWo]);
+  // J3: the Journal accordions. Jottings is the null bucket and always first;
+  // user folders follow. Same collapse rule as the tree -- null on mount, one
+  // open at a time -- so this tab opens as a short list of headers.
+  const folders = React.useMemo(() => journalFolders(navShown), [navShown]);
+  // J3: while a search is running, a collapsed row would hide its own matches,
+  // so every row carrying one renders expanded. DERIVED, never stored: the
+  // user's own collapse state stays untouched in openClient / openProp /
+  // openFolder, so clearing the box restores it for free (rule A1).
+  const searching = jQuery.trim() !== '';
+  const folderCount = React.useMemo(() => folders.reduce((n, f) => n + f.notes.length, 0), [folders]);
+  const [openFolder, setOpenFolder] = React.useState(null);
+  // The open-state identity is NOT the bucket key: Jottings IS the null bucket,
+  // and null is also this state's "nothing open" sentinel, so keying on it left
+  // Jottings permanently expanded and made its collapse click a no-op.
+  const folderId = (key) => (key === null ? '(jottings)' : key);
+  const pickFolder = (key) => {
+    const id = folderId(key);
+    setOpenFolder(openFolder === id ? null : id);
+  };
+  // Every folder NAME in use, for the picker. Derived from the notes, so there
+  // is no second list of folders to keep in step with the notes citing them.
+  const folderNames = React.useMemo(() => folders.filter(f => f.key !== null).map(f => f.key), [folders]);
+  // Collapsing the branch a WO selection lives under would leave the main pane
+  // showing a list the rail no longer offers, so a level toggle drops it. The
+  // note editor is NOT dropped: an open note is the pane's content, not the
+  // branch's, and losing it to a stray disclosure click would be a text-loser.
+  const pickClient = (name) => {
+    setOpenClient(openClient === name ? null : name);
+    setOpenProp(null); setJWo(null);
+  };
+  const pickProp = (name) => {
+    setOpenProp(openProp === name ? null : name);
+    setJWo(null);
+  };
 
   // ── The two editors ───────────────────────────────────────────────────────
   // Both run the SAME autosave discipline (useAutosave above). The pad mints new
@@ -609,6 +704,13 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // A to note B mid-write can never land A's text on B's id.
   const selectJournal = (note) => jrn.bind(note);
   const closeJournal = () => jrn.clear();
+  // J2. Picking a WO# fills the main pane with THAT WO's notes, so the note the
+  // editor was holding has to let go first -- clear() flushes, so nothing typed
+  // is lost on the way out. Picking out of the All list instead drops the WO,
+  // because the WO context that led there is stale the moment you navigate
+  // around it.
+  const pickWo = (id) => { jrn.clear(); setJWo(id); };
+  const selectFromJournal = (note) => { setJWo(null); jrn.bind(note); };
   // Same keys as the pad: Enter is a newline, Escape flushes then deselects.
   // Escape is the way back to the quick-nav, and it cannot lose the tail typed
   // since the last idle tick because clear() writes it first.
@@ -688,6 +790,9 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
     writeNote(note.id, { flags });
     closeFlag();
   };
+  // J3: folder is a plain record field like woId, NOT a flag, so it takes the
+  // same writeNote path and never touches the flags object.
+  const setFolder = (note, key) => { writeNote(note.id, { folder: key }); closeFlag(); };
   // S4 debt #1: tick a task done. Patches ONLY flags.task.done, so `ts` (the
   // journal position, written-at) never moves.
   const toggleTaskDone = (note) => {
@@ -715,7 +820,22 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
   // A calendar chip is EDITABLE again: clicking it opens the note in the
   // Journal, where the body editor and the flag row already live. No second
   // editor is invented here. bind() flushes first, as always.
-  const openNoteInJournal = (note) => { setTab('journal'); jrn.bind(note); };
+  // J2, the collapse rule's SECOND exception: a note routed in from a WO# entry
+  // opens its branch EXPANDED, so the pane says where the note lives and not
+  // just what it says. Set here, in the route itself, rather than in an effect
+  // watching the selection -- an effect would re-expand on every rail click and
+  // fight the user (rules A1/A4). An unlinked note has no branch, so the rail is
+  // left exactly as it was.
+  const openNoteInJournal = (note) => {
+    setTab('journal');
+    const o = note && note.woId ? (orders || []).find(x => x && x.id === note.woId) : null;
+    const k = noteTreeKeys(o);
+    if (k) {
+      setJNav('clients');
+      setOpenClient(k.client); setOpenProp(k.prop); setJWo(note.woId);
+    }
+    jrn.bind(note);
+  };
   // S4 ruling 2: the parts modal's ship-to SEEDS from the linked WO. Resolved
   // here, because this is where `orders` lives; the modal stores whatever the
   // user leaves in the field.
@@ -894,6 +1014,36 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
       </div>
     );
   };
+
+  // ONE row renderer for all three levels of the J2 Clients tree. A plain
+  // function returning JSX, NOT a component defined in render (rule A5) -- a
+  // component here would remount every branch on each parent render and lose
+  // the twisty mid-click. `open` is null on a leaf, which is what says "no
+  // twisty"; `depth` is the only thing that differs between the levels.
+  const treeRow = ({ key, label, count, depth, open, active, onClick }) => (
+    <button key={key} onClick={onClick} title={label}
+      style={{
+        width: '100%', display: 'flex', alignItems: 'center', gap: 7,
+        padding: '7px 8px 7px ' + (8 + depth * 14) + 'px',
+        background: active ? 'var(--accent)' : 'transparent',
+        // J3 UX pass: the address line read too light to scan. Every level now
+        // takes --text-1; DEPTH is carried by indent and weight alone.
+        color: active ? 'var(--accent-fg)' : 'var(--text-1)',
+        border: 'none', borderRadius: 0, cursor: 'pointer', textAlign: 'left',
+        // Subtle divider between items, which is what the same pass asked for.
+        // The list sets gap 0 so these read as one ruled column.
+        borderBottom: '1px solid var(--border-1)',
+        fontFamily: 'inherit', fontSize: 13, fontWeight: depth === 0 ? 700 : 500,
+      }}>
+      <span style={{ fontSize: 12, fontWeight: 700, width: 10, flexShrink: 0, opacity: open === null ? 0 : 1 }}>
+        {open ? '▾' : '▸'}
+      </span>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 11, flexShrink: 0, opacity: 0.7, fontVariantNumeric: 'tabular-nums' }}>{count}</span>
+    </button>
+  );
 
   // ONE flag row, shared by the Scratchpad column and the Journal panel. A
   // plain function returning JSX, NOT a component defined in render (rule A5).
@@ -1110,6 +1260,13 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
               </div>
               {/* Jump row: the links, kept separate from the flags above. */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 12px 12px', flexShrink: 0 }}>
+                {/* J3: the only entry point for folders. Deliberately NOT in
+                    flagBar -- a folder is a plain record field like woId, not a
+                    flag, and that toolbar is locked to the seven flags. */}
+                <ActionBtn title="Move this note to a folder"
+                  onClick={() => setFlagOpen({ noteId: jNote.id, flag: 'folder' })}>
+                  {jNote.folder || 'Jottings'}
+                </ActionBtn>
                 {jNote.woId && (
                   <ActionBtn title={'Open ' + jNote.woId} onClick={() => onOpenWO && onOpenWO(jNote.woId)}>
                     {jNote.woId}
@@ -1121,7 +1278,37 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                   </ActionBtn>
                 )}
               </div>
-            </>) : (
+            </>) : jWo ? (
+              /* J2: selecting a WO# in the tree fills the main pane with THAT
+                 WO's notes. notesForOrder owns the order (pinned first, then
+                 newest written), and it runs over navShown, so a search narrows
+                 this list exactly as it narrowed the tree's counts. Picking a
+                 row hands the pane back to the editor above. */
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+                  borderBottom: '1px solid var(--border-1)', flexShrink: 0 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                    {jWo}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {woAddress({ woId: jWo })}
+                  </span>
+                  <div style={{ flex: 1 }} />
+                  {onOpenWO && <ActionBtn title={'Open ' + jWo} onClick={() => onOpenWO(jWo)}>Open</ActionBtn>}
+                  {onOpenMaps && <ActionBtn title={'Show ' + jWo + ' on the map'} onClick={() => onOpenMaps(jWo)}>Map</ActionBtn>}
+                </div>
+                <div style={{ ...listStyle, padding: 12 }}>
+                  {jWoNotes.length
+                    ? jWoNotes.map(n => padRow(n, jrn.id, selectJournal))
+                    : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>
+                      {/* Unreachable through the tree -- a WO with no matching
+                          notes has no branch to click. Reachable by typing a
+                          search AFTER picking one, which is why it says so. */}
+                      {jQuery.trim() ? 'No notes on this work order match the search.' : 'No notes on this work order.'}
+                    </div>}
+                </div>
+              </>
+            ) : (
               <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 padding: 24, color: 'var(--text-3)', fontSize: 13, textAlign: 'center' }}>
                 Pick a note on the right to read it here.
@@ -1131,11 +1318,20 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
         )}
         {tab === 'journal' && (
           <aside style={asideStyle}>
-            {/* J1b left this rail with NO filter buttons: Tasks moved to the
-                Scratchpad rail, Pinned became a search keyword, and Clients is
-                J2, so a one-option Seg would be pure noise. J2 adds Clients vs
-                All when the tree exists. */}
+            {/* TWO buttons. Clients takes U+2302, the house, because the
+                middle level of the tree is a property. Journal keeps J1's
+                U+2630 and sits LEFT, as the default: J3 retired All in its
+                favour, so this rail is now non-WO notes vs WO notes. */}
             <div style={railHeadStyle}>
+              <Seg
+                equal
+                options={[
+                  { value: 'journal', label: '☰ Journal' },
+                  { value: 'clients', label: '⌂ Clients' },
+                ]}
+                value={jNav}
+                onChange={(v) => { setJNav(v); if (v !== 'clients') setJWo(null); }}
+              />
               <input
                 ref={jSearchRef}
                 type="text"
@@ -1147,13 +1343,61 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
                 style={searchStyle}
               />
               <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                {navShown.length} {navShown.length === 1 ? 'note' : 'notes'}
+                {jNav === 'clients'
+                  ? treeCount + (treeCount === 1 ? ' linked note' : ' linked notes')
+                  : folderCount + (folderCount === 1 ? ' note' : ' notes')}
               </span>
             </div>
-            <div style={listStyle}>
-              {navShown.length
-                ? navShown.map(n => padRow(n, jrn.id, selectJournal))
-                : <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>No notes yet</div>}
+            {/* Both rail modes are ruled columns since J3 (treeRow draws its own
+                divider), so gap 0 and no list padding: a gap would break the rule
+                line into dashes. */}
+            <div style={{ ...listStyle, padding: 0, gap: 0 }}>
+              {jNav === 'clients' ? (
+                /* THE COLLAPSE RULE, rendered: a level's children exist in the
+                   DOM only while that level is the open one, so nothing is
+                   expanded until it is clicked. */
+                tree.length ? tree.map(c => (
+                  <React.Fragment key={c.name}>
+                    {treeRow({ key: c.name, label: c.name, count: c.count, depth: 0,
+                      open: searching || openClient === c.name, onClick: () => pickClient(c.name) })}
+                    {(searching || openClient === c.name) && c.props.map(p => (
+                      <React.Fragment key={p.name}>
+                        {treeRow({ key: p.name, label: p.name, count: p.count, depth: 1,
+                          open: searching || openProp === p.name, onClick: () => pickProp(p.name) })}
+                        {(searching || openProp === p.name) && p.wos.map(w => treeRow({
+                          key: w.id, label: w.id, count: w.count, depth: 2,
+                          open: null, active: jWo === w.id, onClick: () => pickWo(w.id),
+                        }))}
+                      </React.Fragment>
+                    ))}
+                  </React.Fragment>
+                )) : (
+                  <div style={{ padding: 10, color: 'var(--text-3)', fontSize: 12 }}>
+                    {jQuery.trim() ? 'No linked notes match.' : 'No notes are linked to a work order yet. Unlinked notes live under Journal.'}
+                  </div>
+                )
+              ) : (
+                /* J3: the same collapse rule, one accordion at a time. Jottings
+                   is always the first header even when empty, because it is the
+                   bucket the pad writes into and a missing header reads as a
+                   missing feature. */
+                folders.map(f => (
+                  <React.Fragment key={f.key === null ? '(jottings)' : f.key}>
+                    {treeRow({ key: f.key === null ? '(jottings)' : f.key, label: f.name,
+                      count: f.notes.length, depth: 0, open: (searching && f.notes.length > 0) || openFolder === folderId(f.key),
+                      onClick: () => pickFolder(f.key) })}
+                    {((searching && f.notes.length > 0) || openFolder === folderId(f.key)) && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '6px 2px' }}>
+                        {f.notes.length
+                          ? f.notes.map(n => padRow(n, jrn.id, selectFromJournal))
+                          : <div style={{ padding: '4px 8px', color: 'var(--text-3)', fontSize: 12 }}>
+                            {jQuery.trim() ? 'Nothing here matches.' : 'Empty. Move a note here from its Folder button.'}
+                          </div>}
+                      </div>
+                    )}
+                  </React.Fragment>
+                ))
+              )}
             </div>
           </aside>
         )}
@@ -1290,6 +1534,10 @@ export function ScheduleModule({ orders, techs, statusColors, statusTags, tech, 
           prefillAddress={woAddress(flagNote)}
           onSave={(v) => setFlag(flagNote, 'parts', v)}
           onRemove={() => setFlag(flagNote, 'parts', null)} />
+      )}
+      {flagNote && flagOpen.flag === 'folder' && (
+        <FolderModal key={'folder-' + flagNote.id} note={flagNote} folderNames={folderNames}
+          onClose={closeFlag} onPick={(key) => setFolder(flagNote, key)} />
       )}
       {flagNote && flagOpen.flag === 'wo' && (
         <WoLinkModal key={'wo-' + flagNote.id} note={flagNote} orders={orders} onClose={closeFlag}

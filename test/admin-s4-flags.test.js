@@ -211,6 +211,13 @@ const FLAG_TITLES = {
 
 function domKit(dom, container) {
   const all = (sel) => Array.from(container.querySelectorAll(sel));
+  // A panel off the active tab stays MOUNTED behind display:none, so "on screen"
+  // is an ancestor walk, not a querySelector.
+  const vis = (el) => {
+    let n = el;
+    while (n && n !== container) { if (n.style && n.style.display === 'none') return false; n = n.parentElement; }
+    return true;
+  };
   const kit = {
     pad: () => container.querySelector('textarea'),
     click: (el) => el.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })),
@@ -235,6 +242,37 @@ function domKit(dom, container) {
       const rail = Array.from(container.querySelectorAll('aside')).pop();
       return rail ? Array.from(rail.querySelectorAll('div[title]'))
         .find(d => d.getAttribute('title') === t) : null;
+    },
+    // J3 gave the rail ACCORDION HEADERS and a client TREE, both drawn by
+    // treeRow as buttons labelled by `title` -- not the div[title] note rows
+    // jrow reads. Ported from admin-s3-scratchpad.test.js:571 (railRow).
+    railRow: (t) => {
+      const rail = Array.from(container.querySelectorAll('aside')).pop();
+      return rail ? rail.querySelector('button[title="' + t + '"]') : null;
+    },
+    // The rail's own Seg reads "glyph word" and its words COLLIDE with the
+    // binder tab labels (Journal), which sit earlier in the DOM -- so this is
+    // scoped to the rail and matched on the word, never by `seg`.
+    railNav: (w) => {
+      const rail = Array.from(container.querySelectorAll('aside')).pop();
+      return rail ? Array.from(rail.querySelectorAll('button'))
+        .find(b => b.textContent.trim().split(' ').pop() === w) : null;
+    },
+    // MAIN-pane note rows. J3 moved WO-linked notes out of the rail entirely
+    // (journalFolders skips any note with a woId), so they list in the main pane
+    // under Clients > Property > WO# and jrow cannot see them at any depth of
+    // navigation. Visibility is the separator, as in admin-s3-scratchpad:570.
+    mainRow: (t) => all('div[title]').filter(vis).find(d => d.getAttribute('title') === t),
+    // J3: every folder accordion mounts CLOSED, so a jotting's row does not
+    // exist until Jottings is expanded. IDEMPOTENT on purpose -- pickFolder is a
+    // TOGGLE, and an unconditional second click would collapse the list again,
+    // which is exactly the drift that broke admin-s3-scratchpad:721. Returns
+    // whether it clicked, so the caller only spends a tick when it had to.
+    openJottings: (t) => {
+      if (kit.jrow(t)) return false;
+      const head = kit.railRow('Jottings');
+      if (head) kit.click(head);
+      return true;
     },
     btn: (label) => all('button').find(b => b.textContent.trim() === label),
     // J1b rail filters read "glyph word" (the Seg), so they are addressed by the
@@ -335,6 +373,11 @@ async function flagRowChecks() {
   ok('S3: the pad toolbar is mounted with nothing selected (mint-then-flag needs it)',
     k.flagRows().length === 1, String(k.flagRows().length));
 
+  // J3 restructured the rail into folder accordions, all of them CLOSED on
+  // mount, so this jotting has no row yet. ONE expand serves the whole block:
+  // openFolder outlives the Clients excursion further down, so 'already dated'
+  // is still reachable afterwards without a second (collapsing) toggle.
+  k.openJottings('plain jotting'); await tick();
   k.click(k.jrow('plain jotting')); await tick();
   ok('flags: selecting a note reveals its flag row', journalFlagRows() === 1, String(journalFlagRows()));
 
@@ -392,7 +435,16 @@ async function flagRowChecks() {
 
   // ── parts: prefill from the linked WO (ruling 2) ──
   edits.length = 0;
-  k.click(k.jrow('linked jotting')); await tick();
+  // J3 moved WO-linked notes OUT of the journal rail: journalFolders skips any
+  // note carrying a woId, and clientTree files this one under Client > Property
+  // > WO#. Fixture WO-1 has no pm, so its client is the '(no client)' bucket.
+  // The route is the one admin-s3-scratchpad.test.js:670 already walks, and the
+  // row lands in the MAIN pane, which is why jrow could never reach it.
+  k.click(k.railNav('Clients')); await tick();
+  k.click(k.railRow('(no client)')); await tick();
+  k.click(k.railRow('9 Elm St, Trenton')); await tick();
+  k.click(k.railRow('WO-1')); await tick();
+  k.click(k.mainRow('linked jotting')); await tick();
   // The flag button keeps the label "Link WO" even when linked -- deliberate,
   // see the comment at src/schedule.jsx:891: the jump row right below already
   // carries a button labelled with the number, and two same-labelled buttons
@@ -422,6 +474,11 @@ async function flagRowChecks() {
 
   // ── independence, through the real UI ──
   edits.length = 0;
+  // Back to the folder rail: the Clients tree lists WO numbers, not notes, so
+  // jrow would find nothing while it is up. Jottings stays expanded across the
+  // switch (openFolder is untouched by pickClient/pickProp/pickWo), so this is
+  // a nav change only -- do NOT re-expand here.
+  k.click(k.railNav('Journal')); await tick();
   k.click(k.jrow('already dated')); await tick();
   k.click(k.flagBtn('Remind')); await tick();
   k.typeInto(k.field('Remind me at'), '2026-09-02T08:30'); await tick();

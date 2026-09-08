@@ -195,13 +195,13 @@ export function migrateOrders(orders, storedPhases) {
     // 2) Priority field -> archive card (skip if already imported)
     const prio = typeof o.priority === 'string' ? o.priority.trim() : '';
     if (prio) {
-      const already = cards.some(c => c && typeof c.body === 'string' && c.body.startsWith('Imported priority:'));
+      const already = cards.some(c => c && typeof c.body === 'string' && c.body.startsWith(IMPORTED_NOTE_PREFIX));
       if (!already) {
         cards.push({
           id: 'n_mig_prio_' + (o.id || Date.now()),
           ts: Date.now(),
           type: 'Note',
-          body: 'Imported priority: ' + prio,
+          body: IMPORTED_NOTE_PREFIX + ' ' + prio,
           pinned: false,
           edited: false,
         });
@@ -586,6 +586,20 @@ const noteDay  = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v)
 const noteTime = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '')) ? String(v).padStart(5, '0') : null);
 const noteStr  = (v) => (v ? String(v) : null);
 
+// The portal-imported priority card the migrator mints. ONE source: the
+// migrator writes it and the Admin module filters on it.
+export const IMPORTED_NOTE_PREFIX = 'Imported priority:';
+
+// J3's user-note rule: portal-imported WO information belongs in the WO module's
+// detail pane and NOWHERE in Admin. Tested on the BODY, never on the id: two of
+// the live store's 167 `n_mig_prio_` ids now carry real user text because the
+// user edited the note and the id stayed, so an id-prefix test would delete
+// them. Deliberately NOT applied inside notesForOrder, which the WO module's
+// detail pane shares -- the Admin caller filters its own pool.
+export function isImportedNote(note) {
+  return !!note && String(note.body || '').startsWith(IMPORTED_NOTE_PREFIX);
+}
+
 // Coerce a stored flags blob. Unknown keys are dropped; a set flag always has
 // every field present (null, never undefined) so the JSON round-trip is stable.
 function normalizeFlags(f) {
@@ -659,6 +673,11 @@ export function normalizeNote(raw, id, now) {
     pm: noteStr(r.pm),
     contactId: noteStr(r.contactId),
     tech: noteStr(r.tech),
+    // J3: the note's accordion in the Journal rail. null = Jottings, the
+    // default bucket, which is why it is not stored as the string "Jottings".
+    // The ONE new field in S5; nothing else on the record held "which bucket"
+    // (pinned is a boolean, flags are typed records, type is the note kind).
+    folder: noteStr(r.folder),
   };
 }
 
@@ -1020,6 +1039,77 @@ export function noteMatchesQuery(note, order, q) {
   if (needle === 'pinned' && note.pinned) return true;
   if (String(note.body || '').toLowerCase().includes(needle)) return true;
   return order ? orderMatchesQuery(order, needle) : false;
+}
+
+// J2: the Journal rail's Clients tree keys for one order. ONE source, so the
+// tree's grouping and the router that reveals a branch can never drift apart.
+// Fields are the ones the S5 blueprint fixed: o.pm IS the client (the Invoices
+// header already labels it that), address + city the property. Address is
+// composed the same way woAddress does it in schedule.jsx -- deliberately NOT
+// splitAddress, which lives in the React module and mangles this store's
+// city-inside-address rows into a "NC 27520" city.
+export function noteTreeKeys(order) {
+  if (!order) return null;
+  return {
+    client: String(order.pm || '').trim() || '(no client)',
+    prop: [order.address, order.city].filter(Boolean).join(', ').trim() || '(no address)',
+  };
+}
+
+// J2: Client > Property Address > WO#, built from the notes it is HANDED (the
+// caller applies the search filter first, so counts here always match the list
+// the user is looking at). Counts only -- the pane that opens a WO reads its
+// notes through notesForOrder, which already owns the pinned-first order.
+//
+// A note with no woId, or one whose woId names no order, has NO client and is
+// deliberately absent from this tree. Those stay reachable under All. That is
+// correct behaviour, not a missing link.
+export function clientTree(notes, orders) {
+  const byId = new Map();
+  for (const o of orders || []) if (o && o.id) byId.set(o.id, o);
+  const clients = new Map();
+  for (const n of notes || []) {
+    if (!n || !n.woId) continue;
+    const o = byId.get(n.woId);
+    if (!o) continue;
+    const k = noteTreeKeys(o);
+    let c = clients.get(k.client);
+    if (!c) clients.set(k.client, (c = { name: k.client, count: 0, props: new Map() }));
+    let p = c.props.get(k.prop);
+    if (!p) c.props.set(k.prop, (p = { name: k.prop, count: 0, wos: new Map() }));
+    p.wos.set(o.id, (p.wos.get(o.id) || 0) + 1);
+    c.count++; p.count++;
+  }
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+  return [...clients.values()].map(c => ({
+    name: c.name,
+    count: c.count,
+    props: [...c.props.values()].map(p => ({
+      name: p.name,
+      count: p.count,
+      wos: [...p.wos.entries()].map(([id, count]) => ({ id, count }))
+        .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+    })).sort(byName),
+  })).sort(byName);
+}
+
+// J3: the Journal rail's accordions, over the notes it is HANDED (the caller
+// applies the search filter first, same contract as clientTree). NON-WO notes
+// only -- a WO-linked note has a client and lives in the tree. Jottings is
+// FIRST and is the null bucket, not a stored string, so an existing note needs
+// no migration to land in it. User folders follow, alphabetical.
+export function journalFolders(notes) {
+  const buckets = new Map([[null, []]]);
+  for (const n of notes || []) {
+    if (!n || n.woId) continue;
+    const key = noteStr(n.folder);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(n);
+  }
+  const named = [...buckets.entries()].filter(([k]) => k !== null)
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return [{ key: null, name: 'Jottings', notes: buckets.get(null) },
+    ...named.map(([k, list]) => ({ key: k, name: k, notes: list }))];
 }
 
 // Orders matching q whose location is NOT in shownLocations (the tab(s) the

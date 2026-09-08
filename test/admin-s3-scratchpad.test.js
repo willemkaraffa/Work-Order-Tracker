@@ -531,7 +531,8 @@ async function binderChecks() {
   const container = dom.window.document.getElementById('probe');
   const root = createRoot(container);
   root.render(React.createElement(ScheduleModule, {
-    orders: [], techs: ['Alice'], statusColors: {}, statusTags: {},
+    orders: [{ id: 'WO-9', pm: 'MSR', address: '9 Elm St', city: 'Trenton', status: 'New' }],
+    techs: ['Alice'], statusColors: {}, statusTags: {},
     tech: 'ALL', setTech: () => {},
     focus: null, onClearFocus: () => {},
     onOpenWO: (id) => { openedWO.push(id); },
@@ -575,6 +576,9 @@ async function binderChecks() {
     el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   };
   const navTitles = () => navRows().map(d => d.getAttribute('title'));
+  // J3: the rail's accordion headers and tree rows are buttons labelled by
+  // `title`. navBtn reads the last WORD of a Seg label and cannot find them.
+  const railRow = (t) => jAside().querySelector('button[title="' + t + '"]');
   // S5: the quick-nav WORD markers were retired when padRow gained derived flag
   // dots, so the marker is now the glyph and its colour, not the word.
   const marksOf = (t) => {
@@ -606,13 +610,20 @@ async function binderChecks() {
   ok('binder: no calendar chrome on the Scratchpad tab',
     !byLabel('Today') && !container.querySelector('select'));
 
-  // [2] JOURNAL body: every note, newest first, jottings included
+  // [2] JOURNAL rail. J1 moved the every-note list from the main pane to the
+  // rail; J3 then SPLIT it -- the Journal view holds the NON-WO notes in folder
+  // accordions, and the WO-linked ones moved to the Clients tree. Jottings is
+  // the null bucket, and it opens CLOSED, which is the collapse rule.
   click(byLabel('Journal')); await tick();
-  // J1: the every-note list MOVED from the main pane to the rail's All filter.
-  ok('journal: body lists EVERY note, newest first, jottings included',
+  ok('journal: the rail opens on Journal with every accordion CLOSED',
+    !!railRow('Jottings') && navTitles().length === 0, navTitles().join('|'));
+  click(railRow('Jottings')); await tick();
+  ok('journal: Jottings lists the NON-WO notes, newest first',
     navTitles().join('|')
-      === 'newest jotting|tenant called back|pinned policy note|Chase the permit|Call vendor|older jotting',
+      === 'newest jotting|pinned policy note|Chase the permit|Call vendor|older jotting',
     navTitles().join('|'));
+  ok('journal: the WO-linked note is NOT in the Journal (it has a client)',
+    navTitles().indexOf('tenant called back') === -1, navTitles().join('|'));
 
   // [3] QUICK-NAV: pinned AND undated tasks, merged, each marked
   ok('quick-nav: a pinned note is marked Pinned', marksOf('pinned policy note').join(',') === '⚑',
@@ -633,7 +644,14 @@ async function binderChecks() {
   typeSearch('pinned'); await tick();
   ok('quick-nav: the Pinned filter keeps only pinned entries',
     navTitles().join('|') === 'pinned policy note|Chase the permit', navTitles().join('|'));
+  // J3: a collapsed accordion would HIDE its own matches, so a running search
+  // expands whatever carries one. Derived at render -- clearing the box puts the
+  // user's own collapse state back untouched.
   typeSearch(''); await tick();
+  click(railRow('Jottings')); await tick();
+  ok('journal: clearing the search restores the collapse state the user left',
+    navTitles().length === 0, navTitles().join('|'));
+  click(railRow('Jottings')); await tick();
   // Order is backlogNotes' own (open before done, then oldest first), kept
   // deliberately instead of the journal sort.
   click(byLabel('Scratchpad')); await tick();
@@ -646,13 +664,24 @@ async function binderChecks() {
   // case that drove it is gone with it. The jottings category itself is still
   // proved above, on the Scratchpad column that owns it.
 
-  // [5] selection opens the editor in the main pane
+  // [5] selection opens the editor in the main pane. J3 moved the WO-linked note
+  // into the Clients tree, so getting to it is Client > Property > WO#, and the
+  // WO# fills the main pane with that WO's notes before one is picked.
+  click(navBtn('Clients')); await tick();
+  ok('clients: the tree opens with the client rows only',
+    !!railRow('MSR') && !railRow('9 Elm St, Trenton'), String(!!railRow('9 Elm St, Trenton')));
+  click(railRow('MSR')); await tick();
+  click(railRow('9 Elm St, Trenton')); await tick();
+  ok('clients: the tree nests Client > Property Address > WO#', !!railRow('WO-9'));
+  click(railRow('WO-9')); await tick();
+  ok('clients: picking a WO# fills the main pane with that WO\'s notes',
+    !jPad() && !!rowByTitle('tenant called back'), String(!!rowByTitle('tenant called back')));
   click(rowByTitle('tenant called back')); await tick();
   // J1: selection no longer SWAPS the rail away -- the rail is permanent and the
   // editor opens in the main pane, so the claim is now "editor opens, rail stays".
   ok('journal: selecting a row opens the note editor and the rail stays',
-    !!jPad() && jPad().value === 'tenant called back' && navRows().length > 0,
-    String(jPad() && jPad().value) + ' rail=' + navRows().length);
+    !!jPad() && jPad().value === 'tenant called back' && !!railRow('WO-9'),
+    String(jPad() && jPad().value));
   ok('journal: a WO-linked note offers the WO and Map jumps',
     !!byLabel('WO-9') && !!byLabel('Map'));
   click(byLabel('WO-9')); await tick();
@@ -683,8 +712,13 @@ async function binderChecks() {
   ok('journal: a second blur with unchanged text writes nothing more', edits.length === 2, JSON.stringify(edits));
 
   click(byLabel('Back')); await tick();
-  ok('journal: Back closes the editor, the rail is untouched', !jPad() && navRows().length > 0,
-    String(navRows().length));
+  ok('journal: Back closes the editor and lands on the WO note list, tree intact',
+    !jPad() && !!rowByTitle('tenant called back') && !!railRow('WO-9'),
+    String(!!railRow('WO-9')));
+  // Back to the Journal accordions for the autosave cases below, which all run
+  // on NON-WO notes. Jottings is ALREADY open from the collapse case above:
+  // openFolder survives the tab switch, so re-clicking it here would close it.
+  click(navBtn('Journal')); await tick();
 
   // [6] THE SWITCH-MID-WRITE CASE. The worst bug available in this design is a
   // timer armed for note A firing after the panel has rebound to note B, writing
