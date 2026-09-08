@@ -13,7 +13,7 @@ import {
   isLiveSchedule, isUpcomingSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
   itinTodayStr, itinShiftDay, getReminderNotificationItems,
-  notesForOrder, lastNoteTsFor, migrateNoteCardsToNotes,
+  notesForOrder, noteHistoryWoId, lastNoteTsFor, migrateNoteCardsToNotes,
 } from './orders-logic.js';
 // Re-export so existing consumers (detail.jsx, data.js, maps.jsx, schedule.jsx)
 // keep importing these from here.
@@ -5543,21 +5543,19 @@ function App() {
     if (record && record.woId) noteHistory(record.woId, 'note added', record.type);
     return id;
   }, [storeAddNote, noteHistory]);
-  // patch.woId WINS: linking a WO is itself an update, and the entry belongs to
-  // the work order being linked. On unlink (patch.woId null) it falls back to
-  // the note's current woId, so the WO losing the note records it.
   const scheduleUpdateNote = React.useCallback((noteId, patch) => {
     const n = (notes || []).find(x => x && x.id === noteId);
     storeUpdateNote(noteId, patch);
-    const woId = (patch && patch.woId) || (n && n.woId);
+    const woId = noteHistoryWoId(n, patch);
     if (woId) noteHistory(woId, 'note edited');
   }, [notes, storeUpdateNote, noteHistory]);
-  // The lookup happens BEFORE the delete: afterwards the record is gone and the
-  // woId with it.
   const scheduleDeleteNote = React.useCallback((noteId) => {
+    // The lookup stays HERE and stays FIRST: after the store drops the record
+    // the woId is gone, and no resolver can recover it.
     const n = (notes || []).find(x => x && x.id === noteId);
+    const woId = noteHistoryWoId(n);
     storeDeleteNote(noteId);
-    if (n && n.woId) noteHistory(n.woId, 'note deleted');
+    if (woId) noteHistory(woId, 'note deleted');
   }, [notes, storeDeleteNote, noteHistory]);
 
   const togglePinNote = React.useCallback((id, noteId) => {

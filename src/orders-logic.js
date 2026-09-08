@@ -761,6 +761,21 @@ export function notesForOrder(notes, woId) {
     .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.ts || 0) - (a.ts || 0));
 }
 
+// S4 ruling 4: WHICH work order gets the `o.history` line for a note write.
+// One question, so ONE function -- delete is just the no-patch case of it, and a
+// second resolver beside this one would be the exact drift the ruling exists to
+// stop. `patch.woId` WINS because linking a WO is itself an update and the entry
+// belongs to the WO being linked; on unlink `patch.woId` is null and it falls
+// back to the note's current woId, so the WO LOSING the note is the one that
+// records it. Null when neither has one: a jotting writes no history, which is
+// the S1 rule unchanged.
+//
+// The CALLER owns the lookup, and for delete that ordering is load-bearing: read
+// the note BEFORE the store drops it, or the woId is already gone.
+export function noteHistoryWoId(note, patch) {
+  return (patch && patch.woId) || (note && note.woId) || null;
+}
+
 // Newest written-at across one WO's notes; feeds the list-pane 'lastNote' sort.
 export function lastNoteTsFor(notes, woId) {
   let max = 0;
