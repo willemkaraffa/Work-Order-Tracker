@@ -1,0 +1,70 @@
+{
+  "intent": "docs/intent/2026-09-14-po-frame-hooks.md",
+  "sha256": "f69e2014afe8f56a45b893b844402e596279ea798a92b54f24abc6c2299e38a5",
+  "source": "claude-code-transcript",
+  "evidence": {
+    "sessionId": "ebd12434-5875-4733-8dcc-b94eedaf9db3",
+    "uuid": "e2bbaf6a-5b43-4c4e-b5d4-43481cfc1b54",
+    "timestamp": "2026-09-14T19:41:27.135Z",
+    "question": "Revised intent record docs/intent/2026-09-14-po-frame-hooks.md for PO c054612: lock pins c0546127 (installed git-hooks/, hooks/user-dispatch.js, scripts/transcripts.js, templates verified present, content = PO tree, CRLF only); stand-ins already current (PO templates/git-hooks/hooks unchanged since 06340fa); user-authority-check in overseer.json preCommitGates; package-lock judged from diff (slice 11). Part C adds lockfile hold + your 'PO: lockfiles diff-only' ruling; 6 Loop-back rulings kept. Same 9 observations, L1 now c054612. Approve [intent 2026-09-14-po-frame-hooks @ f69e2014afe8]?",
+    "answer": "Approve"
+  },
+  "quotes": [
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO PR #6 merged (6400a32)."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "user ruled 2026-09-14: keep user-authority-check.js as 7th pre-commit gate after template's six; work in this worktree off main."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "update project-overseer lock to 6400a32; remove .claude/hooks/{coder-role-gate,spawn-limiter,commit-authority-gate}.js; point .claude/settings.json at node_modules/project-overseer/hooks/ (+SessionStart session-start.js); refresh .githooks/pre-commit and add post-checkout from templates/; fix 3 tests that load the removed copies; drop the 3 from overseer.json guards + roles.locked; bootstrap HISTORY.md, NEXT-STEPS.md, docs/changes, docs/intent, docs/methodology."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Unlock locked files via role-lock question per path."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO main is now 06340fa (slices 9 and 10). Resume the held migration on chore/po-frame-hooks:"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Update the project-overseer dependency to 06340fa; confirm node_modules/project-overseer holds git-hooks/, hooks/user-dispatch.js, scripts/transcripts.js (a global npm install of it hit TAR_ENTRY_ERROR today; verify the files, never assume)."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Replace .githooks/pre-commit and post-checkout with node_modules/project-overseer/templates/ stand-ins; move user-authority-check.js into overseer.json"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Stage HISTORY.md, NEXT-STEPS.md and the changelog entry BEFORE the fidelity ruling: the Architect now sees them, every staged file whole, and the human's answers as facts."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Review, triage, fidelity, commit through the gates. Check with overseer-status.js."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO main is now c054612 (slices 9, 10, 11). Resume the held migration on chore/po-frame-hooks:"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Update the project-overseer dependency to c054612; verify node_modules/project-overseer holds git-hooks/, hooks/user-dispatch.js, scripts/transcripts.js (a global npm install of PO hit TAR_ENTRY_ERROR; check files, never assume)."
+    }
+  ],
+  "recordedAt": "2026-09-14T19:41:39.526Z"
+}
