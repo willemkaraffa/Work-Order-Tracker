@@ -15,7 +15,7 @@ const assert = require('assert');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const GATE = path.join(__dirname, '..', '.claude', 'hooks', 'coder-role-gate.js');
+const GATE = path.join(__dirname, '..', 'node_modules', 'project-overseer', 'hooks', 'coder-role-gate.js');
 const REPO = path.join(__dirname, '..');
 
 let failed = 0;

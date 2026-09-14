@@ -1,87 +1,23 @@
 #!/bin/sh
-# pre-commit: the deterministic gate. Not advisory.
+# pre-commit: a STAND-IN. The gate itself lives in the frame, git-hooks/pre-commit.
 #
-# WHY THIS EXISTS: on 2026-07-16 Claude built the verify gate, wrote memory
-# entries calling it "the done-gate", argued through a long session that a
-# deterministic gate plus a human are the only real green light, and then made
-# five commits without running it once. Not by defiance: each skip had a
-# defensible-sounding reason ("verify does not cover scripts/"). Advisory gates
-# lose to rationalization, every time, including from the author of the gate.
-# So this one does not ask.
+# WHY A STAND-IN (slice 9, docs/intent/2026-09-14-slice-9-project-independence.md).
+# This file used to be the whole gate, copied into every project, and each copy froze
+# the gates of the day it was copied: Work-Order-Tracker's ran 2 of 6 for weeks and
+# nothing said so. This stand-in does not change, so a project copies it once and
+# every frame update reaches it through the package.
 #
-# TOOL-AGNOSTIC ON PURPOSE. A PreToolUse hook only sees the tool it is wired to.
-# The same day, a PowerShell call walked straight through a guard that only
-# checked Bash. git runs this hook itself, no matter which shell invoked git, so
-# switching tools does not route around it.
+# A project's OWN commit gates go in overseer.json `preCommitGates`, never in here.
 #
-# --no-verify skips this hook. That flag is BLOCKED in
-# ~/.claude/hooks/pretool-guards.js (GATE_BYPASS), so the two layers cover each
-# other's gap.
+# NOT A WAY AROUND THE GATE. If the frame cannot be found, `exec` fails, this hook
+# exits non-zero, and git refuses the commit. --no-verify is blocked separately
+# (~/.claude/hooks/pretool-guards.js, GATE_BYPASS).
 #
 # ACTIVATION (local config, not tracked, so a fresh clone must run it):
 #   git config core.hooksPath .githooks
-# This file lives in .githooks/ rather than .git/hooks/ so that it is version
-# controlled: weakening the gate shows up in a diff a human reads, instead of
-# happening silently.
-#
-# KNOWN LIMIT, stated rather than hidden: this verifies the WORKING TREE, not the
-# staged subset. If you stage part of your changes, the gate still tests
-# everything on disk. That is stricter than a commit needs, never looser, so it
-# does not create false confidence.
 
-set -e
-
-# Zeroth gate: nothing lands directly on main. Runs FIRST because it costs one git
-# call and the gates below cost a full test run; a refused commit should not pay for
-# verify it will never use.
-#
-# NO OVERRIDE KNOB, same doctrine as review-gate.js: an env var or flag Claude may
-# set is not a gate. The escape is a human action that shows up in the branch graph:
-#   git switch -c <branch>
-# A detached HEAD (rebase, bisect) yields an empty branch name and is allowed; those
-# commits are not landing on main either.
-#
-# MERGING INTO main STILL WORKS, verified rather than assumed: git does not run
-# pre-commit for `git merge`, so the normal branch-then-merge flow is untouched. What
-# this refuses is only a NEW commit authored directly on main (including --amend).
-branch=$(git symbolic-ref --short -q HEAD || true)
-if [ "$branch" = "main" ]; then
-  echo "[pre-commit] COMMIT REFUSED: direct commit to 'main'." >&2
-  echo "  Move this work to a branch, then commit there:" >&2
-  echo "    git switch -c <branch-name>" >&2
-  exit 1
+if [ -f node_modules/project-overseer/git-hooks/pre-commit ]; then
+  exec sh node_modules/project-overseer/git-hooks/pre-commit "$@"
 fi
-echo "[pre-commit] branch gate: on '${branch:-detached HEAD}', not main."
-
-# The verify command is the project's answer, not the frame's: `npm run verify` is
-# meaningless in a Python or Go checkout, and a gate that fails because the command
-# does not exist teaches people to pass --no-verify. Read it from overseer.json.
-#
-# NOT AN OFF SWITCH. An empty or missing value falls back to `npm run verify` rather
-# than skipping; there is deliberately no value that means "run nothing".
-VERIFY_CMD=$(node -e "process.stdout.write(require('./node_modules/project-overseer/scripts/overseer-config.js').config().verifyCommand || '')" 2>/dev/null)
-[ -n "$VERIFY_CMD" ] || VERIFY_CMD="npm run verify"
-echo "[pre-commit] deterministic gate: $VERIFY_CMD"
-sh -c "$VERIFY_CMD"
-
-# Second gate: every reviewer finding must be fixed, or dismissed with a written
-# reason. Blocks the silent drop. It does not judge whether a reason is GOOD (that
-# needs judgment); it guarantees the reason exists, is attributable, and gets
-# printed here for a human to overrule.
-echo "[pre-commit] review gate: findings must be dispositioned"
-node node_modules/project-overseer/scripts/review-gate.js
-
-# Third gate: if a plan is APPROVED and therefore being enforced, the commit must
-# stay inside its scope and its done-steps must cite evidence that really exists.
-# No approved plan means this is a no-op, by the human's decision on 2026-07-20:
-# blocking all work whenever no plan exists would be an outage, not a gate.
-echo "[pre-commit] plan gate: scope + step evidence"
-node node_modules/project-overseer/scripts/plan-check.js
-
-# Fourth gate: the coder may not decide who owns a field, and may not touch capture
-# code on its own authority. Deterministic, no LLM involved. Added 2026-07-22 after a
-# capture change silently overwrote a user-set WO status with the portal's raw value.
-echo "[pre-commit] user-authority gate: field ownership + scraper plan"
-node .claude/hooks/user-authority-check.js
-
-echo "[pre-commit] gate passed."
+# The frame's own checkout gates itself with the same body it ships.
+exec sh git-hooks/pre-commit "$@"
