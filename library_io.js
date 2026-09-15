@@ -179,12 +179,10 @@ async function parseAmh(filePath) {
 // tonnages). Catalog = the first table on the 'Vendor HVAC Bid Sheet' tab: col B =
 // Item, col G = Total Price (fully burdened / tax-INCLUSIVE per the master agreement).
 // Rows with no numeric Total Price are section headers or the trailing OTHER
-// placeholder -> skipped. Per-item taxable is READ from the col C scope prose ("Item
-// Description"), not hardcoded (core truth #4, roadmap-handoffs/invoice-generation.md):
-// prose that states the price includes tax ("...applicable taxes...") -> tax-included
-// -> taxable:false; a material (refrigerant R22/R410a) -> false; a service call /
-// diagnostic / emergency -> ALWAYS true; otherwise a taxable service. MSR stays a
-// divide-out (CATALOG_TAX.MSR.taxableInclusive), so grand = face = paid either way.
+// placeholder -> skipped. Per-item taxable is DERIVED FROM THE MATERIAL/LABOR SPLIT
+// (msrTaxable below), not from the col C scope prose: MSR prices are tax-INCLUSIVE and
+// tax rides on the LABOR portion only (roadmap-handoffs/msr-tax-accuracy.md, D1). MSR
+// stays a divide-out (CATALOG_TAX.MSR.taxableInclusive), so grand = face = paid.
 // Source name spellings kept verbatim ("Pacakaged") so invoice autofill matches the
 // MSR-scraped bid descriptions. Per-item split (sell-side, VERIFIED E+F==G on 104/104
 // data rows): col E = Material Price, F = Labor Price, G = Total Price. Labor-only
@@ -192,17 +190,23 @@ async function parseAmh(filePath) {
 // leave F blank (-> labor='Included'). Section headers recovered via isSectionHeader;
 // page stamped 'HVAC'.
 const MSR_SHEET = 'Vendor HVAC Bid Sheet';
-// Refrigerants (R22, R-410A, R407c, R134a) and other physical materials are never taxed.
-const REFRIGERANT_RE = /^\s*R-?\d{2,3}[a-z]?\b/i;
 const SERVICE_ALWAYS_TAX_RE = /\b(service\s*call|diagnostic|emergency|trip\s*(fee|charge))\b/i;
 // A "size" row under an HVAC equipment family (e.g. '1.5 Ton', '2 Ton', '40 Gallon',
 // '3 - 3.5 Ton'). Used only in parseAmh to detect family headers by look-ahead.
 const SIZE_RE = /^\s*\d+(\.\d+)?(\s*-\s*\d+(\.\d+)?)?\s*(ton|gallon)s?\b/i;
-function msrTaxable(name, prose) {
-  if (REFRIGERANT_RE.test(name)) return false;               // material
-  if (SERVICE_ALWAYS_TAX_RE.test(name)) return true;         // core truth #3
-  if (/\btax/i.test(prose)) return false;                    // prose says price includes tax
-  return true;                                               // taxable service
+// Taxability from the SPLIT, not from the prose. An MSR price is tax-INCLUSIVE and the
+// tax sits on the LABOR portion only, so an item is tax-bearing exactly when it has a
+// labor portion. The old rule read "price includes applicable taxes" in the col C prose
+// as proof of NO tax -- inverted: that sentence proves the price IS tax-bearing, and the
+// inversion is why 159 of 173 stored MSR items reported zero tax. 'Included' means that
+// side is BUNDLED INTO THE OTHER, never 0 (see MATERIAL_INCLUDED): labor 'Included' ->
+// the price is all material -> untaxed. That is how refrigerants (R22/R410a/R32/R454b,
+// the material-only rows) still come out untaxed WITHOUT a name test, so the old
+// REFRIGERANT_RE is gone. No usable labor figure -> report no tax rather than invent it.
+function msrTaxable(material, labor) {
+  if (typeof labor === 'number') return labor > 0;
+  if (labor === MATERIAL_INCLUDED) return false;             // labor bundled into material
+  return material === MATERIAL_INCLUDED;                     // price is all labor
 }
 async function parseMsr(filePath) {
   const wb = new ExcelJS.Workbook();
@@ -218,9 +222,8 @@ async function parseMsr(filePath) {
     const price = toPrice(cellVal(row.getCell(7)));  // col G = Total Price
     if (isSectionHeader(name, price)) { currentSection = name; return; }
     if (price == null) return;                       // OTHER placeholder / summary prose
-    const prose = toStr(cellVal(row.getCell(3)));    // col C = Item Description (scope prose)
     const { material, labor } = splitFields(cellVal(row.getCell(5)), cellVal(row.getCell(6))); // E, F
-    items.push({ name, desc: '', price, page: 'HVAC', subCategory: currentSection, material, labor, taxable: msrTaxable(name, prose) });
+    items.push({ name, desc: '', price, page: 'HVAC', subCategory: currentSection, material, labor, taxable: msrTaxable(material, labor) });
   });
   return items;
 }
@@ -228,8 +231,10 @@ async function parseMsr(filePath) {
 // ── MSR Plumbing: hand-transcribed price list (no source file) ────────────────
 // pricesheet.pdf section 4, effective 7/10/2026, user-verified. No plumbing bid-sheet
 // xlsx exists, so these 53 rows are the source of record (roadmap-handoffs/
-// service-library-categories.md, S2). page:'Plumbing', taxable:false (fully burdened,
-// tax included -- same as MSR HVAC). manual:true so a "Seed MSR" (HVAC) re-seed keeps
+// service-library-categories.md, S2). page:'Plumbing', taxable DERIVED from the row's
+// split by msrTaxable (same rule as MSR HVAC: tax-inclusive price, tax on the labor
+// portion only) -- it was hardcoded false, which reported zero tax on labor it charges
+// for. manual:true so a "Seed MSR" (HVAC) re-seed keeps
 // them. price = Total = Material + Labour. 'Included' (7 rows) = material bundled into
 // labour on the sheet, stored as the sentinel (NOT 0). Minimum Job Fee + Permit
 // EXCLUDED. Table columns: [item, material, labor, total]; 'I' = Included sentinel.
@@ -306,11 +311,12 @@ function plumbingSeedItems() {
   const items = [];
   for (const [section, rows] of Object.entries(PLUMBING_TABLE)) {
     for (const [name, mat, lab, total] of rows) {
+      const material = mat === 'I' ? MATERIAL_INCLUDED : mat;
+      const labor = lab === 'I' ? MATERIAL_INCLUDED : lab;
       items.push({
-        name, desc: '', price: total, taxable: false,
+        name, desc: '', price: total, taxable: msrTaxable(material, labor),
         page: 'Plumbing', subCategory: section, manual: true,
-        material: mat === 'I' ? MATERIAL_INCLUDED : mat,
-        labor: lab === 'I' ? MATERIAL_INCLUDED : lab,
+        material, labor,
       });
     }
   }

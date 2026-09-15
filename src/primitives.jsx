@@ -98,6 +98,81 @@ export function FlagGlyph({ kind }) {
   );
 }
 
+// Admin S4: one button in a NOTE's flag row (task / reminder / calendar /
+// parts / journal / WO link). Deliberately NOT FlagGlyph above -- that one is a
+// work order's emergency/warranty badge and shares nothing with this but the
+// word "flag". `on` means the flag is SET on the note, which is the only state
+// this draws; the value itself always comes from the note record.
+// S5 S3: `icon` squares the pill off at its own height and enlarges the glyph,
+// for the composer toolbar where `label` IS the glyph and the tooltip carries
+// the name. Word mode is still the default, so existing callers are untouched.
+// S5 S3 live pass, two faults: `color` (a hex, optional) makes the LIT state say
+// WHICH flag is set instead of one accent for all six -- with no hex the accent
+// treatment below is unchanged, so every other caller is untouched. And the
+// native tooltip is gone: it renders UNDER the pointer, which is exactly where
+// the cursor hides it, so the tip is drawn here and anchored to the cursor.
+export function NoteFlagBtn({ label, title, on, onClick, icon, color }) {
+  // `pos` is the live cursor, null when not hovered. It BOTH mounts the tip and
+  // keys the measuring effect, so the ref-attached node and its effect deps move
+  // together (rule A3). NO delay and NO timer: an instant tip needs neither, and
+  // that is also why there is nothing to clean up (rule A7). Do not add one.
+  const [pos, setPos] = React.useState(null);
+  const tipRef = React.useRef(null);
+  const sizeRef = React.useRef(null);
+  // Flip before paint: LEFT of the cursor when the tip would run off the right
+  // edge (the Journal toolbar sits near it, so this is not theoretical), BELOW
+  // when it would run off the top. Written onto the node rather than into state,
+  // so a mousemove costs one render instead of two. Keyed on `pos` AND `title`:
+  // position depends on the cursor, width depends on the text, and a click can
+  // change the second without touching the first (the star swaps its label in
+  // place, with no mousemove to re-run this). The SIZE is measured once per
+  // title and cached for the same reason, inverted: re-measuring on every
+  // mousemove forces a synchronous layout for no new information. Invalidate
+  // that cache on `title` and never on `pos`, or a stale width comes back.
+  React.useLayoutEffect(() => {
+    const el = tipRef.current;
+    if (!el || !pos) return;
+    let size = sizeRef.current;
+    if (!size || size.title !== title) {
+      const r = el.getBoundingClientRect();
+      size = { title, w: r.width, h: r.height };
+      sizeRef.current = size;
+    }
+    const below = pos.y - 12 - size.h < 4;
+    const left = pos.x + 14 + size.w > window.innerWidth - 4
+      ? Math.max(4, pos.x - 14 - size.w) : pos.x + 14;
+    el.style.left = left + 'px';
+    el.style.top = (below ? pos.y + 18 : pos.y - 12) + 'px';
+    el.style.transform = below ? 'none' : 'translateY(-100%)';
+  }, [pos, title]);
+  return (
+    <button type="button" onClick={onClick} aria-label={title}
+      onMouseMove={(e) => setPos({ x: e.clientX, y: e.clientY })}
+      onMouseLeave={() => setPos(null)}
+      style={{
+        height: 24, padding: icon ? 0 : '0 9px', width: icon ? 24 : undefined, borderRadius: 999,
+        display: icon ? 'inline-flex' : undefined,
+        alignItems: icon ? 'center' : undefined, justifyContent: icon ? 'center' : undefined,
+        border: '1px solid ' + (on ? (color || 'var(--accent)') : 'var(--border-2)'),
+        background: on ? (color ? hexToRgba(color, 0.18) : 'var(--bg-row-sel)') : 'var(--bg-surface)',
+        color: on ? (color || 'var(--accent)') : 'var(--text-3)',
+        fontFamily: 'inherit', fontSize: icon ? 13 : 11, fontWeight: 700,
+        letterSpacing: '0.03em', cursor: 'pointer', whiteSpace: 'nowrap',
+      }}>
+      {label}
+      {pos && title && (
+        <span ref={tipRef} style={{
+          position: 'fixed', left: pos.x + 14, top: pos.y - 12, transform: 'translateY(-100%)',
+          zIndex: 1200, pointerEvents: 'none', whiteSpace: 'nowrap',
+          padding: '3px 7px', borderRadius: 6, border: '1px solid var(--border-2)',
+          background: 'var(--bg-surface-2)', color: 'var(--text-1)',
+          fontSize: 11, fontWeight: 600, letterSpacing: 0,
+        }}>{title}</span>
+      )}
+    </button>
+  );
+}
+
 export function StatusPill({ status, size = 'md' }) {
   const colors = useStatusColors();
   const c = statusColor(status, colors);
@@ -229,6 +304,51 @@ export function Seg({ options, value, onChange, equal }) {
           }}
         >{o.label}</button>
       ))}
+    </div>
+  );
+}
+
+
+// Binder tabs: the tabs of a ring binder or a folder drawer, across the top of
+// a pane, switching SUB-MODULES. Deliberately NOT Seg (above): Seg is a compact
+// segmented toggle for one value inside a toolbar, and using it as a pane's
+// primary switch is what made the Admin module read as a calendar with a text
+// field bolted on. These read as physical tabs -- the active one is raised,
+// carries an accent edge and bleeds into the body below it, the inactive ones
+// sit recessed on the strip.
+//
+// Lives in primitives, not in schedule.jsx, because Admin is not the only pane
+// heading for sub-modules (S5 journal views, S7 contacts, the planned Overview
+// rebuild), and a second pane inventing a third tab vocabulary is exactly the
+// drift this file exists to prevent.
+//
+// tabs: [{ value, label, title? }]. A plain map, no component defined in render.
+export function BinderTabs({ tabs, value, onChange }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-end', gap: 4,
+      padding: '0 18px', flexShrink: 0,
+      borderBottom: '1px solid var(--border-1)',
+      background: 'var(--bg-surface)',
+    }}>
+      {(tabs || []).map(t => {
+        const on = t.value === value;
+        return (
+          <button key={t.value} onClick={() => onChange(t.value)} title={t.title || t.label}
+            style={{
+              marginBottom: -1,
+              padding: on ? '10px 20px 11px' : '8px 18px 9px',
+              border: '1px solid var(--border-1)',
+              borderBottom: '1px solid ' + (on ? 'var(--bg-canvas)' : 'var(--border-1)'),
+              borderRadius: '9px 9px 0 0',
+              background: on ? 'var(--bg-canvas)' : 'transparent',
+              color: on ? 'var(--text-1)' : 'var(--text-3)',
+              boxShadow: on ? 'inset 0 3px 0 var(--accent)' : 'none',
+              fontFamily: 'inherit', fontSize: 13, fontWeight: on ? 700 : 500,
+              cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>{t.label}</button>
+        );
+      })}
     </div>
   );
 }

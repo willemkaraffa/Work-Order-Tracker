@@ -81,24 +81,105 @@ export function ageLevelForDays(n) {
 // 'sent' (see the tab model rework below), so it never reaches this function. Do not
 // re-add a 'paid' branch here; it would be dead code. A stale comment claiming paid
 // returned null is what led a review agent to "fix" an unreachable case.
+// WHEN a WO was completed. There is no such FIELD, so it is derived: the most
+// recent 'marked complete' / 'auto-flipped to complete' history entry. Null when
+// the WO carries neither (e.g. imported pre-change11) -- the caller decides what
+// a missing completion means, because the two callers disagree: the aging tint
+// falls back to dateCreated so it is not misleadingly fresh, while J4's sort
+// keeps the row in its band and drops it to the bottom.
+//
+// ONE completion rule. J4 needed the timestamp and ageDaysFor already owned the
+// scan; a second walk beside this one would be two rules drifting apart.
+export function completedTsFor(o) {
+  const h = o && Array.isArray(o.history) ? o.history : [];
+  for (let i = h.length - 1; i >= 0; i--) {
+    const a = String((h[i] && h[i].action) || '').toLowerCase();
+    if (a.includes('marked complete') || a.includes('auto-flipped to complete')) return h[i].ts;
+  }
+  return null;
+}
+
 export function ageDaysFor(o) {
   if (!o) return null;  // sparse/hand-edited records: o.tab would throw
   const tab = o.tab || 'active';
   if (tab === 'sent') return null;
   if (tab === 'complete') {
-    const h = Array.isArray(o.history) ? o.history : [];
-    for (let i = h.length - 1; i >= 0; i--) {
-      const a = String(h[i].action || '').toLowerCase();
-      if (a.includes('marked complete') || a.includes('auto-flipped to complete')) {
-        return Math.floor((Date.now() - h[i].ts) / 86400000);
-      }
-    }
+    const ts = completedTsFor(o);
+    if (ts) return Math.floor((Date.now() - ts) / 86400000);
     // Fallback: WO was on tab='complete' without a marked/auto-flipped entry
     // (e.g. imported pre-change11). Use dateCreated so the aging tint is not
     // misleadingly fresh.
     return daysSince(o.dateCreated);
   }
   return daysSince(o.dateCreated);
+}
+
+// Date a WO ORIGINALLY entered the Invoices queue: the FIRST 'sent to billing'
+// history entry. Deliberately not the aging base (InvoicesModule.ageOf takes the
+// MOST RECENT such entry, so a reopen-and-resend restarts the aging clock, while
+// this column must not move). Local date, not UTC, so an evening send does not
+// display as tomorrow. Returns '' when the WO has no such entry (pre-change11
+// records); callers fall back to dateCreated.
+export function sentToInvoiceIso(o) {
+  const h = (o && Array.isArray(o.history)) ? o.history : [];
+  for (const e of h) {
+    if (!e || !e.ts) continue;
+    if (!/sent to billing/i.test(String(e.action || ''))) continue;
+    const d = new Date(e.ts);
+    if (isNaN(d.getTime())) continue;
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + mm + '-' + dd;
+  }
+  return '';
+}
+
+// '$1,234.50' / '1234.5' / junk -> number. Was a local helper in invoices.jsx;
+// lifted here so the Bid totals tile and the Total-column sort agree on one parse.
+export function parseBidAmount(raw) {
+  if (raw == null) return 0;
+  const m = String(raw).replace(/,/g, '').match(/(-?\d+(?:\.\d{1,2})?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+
+// Numeric value behind the Invoices Total column: recorded invoice wins, else the
+// bid, else 0 (the "No Bid!" rows sort as free).
+export function invoiceRowTotal(o) {
+  if (o && o.invoice) return computeInvoiceTotals(o.invoice, o.pm).grandTotal;
+  return parseBidAmount(o && o.bidAmount);
+}
+
+// Column sort for the Invoices table. Rows here are RAW order records, so this
+// cannot reuse sortRows() in app.jsx: that one keys off ListPane row objects
+// (row.wo / ageDays / createdTs), fields these records do not have.
+// Blanks always sink to the bottom whichever way dir points, so flipping the
+// arrow never buries the populated rows under a wall of empty cells.
+export function sortInvoiceRows(orders, sort) {
+  const list = Array.isArray(orders) ? [...orders] : [];
+  const key = (sort && sort.key) || 'sent';
+  const dir = (sort && sort.dir) === 'asc' ? 1 : -1;
+  const woNum = (o) => parseInt(String((o && o.id) || '').replace(/[^0-9]/g, ''), 10) || 0;
+  const textOf = (o) => {
+    if (key === 'address') return (String((o && o.address) || '') + ' ' + String((o && o.city) || '')).trim();
+    if (key === 'client') return String((o && o.pm) || '').trim();
+    return String((o && o.invoice && o.invoice.number) || '').trim();   // 'invoice'
+  };
+  const blanksLast = (a, b) => (a ? -1 : (b ? 1 : 0));
+  return list.sort((a, b) => {
+    if (key === 'wo') return (woNum(a) - woNum(b)) * dir;
+    if (key === 'total') return (invoiceRowTotal(a) - invoiceRowTotal(b)) * dir;
+    if (key === 'sent') {
+      // ISO yyyy-mm-dd sorts correctly as a string. dateCreated fallback matches
+      // what the Sent cell displays, so the order never contradicts the column.
+      const av = sentToInvoiceIso(a) || String((a && a.dateCreated) || '');
+      const bv = sentToInvoiceIso(b) || String((b && b.dateCreated) || '');
+      if (!av || !bv) return blanksLast(av, bv);
+      return av < bv ? -dir : (av > bv ? dir : 0);
+    }
+    const av = textOf(a), bv = textOf(b);
+    if (!av || !bv) return blanksLast(av, bv);
+    return av.localeCompare(bv) * dir;
+  });
 }
 
 export function migrateOrders(orders, storedPhases) {
@@ -127,13 +208,13 @@ export function migrateOrders(orders, storedPhases) {
     // 2) Priority field -> archive card (skip if already imported)
     const prio = typeof o.priority === 'string' ? o.priority.trim() : '';
     if (prio) {
-      const already = cards.some(c => c && typeof c.body === 'string' && c.body.startsWith('Imported priority:'));
+      const already = cards.some(c => c && typeof c.body === 'string' && c.body.startsWith(IMPORTED_NOTE_PREFIX));
       if (!already) {
         cards.push({
           id: 'n_mig_prio_' + (o.id || Date.now()),
           ts: Date.now(),
           type: 'Note',
-          body: 'Imported priority: ' + prio,
+          body: IMPORTED_NOTE_PREFIX + ' ' + prio,
           pinned: false,
           edited: false,
         });
@@ -155,8 +236,8 @@ export function migrateOrders(orders, storedPhases) {
       const phaseName = phaseForOrder(next, phaseList);
       if (completeNames.has(phaseName)) {
         next.tab = 'complete';
-        // Auto-unschedule per change11 rule: complete WOs leave the itinerary.
-        if (next.schedule) delete next.schedule;
+        // Schedule is RETAINED (scheduling-module S1): tab='complete' already
+        // says the visit happened, and the calendar needs the past date.
       }
     }
     if (next.deleted && !next.status) next.status = 'Cancelled';
@@ -246,7 +327,8 @@ function appendHistory(cur, action, detail) {
   return [...(Array.isArray(cur.history) ? cur.history : []), { ts: Date.now(), action, detail }];
 }
 
-// Active -> Complete. Hardcodes status, saves prevStatus for Reopen, unschedules.
+// Active -> Complete. Hardcodes status, saves prevStatus for Reopen. Keeps the
+// schedule (S1 retention: past days stay populated; tab carries "done").
 export function applyMarkComplete(cur) {
   const prior = cur.status || 'Open';
   const next = {
@@ -255,7 +337,6 @@ export function applyMarkComplete(cur) {
     prevStatus: cur.prevStatus || prior,
     status: 'Complete - Pending Approval',
   };
-  if (next.schedule) delete next.schedule;
   next.history = appendHistory(cur, 'marked complete', 'status: ' + prior + ' → Complete - Pending Approval');
   return next;
 }
@@ -283,10 +364,9 @@ export function applyReopen(cur) {
   return next;
 }
 
-// Complete -> Sent (billing queue). Unschedules.
+// Complete -> Sent (billing queue). Keeps the schedule (S1 retention).
 export function applySendToInvoice(cur) {
   const next = { ...cur, tab: 'sent' };
-  if (next.schedule) delete next.schedule;
   next.history = appendHistory(cur, 'sent to billing queue', '');
   return next;
 }
@@ -343,10 +423,468 @@ export function clearsScheduleOnSet(status, statusTags) {
   return /job complete/i.test(String(status || ''));
 }
 
-// Today as YYYY-MM-DD (local), for expired-schedule comparison.
+// Is this WO still a LIVE job whose schedule means something? Schedules now
+// persist through complete/sent/visited/past dates (S1 retention), so
+// "has a schedule" no longer implies "is upcoming". Deliberately NO date
+// comparison inside, so callers compose it:
+//   upcoming = isUpcomingSchedule(o, tags)  -- defined below, adds the date test
+//   overdue  = isLiveSchedule(o, tags) && isOverdueSched(date, start)
+// The status test REUSES clearsScheduleOnSet -- exactly the statuses that used
+// to delete the schedule (visited-tagged OR "Job Complete") now just read as
+// not-live, so behavior is preserved without the data loss.
+// `onsite` is NOT excluded here: only the overdue nag silences onsite (app.jsx),
+// while the chip/marker still show onsite jobs today. Keeping that split
+// preserves existing behavior exactly.
+export function isLiveSchedule(o, statusTags) {
+  if (!o || !o.schedule || !o.schedule.date) return false;
+  if (o.deleted || (o.tab || 'active') !== 'active') return false;
+  return !clearsScheduleOnSet(o.status, statusTags);
+}
+
+// The "is upcoming" composition, hoisted out of the four callers that used to
+// hand-write it (display-row chip, schedule form's already-scheduled set, map
+// marker, map context menu). `>=` so a job scheduled for TODAY still counts.
+export function isUpcomingSchedule(o, statusTags) {
+  return isLiveSchedule(o, statusTags) && o.schedule.date >= itinTodayStr();
+}
+
+// Milestone rows for the WO command center: a curated VIEW of o.history, not a
+// stored field. Phase labels come from the user's configured `phases`, so the
+// rows track their status edits instead of a frozen stage list. Nothing here is
+// persisted -- re-derive on every render.
+// DELIBERATELY EXCLUDED: `unscheduled` / `auto-unscheduled (expired)`. Those are
+// the ABSENCE of a milestone, and a reschedule writes unschedule-then-schedule,
+// so including them rendered Unscheduled / In Progress / Scheduled-for triplets
+// and pushed the worst case from 28 rows to 32.
+// Returns oldest-first [{ ts, label }].
+export function deriveMilestones(o, phases) {
+  const hist = o && Array.isArray(o.history) ? o.history : [];
+  if (!hist.length) return [];
+  const byStatus = {};
+  for (const p of (Array.isArray(phases) ? phases : [])) {
+    for (const s of (p && Array.isArray(p.statuses) ? p.statuses : [])) byStatus[s] = p.name;
+  }
+  const out = [];
+  // Collapse key for the row before this one. Carried EXPLICITLY, never parsed
+  // back out of the label: phase names are user-editable, so a phase called
+  // "Ready for Approval" would lose its tail to any suffix-stripping regex and
+  // collapse into a different "Ready for ..." phase.
+  let prevBase = '';
+  for (const h of hist) {
+    if (!h) continue;
+    // ` (bulk)` variants are the same milestone as their plain form.
+    const action = String(h.action || '').replace(/ \(bulk\)$/, '');
+    const detail = String(h.detail || '');
+    let label = '', rowBase = '';
+    if (action === 'created' || action === 'imported') label = 'Created';
+    else if (action === 'status' || action === 'edit status') {
+      // detail is "<old> → <new>"; only the NEW status names a phase, and an
+      // unmapped status names none, so it emits nothing.
+      label = byStatus[detail.slice(detail.lastIndexOf('→') + 1).trim()] || '';
+    }
+    else if (action === 'scheduled') { label = 'Scheduled for ' + detail; rowBase = 'Scheduled'; }
+    else if (action === 'marked complete') label = 'Complete';
+    else if (action === 'sent to billing queue') label = 'Sent to billing';
+    else if (action === 'sent to Invoiced' || action === 'marked invoiced') label = 'Invoiced';
+    else if (action === 'marked Paid' || action === 'invoice billed from remittance') label = 'Paid';
+    else if (action === 'sent to Trash') label = 'Cancelled';
+    else if (action === 'restored from Trash' || action === 'back to Active') label = 'Reopened';
+    if (!label) continue;
+    // Collapse CONSECUTIVE same-base rows (a flip into a phase named Scheduled
+    // plus the `scheduled` write are one event). Non-consecutive repeats
+    // survive: re-entering a phase after a return trip is real history.
+    if (!rowBase) rowBase = label;
+    if (out.length && prevBase === rowBase) continue;
+    prevBase = rowBase;
+    out.push({ ts: h.ts, label });
+  }
+  // Older WOs never logged a creation entry; the first thing that happened to
+  // them stands in, so no WO reads as having no history at all.
+  if (!out.some(m => m.label === 'Created')) out.unshift({ ts: hist[0].ts, label: 'Created' });
+  return out;
+}
+
+// Is this overdue notification suppressed? Dismissals persist in
+// settings.dismissedOverdueIds keyed to the schedule DATE they were dismissed
+// for. A bare id set would silence a WO forever (notif ids are 'overdue-'+id,
+// stable across reschedules); keying on the date re-arms the nag the moment the
+// WO is rescheduled and later goes overdue again.
+export function isOverdueDismissed(dismissed, notifId, schedDate) {
+  if (!dismissed || !schedDate) return false;
+  return dismissed[notifId] === schedDate;
+}
+
+// Today as YYYY-MM-DD (local), for schedule date comparison.
 export function itinTodayStr() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+// Shift 'YYYY-MM-DD' by delta days. Anchored at noon so a DST transition can
+// never push the result into the neighbouring day. Moved here from app.jsx
+// (re-exported there) so the calendar math below can reuse it without a cycle.
+export function itinShiftDay(dateStr, delta) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(y, mo - 1, d + delta, 12);
+  const p = (n) => String(n).padStart(2, '0');
+  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+}
+
+/* ---------- calendar ranges (Schedule module) ---------- */
+// All three build dates by day-stepping from a noon-anchored Date, so month and
+// year boundaries and DST are handled by the Date object, not by arithmetic here.
+
+// Sunday of the week containing dateStr.
+export function weekStart(dateStr) {
+  const [y, mo, d] = String(dateStr).split('-').map(Number);
+  return itinShiftDay(dateStr, -new Date(y, mo - 1, d, 12).getDay());
+}
+
+// The 7 date strings of that week, Sunday first.
+export function weekDays(dateStr) {
+  const s = weekStart(dateStr);
+  return Array.from({ length: 7 }, (_, i) => itinShiftDay(s, i));
+}
+
+// 6x7 = 42 date strings starting at the Sunday of the week holding the 1st of
+// dateStr's month. Leading/trailing days from the adjacent months are included
+// (the view dims them).
+export function monthGrid(dateStr) {
+  const [y, mo] = String(dateStr).split('-').map(Number);
+  const first = y + '-' + String(mo).padStart(2, '0') + '-01';
+  const s = weekStart(first);
+  return Array.from({ length: 42 }, (_, i) => itinShiftDay(s, i));
+}
+
+// { 'YYYY-MM-DD': [orders] } for every scheduled, non-deleted WO. Buckets are
+// sorted by start time then id. Deliberately NOT filtered to active orders:
+// S1 retention keeps schedules on completed WOs so past days read as history.
+export function groupByScheduleDate(orders) {
+  const out = {};
+  for (const o of orders || []) {
+    if (!o || o.deleted || !o.schedule || !o.schedule.date) continue;
+    (out[o.schedule.date] = out[o.schedule.date] || []).push(o);
+  }
+  for (const k of Object.keys(out)) {
+    out[k].sort((a, b) =>
+      String(a.schedule.start || '').localeCompare(String(b.schedule.start || '')) ||
+      String(a.id).localeCompare(String(b.id)));
+  }
+  return out;
+}
+
+// --- The note record (Admin S1) ---------------------------------------------
+// ONE flat wo_data.notes array holds every note in the app. A WO note carries
+// woId; an Admin note has woId null. Nothing else distinguishes them, so there
+// is one write path, one backup, one journal.
+//
+//   note = { id, ts, updated, type, body, pinned, edited, flags,
+//            woId, pm, contactId, tech }
+//
+// body is the ONLY required field. `ts` is written-at and holds the journal
+// position -- editing an old note never bumps it; `updated` is edited-at and is
+// never a sort key. `type` ('Note' / 'Customer call' / ...) is carried from the
+// old WO note card; S4 maps it onto flags.
+//
+// FLAGS ARE INDEPENDENT (absent key = not set): a note can be a dated calendar
+// item AND a reminder at once. The old mutually-exclusive entry `kind` is gone
+// from storage; it survives only as a form projection (noteToEntryForm /
+// normalizeNote's legacy branch) so the Schedule editor keeps working.
+//   task: {done, due}  reminder: {at}  calendar: {date, start, end}
+//   parts: {part, status, distributor, address, po}  journal: true
+//   contact: {contactId}
+export const ENTRY_KINDS = ['task', 'event', 'reminder'];
+
+const noteDay  = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+const noteTime = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '')) ? String(v).padStart(5, '0') : null);
+const noteStr  = (v) => (v ? String(v) : null);
+
+// The portal-imported priority card the migrator mints. ONE source: the
+// migrator writes it and the Admin module filters on it.
+export const IMPORTED_NOTE_PREFIX = 'Imported priority:';
+
+// J3's user-note rule: portal-imported WO information belongs in the WO module's
+// detail pane and NOWHERE in Admin. Tested on the BODY, never on the id: two of
+// the live store's 167 `n_mig_prio_` ids now carry real user text because the
+// user edited the note and the id stayed, so an id-prefix test would delete
+// them. Deliberately NOT applied inside notesForOrder, which the WO module's
+// detail pane shares -- the Admin caller filters its own pool.
+export function isImportedNote(note) {
+  return !!note && String(note.body || '').startsWith(IMPORTED_NOTE_PREFIX);
+}
+
+// Coerce a stored flags blob. Unknown keys are dropped; a set flag always has
+// every field present (null, never undefined) so the JSON round-trip is stable.
+function normalizeFlags(f) {
+  const src = (f && typeof f === 'object') ? f : {};
+  const out = {};
+  if (src.task) out.task = { done: !!src.task.done, due: noteDay(src.task.due) };
+  if (src.reminder && typeof src.reminder.at === 'number') out.reminder = { at: src.reminder.at };
+  if (src.calendar) {
+    out.calendar = {
+      date: noteDay(src.calendar.date) || itinTodayStr(),
+      start: noteTime(src.calendar.start), end: noteTime(src.calendar.end),
+    };
+  }
+  if (src.parts) {
+    // S4 ruling 1 added `po` (the cost / PO number the team asks about). Same
+    // noteStr coercion as its siblings, so a record written before S4 simply
+    // loads with po null -- absent key IS the null, no migration.
+    out.parts = {
+      part: noteStr(src.parts.part), status: noteStr(src.parts.status),
+      distributor: noteStr(src.parts.distributor), address: noteStr(src.parts.address),
+      po: noteStr(src.parts.po),
+    };
+  }
+  if (src.journal) out.journal = true;
+  if (src.contact && src.contact.contactId) out.contact = { contactId: String(src.contact.contactId) };
+  return out;
+}
+
+// Coerce anything (a note composer submit, a Schedule entry form, a legacy
+// entry, a hand-edited blob) into a storable note.
+//   `now` is the WRITE clock: pass it from a store mutator and `updated` moves;
+//   omit it (migrations, reads) and `updated` is preserved.
+// A raw with a `kind` string speaks the old entry language: its flat
+// title/date/start/end/done/remindAt fields rebuild the task/calendar/reminder
+// flags, and its title is folded into the body -- notes have no title field.
+// Any other flag already on the record (parts, journal, contact) survives.
+export function normalizeNote(raw, id, now) {
+  const r = raw || {};
+  const clock = typeof now === 'number' ? now : null;
+  const ts = typeof r.ts === 'number' ? r.ts
+    : typeof r.created === 'number' ? r.created
+    : (clock === null ? Date.now() : clock);
+  const flags = normalizeFlags(r.flags);
+  if (typeof r.kind === 'string') {
+    const kind = ENTRY_KINDS.indexOf(r.kind) !== -1 ? r.kind : 'task';
+    const day = noteDay(r.date), start = noteTime(r.start), end = noteTime(r.end);
+    delete flags.task; delete flags.calendar; delete flags.reminder;
+    if (kind === 'task') {
+      flags.task = { done: !!r.done, due: day };
+      // A dated task may still carry times; the locked task shape is {done,due},
+      // so the clock half lives on calendar (same day, one editor field).
+      if (day && (start || end)) flags.calendar = { date: day, start, end };
+    } else {
+      // An event/reminder occupies a day, so it can never be stored undated.
+      flags.calendar = { date: day || itinTodayStr(), start, end };
+    }
+    if (typeof r.remindAt === 'number') flags.reminder = { at: r.remindAt };
+  }
+  const title = typeof r.title === 'string' ? r.title.trim() : '';
+  const rest = r.body == null ? '' : String(r.body);
+  return {
+    id: id || r.id || null,
+    ts,
+    updated: clock === null ? (typeof r.updated === 'number' ? r.updated : ts) : clock,
+    type: r.type ? String(r.type) : 'Note',
+    body: title ? (rest ? title + '\n' + rest : title) : rest,
+    pinned: !!r.pinned,
+    edited: !!r.edited,
+    flags,
+    woId: r.woId ? String(r.woId).trim() : null,
+    pm: noteStr(r.pm),
+    contactId: noteStr(r.contactId),
+    tech: noteStr(r.tech),
+    // J3: the note's accordion in the Journal rail. null = Jottings, the
+    // default bucket, which is why it is not stored as the string "Jottings".
+    // The ONE new field in S5; nothing else on the record held "which bucket"
+    // (pinned is a boolean, flags are typed records, type is the note kind).
+    folder: noteStr(r.folder),
+  };
+}
+
+// First non-blank line of the body. Notes have no title; this is what the
+// calendar chip and the reminder bell show in a title's place.
+export function noteTitle(note) {
+  const line = String((note && note.body) || '').split('\n').find(l => l.trim());
+  return line ? line.trim() : '';
+}
+
+// Project a note back into the flat entry-form view the Schedule module edits
+// (kind picker + title + date/start/end). The inverse of normalizeNote's legacy
+// branch, so form -> store -> form round-trips without drift.
+export function noteToEntryForm(note) {
+  const n = note || {};
+  const f = n.flags || {};
+  const lines = String(n.body || '').split('\n');
+  return {
+    id: n.id || null,
+    kind: f.task ? 'task' : f.reminder ? 'reminder' : f.calendar ? 'event' : 'task',
+    title: (lines[0] || '').trim(),
+    body: lines.slice(1).join('\n'),
+    date: (f.task && f.task.due) || (f.calendar && f.calendar.date) || '',
+    start: (f.calendar && f.calendar.start) || '',
+    end: (f.calendar && f.calendar.end) || '',
+    remindAt: f.reminder ? f.reminder.at : null,
+    done: !!(f.task && f.task.done),
+    tech: n.tech || null,
+    woId: n.woId || null,
+    type: n.type || 'Note',
+  };
+}
+
+// --- Migrations into the flat notes array (Admin S1) ------------------------
+// Both are IDEMPOTENT by id: a note already in the array is never appended
+// twice, and the source is emptied on the way out, so a second pass is a no-op.
+
+// o.noteCards -> notes (woId = the order's id), and noteCards removed from the
+// order. Returns BOTH halves; the caller writes them together.
+export function migrateNoteCardsToNotes(orders, notes) {
+  const list = Array.isArray(notes) ? notes.slice() : [];
+  const seen = new Set(list.map(n => n && n.id).filter(Boolean));
+  const nextOrders = (Array.isArray(orders) ? orders : []).map(o => {
+    if (!o || !Array.isArray(o.noteCards)) return o;
+    o.noteCards.forEach((c, i) => {
+      if (!c) return;
+      const id = c.id || ('n_mig_card_' + (o.id || 'x') + '_' + i);
+      if (seen.has(id)) return;
+      seen.add(id);
+      list.push(normalizeNote({ ...c, woId: o.id, pm: o.pm || null }, id));
+    });
+    const { noteCards: _drop, ...rest } = o;
+    return rest;
+  });
+  return { orders: nextOrders, notes: list };
+}
+
+// wo_data.entries -> notes. kind becomes flags (see normalizeNote), the entry
+// title folds into the body, and woId / tech / created(-> ts) / updated carry.
+export function migrateEntriesToNotes(entries, notes) {
+  const list = Array.isArray(notes) ? notes.slice() : [];
+  const seen = new Set(list.map(n => n && n.id).filter(Boolean));
+  (Array.isArray(entries) ? entries : []).forEach((e, i) => {
+    if (!e) return;
+    const id = e.id || ('n_mig_entry_' + i);
+    if (seen.has(id)) return;
+    seen.add(id);
+    list.push(normalizeNote(e, id));
+  });
+  return list;
+}
+
+// --- Note readers -----------------------------------------------------------
+
+// One WO's notes, pinned first then newest-written first. The detail pane and
+// the read-only Maps popup both render this order.
+export function notesForOrder(notes, woId) {
+  if (!woId) return [];
+  return (notes || [])
+    .filter(n => n && n.woId === woId)
+    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.ts || 0) - (a.ts || 0));
+}
+
+// S4 ruling 4: WHICH work order gets the `o.history` line for a note write.
+// One question, so ONE function -- delete is just the no-patch case of it, and a
+// second resolver beside this one would be the exact drift the ruling exists to
+// stop. `patch.woId` WINS because linking a WO is itself an update and the entry
+// belongs to the WO being linked; on unlink `patch.woId` is null and it falls
+// back to the note's current woId, so the WO LOSING the note is the one that
+// records it. Null when neither has one: a jotting writes no history, which is
+// the S1 rule unchanged.
+//
+// The CALLER owns the lookup, and for delete that ordering is load-bearing: read
+// the note BEFORE the store drops it, or the woId is already gone.
+export function noteHistoryWoId(note, patch) {
+  return (patch && patch.woId) || (note && note.woId) || null;
+}
+
+// Newest written-at across one WO's notes; feeds the list-pane 'lastNote' sort.
+export function lastNoteTsFor(notes, woId) {
+  let max = 0;
+  for (const n of notes || []) if (n && n.woId === woId && (n.ts || 0) > max) max = n.ts;
+  return max;
+}
+
+// Within one day: timed items first in clock order, untimed after, then title.
+function noteDaySort(a, b) {
+  const startOf = (n) => (n.flags && n.flags.calendar && n.flags.calendar.start) || '99:99';
+  return String(startOf(a)).localeCompare(String(startOf(b)))
+    || noteTitle(a).localeCompare(noteTitle(b))
+    || String(a.id || '').localeCompare(String(b.id || ''));
+}
+
+// { 'YYYY-MM-DD': [notes] } for every note that lands on a day -- a calendar
+// flag puts it there, a task's due date does too. Mirrors groupByScheduleDate
+// so the calendar can zip the two maps per day.
+export function groupNotesByDate(notes) {
+  const out = {};
+  for (const n of notes || []) {
+    const f = (n && n.flags) || {};
+    const day = (f.calendar && f.calendar.date) || (f.task && f.task.due);
+    if (!day) continue;
+    (out[day] = out[day] || []).push(n);
+  }
+  for (const k of Object.keys(out)) out[k].sort(noteDaySort);
+  return out;
+}
+
+// Undated tasks, open ones first, oldest first within each group. A note with
+// no task flag (a WO note, an Admin jotting) is not backlog, it is journal.
+export function backlogNotes(notes) {
+  return (notes || [])
+    .filter(n => n && n.flags && n.flags.task && !n.flags.task.due
+      && !(n.flags.calendar && n.flags.calendar.date))
+    .sort((a, b) => ((a.flags.task.done ? 1 : 0) - (b.flags.task.done ? 1 : 0))
+      || (a.ts || 0) - (b.ts || 0)
+      || String(a.id || '').localeCompare(String(b.id || '')));
+}
+
+// Scratchpad: raw jottings, newest first. The Admin module lands on these.
+//
+// "No active flags" is literally ZERO OWN KEYS on the flags object.
+// normalizeFlags only ever ADDS a key when the flag is set -- it writes no
+// `false`/`null` placeholder for an unset one -- so there is nothing per-key to
+// test and Object.keys().length === 0 is the exact predicate. That also means a
+// flag added in a later slice needs no change here: setting it puts a key on the
+// object and the note leaves the scratchpad by itself.
+// woId null keeps WO notes out; they belong to their order's detail pane.
+// Sorted by ts (written-at), the same journal position S5 will inherit --
+// never by `updated`, so editing an old jotting does not jump it to the top.
+export function scratchpadNotes(notes) {
+  return (notes || [])
+    .filter(n => n && !n.woId && Object.keys((n && n.flags) || {}).length === 0)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0)
+      || String(b.id || '').localeCompare(String(a.id || '')));
+}
+
+// "MM/DD h:mm AM" for an epoch-ms reminder time. Mirrors fmtSchedule's shape
+// (app.jsx) but reads a timestamp instead of a {date,start} pair.
+function fmtRemindAt(ms) {
+  const d = new Date(ms), h = d.getHours();
+  return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0')
+    + ' ' + (h % 12 === 0 ? 12 : h % 12) + ':' + String(d.getMinutes()).padStart(2, '0')
+    + ' ' + (h < 12 ? 'AM' : 'PM');
+}
+
+// Notes whose flags.reminder.at has arrived, as header-bell notification items
+// in the same shape as the derived overdue items in app.jsx. Re-evaluated by the
+// existing minute tick, so no timer lives here and a reminder that fired while
+// the app was shut simply appears on next launch. A done task never nags.
+// `dismissed` is settings.dismissedOverdueIds -- ONE map for both kinds; ids are
+// namespaced ('overdue-' / 'reminder-') so they cannot collide, and reusing it
+// means the persisted-dismissal plumbing (dismissOverdue) is shared. schedDate
+// carries the fire time, so editing the reminder re-arms it exactly as
+// rescheduling re-arms an overdue WO. `now` is injectable for tests.
+export function getReminderNotificationItems(notes, dismissed, now) {
+  const ts = now || Date.now();
+  const out = [];
+  for (const n of notes || []) {
+    const f = (n && n.flags) || {};
+    if (!n || !n.id || !f.reminder || typeof f.reminder.at !== 'number' || f.reminder.at > ts) continue;
+    if (f.task && f.task.done) continue;
+    const id = 'reminder-' + n.id;
+    const schedDate = String(f.reminder.at);
+    if (isOverdueDismissed(dismissed, id, schedDate)) continue;
+    const item = {
+      id, kind: 'reminder', schedDate,
+      title: 'Reminder · ' + (noteTitle(n) || 'Untitled'),
+      sub: fmtRemindAt(f.reminder.at) + (n.woId ? ' · ' + n.woId : ''),
+    };
+    if (n.woId) item.wo = n.woId;
+    out.push(item);
+  }
+  return out;
 }
 
 // change11 self-healing reconciler (v6) — PURE core. The effect in app.jsx
@@ -431,26 +969,13 @@ export function reconcileChange11(orders, storedPhases) {
       prevStatus: o.prevStatus || o.status || 'Open',
       status: 'Complete - Pending Approval',
     };
-    if (next.schedule) delete next.schedule;
     next.history = appendHistory(o, 'auto-flipped to Complete (change11 v4)',
       'phase=' + phaseName + ' status=' + (o.status || '') + ' → Complete - Pending Approval');
     return next;
   });
-  // Pass 4: clear expired schedules in the SAME write.
-  const today = itinTodayStr();
-  let expiredCleared = 0;
-  const finalOrders = nextOrders.map(o => {
-    if (!o || !o.schedule || !o.schedule.date) return o;
-    if (o.schedule.date >= today) return o;
-    expiredCleared++;
-    const clone = { ...o };
-    const wasDate = clone.schedule.date;
-    delete clone.schedule;
-    clone.history = appendHistory(o, 'auto-unscheduled (expired)', 'was ' + wasDate);
-    return clone;
-  });
-  return { orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
-    hardcodedCancelled, revertedFromComplete, expiredCleared };
+  // Pass 4 (expired-schedule clearing) REMOVED in S1: past schedules are kept.
+  return { orders: nextOrders, flipped, promotedFromInvoiced, hardcodedComplete,
+    hardcodedCancelled, revertedFromComplete };
 }
 
 /* ---------- WO search number match ---------- */
@@ -480,6 +1005,15 @@ export function orderNumberMatches(row, q) {
 // '1' would otherwise match nearly every WO. Accepts an order or a display row
 // (both carry `phone` + `contacts`).
 export function phoneMatches(row, q) {
+  const raw = String(q == null ? '' : q).trim();
+  // A query carrying LETTERS is never a phone number. Without this guard the
+  // digits are stripped out of an ADDRESS and the remainder is matched as a
+  // phone: '615 N Hardee St' becomes '615' and hits every WO whose phone
+  // contains 615. Proven live on real data -- 15 hits where 3 were right, which
+  // reads to the user as "search does not narrow". Digits and the punctuation
+  // real phone numbers carry are allowed, so '615', '919-555', '(919) 555 1234'
+  // and '+1 919 555 1234' all still work.
+  if (!/^[\d\s().+-]+$/.test(raw)) return false;
   const norm = (v) => {
     const d = String(v || '').replace(/\D/g, '');
     return d.length === 11 && d[0] === '1' ? d.slice(1) : d;
@@ -515,6 +1049,154 @@ export function orderMatchesQuery(o, q) {
   return has(o.address) || has(o.city) || has(o.pm) || has(o.tech);
 }
 
+// S5 slice 2: does a JOURNAL note match the search box? A note matches on its
+// own text, or on the work order it is linked to -- the user searches by WO
+// number or address as often as by wording. The WO half delegates to
+// orderMatchesQuery (number, address, city, PM, tech, phone) rather than
+// growing a second matcher that would drift from it. The order lookup is the
+// CALLER's job, which is what keeps this pure and testable.
+export function noteMatchesQuery(note, order, q) {
+  const needle = String(q == null ? '' : q).trim().toLowerCase();
+  if (!needle || !note) return false;
+  // J1b: `pinned` is a KEYWORD -- the Pinned rail button retired into the search
+  // box, still reading the note record's existing `pinned` field. UNION with the
+  // two matches below, never a replacement, so a note whose TEXT says pinned is
+  // still found and the keyword can hide nothing. Measured on the live 846-note
+  // store: zero bodies contain pinned / pin / pending / task / star, so the
+  // collision risk is nil today and the union is what keeps it harmless later.
+  if (needle === 'pinned' && note.pinned) return true;
+  if (String(note.body || '').toLowerCase().includes(needle)) return true;
+  return order ? orderMatchesQuery(order, needle) : false;
+}
+
+// J2: the Journal rail's Clients tree keys for one order. ONE source, so the
+// tree's grouping and the router that reveals a branch can never drift apart.
+// Fields are the ones the S5 blueprint fixed: o.pm IS the client (the Invoices
+// header already labels it that), address + city the property. Address is
+// composed the same way woAddress does it in schedule.jsx -- deliberately NOT
+// splitAddress, which lives in the React module and mangles this store's
+// city-inside-address rows into a "NC 27520" city.
+export function noteTreeKeys(order) {
+  if (!order) return null;
+  return {
+    client: String(order.pm || '').trim() || '(no client)',
+    prop: [order.address, order.city].filter(Boolean).join(', ').trim() || '(no address)',
+  };
+}
+
+// J2: Client > Property Address > WO#, built from the notes it is HANDED (the
+// caller applies the search filter first, so counts here always match the list
+// the user is looking at). Counts only -- the pane that opens a WO reads its
+// notes through notesForOrder, which already owns the pinned-first order.
+//
+// A note with no woId, or one whose woId names no order, has NO client and is
+// deliberately absent from this tree. Those stay reachable under All. That is
+// correct behaviour, not a missing link.
+// J4: a TRASHED work order never appears anywhere in this tree, not even as the
+// home of a note. Cancelled work is of no concern here (68 of 724 at spec time).
+// A note whose WO is trashed therefore drops out of Admin entirely: journalFolders
+// skips it too, because it carries a woId. That is the ruling, not an oversight.
+const isTrashedOrder = o => !!(o && (o.deleted || o.tab === 'trash'));
+
+// J4's sort BAND: active work first, then complete, then sent. The tab is the
+// band; within a band the key differs, which is why this is three comparisons
+// and not one.
+const TAB_BAND = { active: 0, complete: 1, sent: 2 };
+const bandOf = o => {
+  const b = TAB_BAND[(o && o.tab) || 'active'];
+  return b === undefined ? 0 : b;
+};
+// Position in the workflow, NOT alphabetical. An unknown status (user-renamed,
+// or legacy) sorts after every known one instead of jumping to the front.
+const statusPos = (o) => {
+  const i = DEFAULT_STATUSES.indexOf(String((o && o.status) || ''));
+  return i === -1 ? DEFAULT_STATUSES.length : i;
+};
+// Sent WOs are ordered by INVOICE date, and the dateless ones sink. That is the
+// common case, not an edge: `invoice` exists on 215 of 724 orders while 614 sit
+// in the sent tab, so roughly 400 sent WOs have no date to sort on.
+const invoiceMs = (o) => {
+  const d = o && o.invoice && o.invoice.date;
+  const t = d ? Date.parse(d) : NaN;
+  return Number.isNaN(t) ? null : t;
+};
+// Newest first inside COMPLETE and SENT (ruled by the user 2026-09-08), and the
+// dateless always last regardless of direction.
+const newestFirst = (a, b) => (a === null ? 1 : b === null ? -1 : b - a);
+
+// The J4 order for one property's work orders. Exported so the test can ask the
+// question directly instead of inferring it from a whole tree.
+export function sortTreeWos(orders) {
+  return [...(orders || [])].sort((a, b) =>
+    bandOf(a.order) - bandOf(b.order)
+    || (bandOf(a.order) === 0 ? statusPos(a.order) - statusPos(b.order) : 0)
+    || (bandOf(a.order) === 1 ? newestFirst(completedTsFor(a.order), completedTsFor(b.order)) : 0)
+    || (bandOf(a.order) === 2 ? newestFirst(invoiceMs(a.order), invoiceMs(b.order)) : 0)
+    || String(a.id).localeCompare(String(b.id)));
+}
+
+export function clientTree(notes, orders) {
+  const byId = new Map();
+  for (const o of orders || []) if (o && o.id && !isTrashedOrder(o)) byId.set(o.id, o);
+  const clients = new Map();
+  for (const n of notes || []) {
+    if (!n || !n.woId) continue;
+    const o = byId.get(n.woId);
+    if (!o) continue;
+    const k = noteTreeKeys(o);
+    let c = clients.get(k.client);
+    if (!c) clients.set(k.client, (c = { name: k.client, count: 0, props: new Map() }));
+    let p = c.props.get(k.prop);
+    if (!p) c.props.set(k.prop, (p = { name: k.prop, count: 0, wos: new Map() }));
+    p.wos.set(o.id, (p.wos.get(o.id) || 0) + 1);
+    c.count++; p.count++;
+  }
+  // J4: the CLIENT and PROPERTY levels stay note-derived -- that exclusion is
+  // what the S7 note in the blueprint contrasts itself against -- but a property
+  // the notes opened then lists EVERY work order standing at it, note or none.
+  // The zero-count ones are what the rail greys.
+  const propsOpened = new Set();
+  for (const c of clients.values()) for (const p of c.props.keys()) propsOpened.add(c.name + ' ' + p);
+  for (const o of byId.values()) {
+    const k = noteTreeKeys(o);
+    if (!propsOpened.has(k.client + ' ' + k.prop)) continue;
+    const p = clients.get(k.client).props.get(k.prop);
+    if (!p.wos.has(o.id)) p.wos.set(o.id, 0);
+  }
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+  return [...clients.values()].map(c => ({
+    name: c.name,
+    count: c.count,
+    props: [...c.props.values()].map(p => ({
+      name: p.name,
+      count: p.count,
+      // `order` rides along so the row can print an invoice date and the sort
+      // can read history without a second lookup. count 0 IS the greyed state:
+      // no parallel `noted` flag to fall out of step with it.
+      wos: sortTreeWos([...p.wos.entries()].map(([id, count]) => ({ id, count, order: byId.get(id) }))),
+    })).sort(byName),
+  })).sort(byName);
+}
+
+// J3: the Journal rail's accordions, over the notes it is HANDED (the caller
+// applies the search filter first, same contract as clientTree). NON-WO notes
+// only -- a WO-linked note has a client and lives in the tree. Jottings is
+// FIRST and is the null bucket, not a stored string, so an existing note needs
+// no migration to land in it. User folders follow, alphabetical.
+export function journalFolders(notes) {
+  const buckets = new Map([[null, []]]);
+  for (const n of notes || []) {
+    if (!n || n.woId) continue;
+    const key = noteStr(n.folder);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(n);
+  }
+  const named = [...buckets.entries()].filter(([k]) => k !== null)
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return [{ key: null, name: 'Jottings', notes: buckets.get(null) },
+    ...named.map(([k, list]) => ({ key: k, name: k, notes: list }))];
+}
+
 // Orders matching q whose location is NOT in shownLocations (the tab(s) the
 // current module already shows). Returns lightweight rows for the badge list.
 export function findOtherViewMatches(orders, q, shownLocations) {
@@ -546,34 +1228,111 @@ export function money(n) {
   return Math.round(v * 100) / 100;
 }
 
-// Pure. invoice = { lineItems:[{ unitPrice, qty, taxable, agreement }] }.
+// The blank-cell sentinel the service library stores on a material/labor cell
+// (library_io.js MATERIAL_INCLUDED). It means that side is BUNDLED INTO THE OTHER,
+// NOT zero, so it must never be coerced to a number. Re-declared here rather than
+// imported: library_io.js is a CJS main-process module that pulls in exceljs, which
+// must not enter the renderer bundle.
+const MATERIAL_INCLUDED = 'Included';
+
+// THE CHOKE POINT for carrying the split across a boundary. Every site that builds an
+// invoice line OUT OF something else spreads this instead of re-listing the two field
+// names by hand: re-listing them is exactly how the split got silently dropped at four
+// separate boundaries (reconcileMsrRow, the editor save map, reconcileBlockToInvoice,
+// recomputeInvoice), each time reverting a line to the whole-price divide-out with no
+// visible symptom. Returns {} when the source carries no split, so the spread is always
+// safe, and it never coerces: 'Included' stays the string sentinel.
+export function taxSplit(src) {
+  if (!src || (src.material == null && src.labor == null)) return {};
+  return { material: src.material, labor: src.labor };
+}
+// True when a line carries a usable tax base at all. A spread that someone forgets is
+// still silent at the boundary, so the money core COUNTS the misses instead
+// (computeInvoiceTotals -> missingSplit): a tax-inclusive line with no split is
+// indistinguishable in its numbers from a dropped one, and this is what makes the drop
+// observable + assertable per boundary rather than invisible until an invoice is wrong.
+function hasTaxSplit(li) {
+  return !!li && (li.material != null || li.labor != null);
+}
+
+// LABOR SHARE of a line's face price, 0..1. TAX-INCLUSIVE agreements ONLY -- the caller
+// checks catalogTax(...).taxableInclusive first, so this can never reach an AMH or
+// General line. That gate is load-bearing: AMH's library material/labor columns are
+// INTERNAL COST BASIS that deliberately do not sum to the sell price (library_io.js
+// ~92), so reading them as a tax basis would compute tax from our own cost. AMH is ruled
+// out of this model entirely (roadmap-handoffs/msr-tax-accuracy.md D7).
+// The split is applied as a SHARE, never as absolute dollars: an item listed
+// 1772.30 material / 500.00 labor is 22.0% labor, so a line billed at any other figure
+// keeps that 22.0% labor share and the line total still equals the bid price.
+// No usable split (a saved line predating it) -> fall back to the line's boolean
+// `taxable`, which reproduces the old whole-price divide-out exactly.
+function laborShare(li) {
+  const material = li && li.material;
+  const labor = li && li.labor;
+  if (labor === MATERIAL_INCLUDED) return 0;      // labor bundled into material -> untaxed
+  if (material === MATERIAL_INCLUDED) return 1;   // material bundled into labor -> all taxed
+  const m = typeof material === 'number' && !Number.isNaN(material) ? material : null;
+  const l = typeof labor === 'number' && !Number.isNaN(labor) ? labor : null;
+  if (m != null && l != null && m + l > 0) return l / (m + l);
+  return (li && li.taxable) ? 1 : 0;
+}
+
+// Pure. invoice = { lineItems:[{ unitPrice, qty, taxable, material, labor, agreement }] }.
 // defaultAgreement = the WO's catalog tab (General/AMH/MSR), used when a line
-// carries no agreement of its own. A taxable line divides the embedded tax out
-// only when its catalog is tax-inclusive (catalogTax(agreement).taxableInclusive);
-// otherwise the price is pre-tax and tax is added on top.
+// carries no agreement of its own.
+//   TAX-INCLUSIVE catalog (MSR): the face price is the final post-tax figure and the tax
+//     rides on the LABOR portion ONLY (material already bore sales tax at purchase --
+//     msr-tax-accuracy.md D1). face = material + labor; pre-tax labor = labor/TAX_RATE;
+//     tax = labor - pre-tax labor; the line total is the face, always. Cents are settled
+//     PER LINE here and the material remainder is taken by subtraction, so pre + tax ==
+//     face exactly and the grand total equals the face BY CONSTRUCTION (a 1-cent drift
+//     is enough to flip reconcileMsrRow from 'match' to 'off').
+//   NON-inclusive catalog (AMH, General): unchanged -- the price is pre-tax and tax is
+//     added on top of the taxable subtotal, rounded once on the subtotal.
 // Returns per-line breakdown + { taxableSubtotal, nonTaxableSubtotal, tax, grandTotal }.
 export function computeInvoiceTotals(invoice, defaultAgreement) {
   const lines = (invoice && Array.isArray(invoice.lineItems)) ? invoice.lineItems : [];
-  let taxableSubtotal = 0;   // pre-tax sum of taxable lines
-  let nonTaxableSubtotal = 0;
+  let taxableRaw = 0;        // pre-tax sum of taxable (non-inclusive) lines
+  let nonTaxableRaw = 0;
+  let inclusiveTax = 0;      // cent-exact, summed per inclusive line
+  let inclusivePre = 0;      // cent-exact pre-tax (material + pre-tax labor)
+  let inclusiveNonTax = 0;   // cent-exact material portions
+  let missingSplit = 0;      // tax-inclusive lines arriving with NO tax base (see hasTaxSplit)
   const rows = lines.map((li) => {
     const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
     const unit = money(Number(li.unitPrice));
     const taxable = !!li.taxable;
     const inclusive = catalogTax(li.agreement || defaultAgreement).taxableInclusive;
+    if (inclusive) {
+      const split = hasTaxSplit(li);
+      if (!split) missingSplit++;
+      const face = money(unit * qty);
+      const laborPortion = money(face * laborShare(li));
+      const materialPortion = money(face - laborPortion);          // remainder: no drift
+      const preTaxLabor = money(laborPortion / TAX_RATE);
+      const lineTax = money(laborPortion - preTaxLabor);
+      const linePre = money(face - lineTax);                       // == material + pre-tax labor
+      inclusiveTax += lineTax;
+      inclusivePre += preTaxLabor;
+      inclusiveNonTax += materialPortion;
+      return { ...li, qty, unitPrice: unit, preTaxUnit: money(linePre / qty), lineSubtotal: linePre,
+        ...(split ? {} : { splitMissing: true }) };
+    }
     // Accumulate raw (unrounded) line values so the cent rounding happens once
     // on the subtotals, not per line (avoids 1-cent drift on multi-line invoices).
-    const preTaxUnitRaw = (taxable && inclusive) ? (unit / TAX_RATE) : unit;
-    const lineRaw = preTaxUnitRaw * qty;
-    if (taxable) taxableSubtotal += lineRaw;
-    else nonTaxableSubtotal += lineRaw;
-    return { ...li, qty, unitPrice: unit, preTaxUnit: money(preTaxUnitRaw), lineSubtotal: money(lineRaw) };
+    const lineRaw = unit * qty;
+    if (taxable) taxableRaw += lineRaw;
+    else nonTaxableRaw += lineRaw;
+    return { ...li, qty, unitPrice: unit, preTaxUnit: unit, lineSubtotal: money(lineRaw) };
   });
-  taxableSubtotal = money(taxableSubtotal);
-  nonTaxableSubtotal = money(nonTaxableSubtotal);
-  const tax = money(taxableSubtotal * (TAX_RATE - 1));
+  // Tax on the non-inclusive side is added on top of its OWN rounded subtotal, exactly
+  // as before, so an AMH/General invoice is byte-identical to the pre-split behaviour.
+  const addedTax = money(money(taxableRaw) * (TAX_RATE - 1));
+  const taxableSubtotal = money(taxableRaw + inclusivePre);
+  const nonTaxableSubtotal = money(nonTaxableRaw + inclusiveNonTax);
+  const tax = money(addedTax + inclusiveTax);
   const grandTotal = money(taxableSubtotal + tax + nonTaxableSubtotal);
-  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal };
+  return { rows, taxableSubtotal, nonTaxableSubtotal, tax, grandTotal, missingSplit };
 }
 
 /* ---------- invoice line normalization (Build A) ---------- */
@@ -628,6 +1387,8 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
   const df = new Map();
   for (const toks of nameToks) for (const t of toks) df.set(t, (df.get(t) || 0) + 1);
   const idf = (t) => Math.log((N + 1) / ((df.get(t) || 0) + 1));
+  // The BID's own distinctive tokens, for the terse-bid route in the loop below.
+  const wDistinct = [...w].filter(t => idf(t) >= MATCH_GENERIC_IDF);
   const scored = [];
   for (let i = 0; i < items.length; i++) {
     const toks = nameToks[i];
@@ -645,7 +1406,19 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
       if (s >= MATCH_GENERIC_IDF) { distinctTotal += s; if (w.has(t)) { distinctShared += s; distinctCount++; } }
     }
     if (score < MATCH_MIN_IDF) continue;
-    if (distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
+    // TERSE-BID route into the scored set. Coverage is shared-distinctive over the
+    // CANDIDATE's distinctive mass, which structurally punishes a SHORT bid against a
+    // LONG catalog name ("Replace toilet" covers 0.24 of "Toilet with Wax Ring and
+    // Bolts"; "Emergency Call" covers 0.26 of "Emergency or After Hours Diagnostic
+    // Fee"), so those never got scored at all. A candidate may ALSO pass when EVERY
+    // distinctive token the human wrote is present in its name AND its price equals the
+    // bid price exactly. Both together, never either alone: the price is identical by
+    // construction so this cannot move money, and full bid coverage means it cannot
+    // invent identity. The tuning constants above stay where they are -- the 43% false-
+    // red history is why they are there.
+    const terse = wDistinct.length > 0 && wDistinct.every(t => toks.has(t))
+      && Math.abs(priceOf(items[i].price) - price) < 0.005;
+    if (!terse && distinctTotal > 0 && distinctShared / distinctTotal < MATCH_MIN_COVER) continue;
     scored.push({ it: items[i], score, distinctCount, distinctShared });
   }
   if (!scored.length) return null;
@@ -660,6 +1433,18 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
   const topGroup = scored.filter(s => Math.abs(s.score - top) < 1e-9);
   const priceMatch = topGroup.find(s => Math.abs(priceOf(s.it.price) - price) < 0.005);
   if (priceMatch) return { confirmed: priceMatch.it };
+  // EXACT-PRICE CONFIRM OUTSIDE THE TOP GROUP. Price-checking only the top group loses a
+  // right-priced candidate to a higher-scoring WRONG one: "Toilet with Wax Ring and Bolts"
+  // ($11.10) outscores "Wax Ring and Bolts" ($7.55) on a bid that IS the wax ring, and
+  // "Clean Evaporator Coil In Place" outscores "Clean Condenser". So when the top group has
+  // no price hit, look among the OTHER gate-passing candidates for one whose price equals
+  // the bid EXACTLY -- but demand real identity evidence (>=2 shared DISTINCTIVE tokens),
+  // which is exactly what refuses the counterexample above ("shower valve" $260 vs "Replace
+  // Shower Pan" $260 shares only "shower", distinctCount 1). Two candidates at the same
+  // exact price is ambiguous identity: confirm NEITHER, fall through to the suspect path.
+  const exactOut = scored.filter(s => s.distinctCount >= 2
+    && Math.abs(priceOf(s.it.price) - price) < 0.005);
+  if (exactOut.length === 1) return { confirmed: exactOut[0].it };
   // A SUSPECT (price-off FLAG) needs real evidence: >=2 shared distinctive tokens, OR a
   // single shared token that is genuinely RARE (idf >= MATCH_SOLO_IDF). One common word
   // ("air" -> Air Handler, "line" -> Supply Line) is too weak to flag; a rare one
@@ -676,7 +1461,12 @@ function resolveInCatalog(wording, price, catalog, bidIsMaterial) {
 // ("drain line", "drain pan", "drain assembly") than a verb ("drain the system"), so
 // treating it as a verb wrongly filed those materials as Labor. Real drain work still
 // carries a true verb (clear/replace/clean the drain) and stays Labor.
-const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap)\w*/i;
+// "label" IS a verb here: on this catalog it only ever appears as the act ("Label
+// Breakers", "Label disconnect"), never as a thing bought. Missing it billed
+// "Label Breakers and Disconnect $50" as a NON-TAXABLE material (real WO 03278789) and
+// filed the confirmed 25.00 line as 'material'. A bought label still leads with
+// "Material -", which wins before this test runs.
+const ACTION_VERB = /\b(replac|instal|clear|repair|clean|augur|remov|correct|cut|inspect|unclog|snak|run|flush|seal|patch|test|reset|rewir|mount|connect|adjust|tighten|fix|swap|label)\w*/i;
 function isMaterialWording(desc) {
   // A line LEADING with "Material"/"Materials" is a material (non-taxable), whatever
   // follows -- user rule: bias combined "Material to replace ..." lines to material; the
@@ -711,24 +1501,52 @@ export function resolveBidLine(wording, price, clientCatalog, generalCatalog, ag
   // longer encodes the PM. Retiring AMH!/MSR! does NOT change any total (tax = agreement
   // + taxable only). AMH labor still defaults non-taxable via catalogTax(agreement).
   const laborName = () => 'Labor!';
+  // The material/labor SPLIT is the tax base computeInvoiceTotals reads, and it is
+  // MSR-only: gated on the agreement being tax-inclusive so it can never ride on an AMH
+  // line, whose library material/labor columns are internal COST BASIS that deliberately
+  // do not sum to the sell price (library_io.js ~92) and are not a tax basis at all
+  // (roadmap-handoffs/msr-tax-accuracy.md D7 rules AMH out of this model).
+  const inclusive = catalogTax(agreement).taxableInclusive;
+  // Field names reused from the library items on purpose (NOT a new `taxableBase`): the
+  // line and the catalog then speak one language -- the invoice editor already renders
+  // material/labor cells and computeInvoiceTotals reads exactly these two names.
+  const split = (laborPortion) => (inclusive
+    ? { material: money(bidPrice - laborPortion), labor: money(laborPortion) }
+    : {});
   const sentinel = () => {
     // Service Call / Diagnostic / Emergency are ALWAYS taxed (both PMs) and are a
     // billable SERVICE (labor), not a material -- even though the wording is verbless
     // (would otherwise fall to Materials!). Force labor + taxable. (Core truth #3.)
     if (SERVICE_TAXABLE_RE.test(desc)) {
-      return { ...base, name: laborName(), category: 'labor', taxable: true };
+      return { ...base, ...split(bidPrice), name: laborName(), category: 'labor', taxable: true };
     }
+    // No library counterpart -> no catalog split, so read the wording convention the
+    // user already writes by hand in the bid sheet free-text box (D6, 13 of 13 on real
+    // data): a "Material(s)" lead is 100% material and untaxed, a "Labor"/verb lead is
+    // 100% labor and fully tax-bearing.
     const mat = isMaterialWording(desc);
-    if (mat) return { ...base, name: 'Materials!', category: 'material', taxable: false };
-    // Labor fallback: taxable = the catalog's labor default. General labor is taxed;
-    // AMH/MSR default FALSE (AMH inclusive; MSR sheets tax-included). A matched library
-    // item's own taxable still wins on the confirm path.
-    return { ...base, name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
+    if (mat) {
+      // Fits NEITHER lead and carries no action verb: isMaterialWording files it as
+      // material, the conservative direction on a tax record, but on a tax-inclusive
+      // agreement that split is a guess -- surface it for a human ruling on the EXISTING
+      // priceFlag/FlagResolveModal path (yellow = needs a look, not a contract breach)
+      // rather than inventing a second flag concept.
+      const ambiguous = inclusive && !/^\s*materials?\b/i.test(desc);
+      return { ...base, ...split(0), name: 'Materials!', category: 'material', taxable: false,
+        ...(ambiguous ? { priceFlag: 'yellow' } : {}) };
+    }
+    // Labor fallback: taxable = the catalog's labor default. General and MSR labor is
+    // taxed (CATALOG_TAX.*.defaultLaborTaxable true); AMH defaults FALSE (Premier pricing
+    // is inclusive). A matched library item's own taxable still wins on the confirm path.
+    return { ...base, ...split(bidPrice), name: laborName(), category: 'labor', taxable: catalogTax(agreement).defaultLaborTaxable };
   };
   // Category from the bid wording (material vs labor), not hardcoded -- a CONFIRMED
   // material (e.g. a General refrigerant line) must not read as labor. Tax is unaffected
   // (driven by agreement + taxable); PM-listed lines display their client via categoryLabel.
-  const confirm = (it) => ({ ...base, name: it.name, category: isMaterialWording(desc) ? 'material' : 'labor', taxable: !!it.taxable });
+  // A confirmed item also hands over ITS split as the line's tax base ('Included' stays
+  // the string sentinel -- never coerced to a number).
+  const itemSplit = (it) => (inclusive ? taxSplit(it) : {});
+  const confirm = (it) => ({ ...base, ...itemSplit(it), name: it.name, category: isMaterialWording(desc) ? 'material' : 'labor', taxable: !!it.taxable });
   const suspectList = (items) => items.map(s => ({ name: s.name, price: priceOf(s.price) }));
   // Fixed-contract clients flag RED (price off the signed agreement); General drifts -> YELLOW.
   const clientFlag = (agreement === 'AMH' || agreement === 'MSR') ? 'red' : 'yellow';
@@ -806,7 +1624,14 @@ export function normAddress(v) {
 export function matchMsrRow(row, orders) {
   const list = Array.isArray(orders) ? orders : [];
   const rn = normWoNum(row && row.woId);
-  if (rn) {
+  // A real portal WO number is 7-8 digits. A 1-3 digit token is a PARSE ARTIFACT, and it
+  // collides with the minted sequential ids checked below: the GUID note that parsed to
+  // "3" matched WO-003 (normWoNum -> "3") and reconciled the 110 Margaret Dr payment
+  // against 315 W Barnes St as a confident woId match, no verify flag. Live data has 8
+  // orders whose normalized id is under 4 digits. Short token -> skip this branch only;
+  // the address fallback and the none path still run. matchAmhRow is an alias of this
+  // function, so AMH gets the same guard.
+  if (rn && rn.length >= 4) {
     for (const o of list) {
       if (!o) continue;
       if (normWoNum(o.woId) === rn || normWoNum(o.id) === rn) return { order: o, matchBy: 'woId' };
@@ -831,7 +1656,22 @@ export function matchMsrRow(row, orders) {
 //   off        computed != paid (bid on file incomplete, or a genuine discrepancy)
 //   no-items   matched WO but no bid-sheet items (likely a service-call-only fix)
 //   unmatched  no WO found for this remittance line
-export function reconcileMsrRow(row, match, bidItems, statedTotal) {
+// WHY read-bid-lineitems returned nothing (main.js sets res.reason on an ok read;
+// callers pass 'read-failed:<msg>' for a failed one). ONE wording shared by both
+// readers -- the invoice editor banner and the remittance report flag -- so a silent
+// empty can never come back on one path while the other explains itself. Unknown or
+// absent reason -> null, and the caller says nothing extra.
+export function bidReadReasonText(reason) {
+  const r = String(reason || '');
+  if (r === 'no-wo-folder') return 'This WO has no folder yet, so no bid sheet was read. Use "Go to folder" to create it, then put the bid sheet inside. A sheet filed anywhere else is not read: one property holds many WOs, so it cannot be attributed.';
+  if (r === 'no-bid-sheet') return "No bid or CO sheet in this WO's folder.";
+  if (r === 'sheets-had-no-rows') return "Found a bid sheet in this WO's folder but read zero line items from it.";
+  if (r === 'no-desktop') return 'Bid sheets can only be read in the desktop app.';
+  if (r.indexOf('read-failed:') === 0) return 'Could not read the bid sheet: ' + r.slice(12) + '.';
+  return null;
+}
+
+export function reconcileMsrRow(row, match, bidItems, statedTotal, reason) {
   const paid = money(Number(row && row.amount));
   const items = Array.isArray(bidItems) ? bidItems : [];
   // Per-line tax breakdown via the tested money core. `taxable` comes from the caller
@@ -848,6 +1688,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
     unitPrice: money(Number(it && it.unitPrice)),
     qty: Number(it && it.qty) > 0 ? Number(it.qty) : 1,
     taxable: !!(it && it.taxable),
+    // The material/labor split IS the tax base for a tax-inclusive line: without it the
+    // money core falls back to the old whole-price divide-out. Copied through taxSplit
+    // ('Included' stays the string sentinel meaning "bundled into the other side", not 0).
+    ...taxSplit(it),
     // Carry the resolveBidLine identity flags so a billed invoice keeps the warning
     // icon (FlagResolveModal) for a price-off / unconfirmed line the user should vet.
     priceFlag: (it && it.priceFlag) || undefined,
@@ -859,7 +1703,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
   const lines = invLines.map((l, i) => {
     const post = money(l.unitPrice * l.qty);
     const pre = t.rows[i] ? t.rows[i].lineSubtotal : post;   // pre-tax (divide-out for taxable)
-    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, priceFlag: l.priceFlag, suspects: l.suspects, category: l.category, agreement: 'MSR', pre, tax: money(post - pre), post };
+    // The split rides OUT again: this block is what reconcileBlockToInvoice bills from
+    // and what the persisted remittance report reopens with. Drop it here and the saved
+    // invoice reports a different tax than the report on screen a moment earlier.
+    return { name: l.name, desc: l.desc, qty: l.qty, unitPrice: l.unitPrice, taxable: l.taxable, ...taxSplit(l), priceFlag: l.priceFlag, suspects: l.suspects, category: l.category, agreement: 'MSR', pre, tax: money(post - pre), post };
   });
   const preTax = money(t.taxableSubtotal + t.nonTaxableSubtotal);
   const tax = t.tax;
@@ -873,6 +1720,10 @@ export function reconcileMsrRow(row, match, bidItems, statedTotal) {
   } else if (!lines.length) {
     status = 'no-items';
     flags.push('Paid ' + paid.toFixed(2) + ' but no bid-sheet items found -- likely a service-call-only correction; enter the line manually.');
+    // ...and SAY WHICH empty state it is. Without this the bulk remittance path showed an
+    // unexplained empty WO while the invoice editor explained the identical read.
+    const why = bidReadReasonText(reason);
+    if (why) flags.push(why);
   } else if (Math.abs(computed - paid) < 0.005) {
     status = 'match';
   } else {
@@ -1016,7 +1867,10 @@ export function reconcileBlockToInvoice(block, source, dateIso) {
       const post = money(Number(l && (l.post != null ? l.post : (Number(l.unitPrice) * qty + Number(l.vendorTax || 0)))));
       return { name, desc, qty, unitPrice: money(post / qty), category: 'labor', taxable: false, agreement, ...flags };
     }
-    return { name, desc, qty, unitPrice: money(Number(l && l.unitPrice)), category: 'labor', taxable: !!(l && l.taxable), agreement, ...flags };
+    // MSR carries the SPLIT onto the saved invoice -- it is the tax base, and the saved
+    // invoice is the artifact that matters. The AMH branch above deliberately gets none:
+    // D7 rules AMH untaxed, and its cost-basis columns are not a tax basis.
+    return { name, desc, qty, unitPrice: money(Number(l && l.unitPrice)), category: 'labor', taxable: !!(l && l.taxable), agreement, ...taxSplit(l), ...flags };
   });
   return {
     number: String((block && block.invoiceNum) || '').trim(),
@@ -1058,6 +1912,41 @@ export function categoryLabel(line) {
 export function sentinelTag(line) {
   return { AMH: 'AMH!', MSR: 'MSR!', labor: 'Labor!', material: 'Materials!' }[categoryLabel(line)];
 }
+
+// RazorSync ENTRY rows for ONE line. RazorSync is the official invoice record (D2) and
+// applies tax PER LINE from the catalog item, so a MIXED tax-inclusive line (taxed labor
+// PLUS untaxed material) cannot enter as one row: a taxable row would tax the material,
+// which D1 forbids, and an untaxed row records zero tax on work that carries tax. Section
+// 7 ruling: the material portion enters under the non-taxable `Materials!` item and the
+// PRE-TAX labor under the taxable `MSR!` item, so RazorSync re-adds 7.25% to the second
+// row and the two rows land on the face price. Everything else stays ONE row, as today.
+//
+// The two prices sum to the line's PRE-TAX total (li.pre), NOT to the face: the face is
+// what RazorSync arrives at AFTER it applies tax to the MSR! row. Material is taken as
+// the REMAINDER of li.pre so the pair can never drift a cent from the money core.
+//
+// Pure: (line, defaultAgreement) -> [{ tag, desc, price }]. The remittance display AND
+// CopyStepper both read THIS function, so the rows a user sees and the rows they copy
+// cannot fall out of step.
+export function razorSyncRows(line, defaultAgreement) {
+  const li = line || {};
+  const desc = li.desc || '';
+  const pre = money(Number(li.pre) || 0);
+  const single = [{ tag: sentinelTag(li), desc, price: pre }];
+  // Same load-bearing gate laborShare sits behind: AMH library material/labor columns are
+  // internal COST BASIS, never a tax basis, so AMH can never reach the split path (D7).
+  if (!catalogTax(li.agreement || defaultAgreement).taxableInclusive) return single;
+  if (!hasTaxSplit(li)) return single;
+  const share = laborShare(li);
+  if (!(share > 0 && share < 1)) return single;   // all-labor or all-material: one row
+  const qty = Number(li.qty) > 0 ? Number(li.qty) : 1;
+  const face = money(Number(li.unitPrice) * qty);
+  const preTaxLabor = money(money(face * share) / TAX_RATE);
+  return [
+    { tag: 'Materials!', desc, price: money(pre - preTaxLabor) },
+    { tag: 'MSR!', desc, price: preTaxLabor },
+  ];
+}
 export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, defaultAgreement, authoritativeTotal) {
   const saved = (savedInvoice && Array.isArray(savedInvoice.lineItems)) ? savedInvoice.lineItems : [];
   const changes = [];
@@ -1073,6 +1962,18 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
     const curIsSentinel = SENTINELS.has(String(l.name || ''));
     const flagged = !!(res.priceFlag || res.suspects);
     const change = (field, from, to) => { changes.push({ lineIdx: idx, field, from, to }); };
+    // Adopt the re-resolved SPLIT exactly like name/taxable are adopted. Saved invoices
+    // predate the split, D3 rules that they recompute, and this is the only repair path --
+    // without it a pre-existing invoice stays split-less forever and keeps reporting the
+    // whole-price tax. Logged through change() so the repair is visible like any other
+    // field. Money is untouched: on a tax-inclusive line the total is the face either way,
+    // only the reported service/tax split moves. Non-inclusive agreements re-resolve with
+    // no split at all, so AMH/General adopt nothing.
+    const adoptSplit = () => {
+      const s = taxSplit(res);
+      if (s.material !== undefined && s.material !== l.material) { change('material', l.material == null ? null : l.material, s.material); next.material = s.material; }
+      if (s.labor !== undefined && s.labor !== l.labor) { change('labor', l.labor == null ? null : l.labor, s.labor); next.labor = s.labor; }
+    };
     // Price-off suspect: surface the flag for review, NEVER auto-rewrite the money.
     if (flagged && res.priceFlag && !l.priceFlag) { change('priceFlag', l.priceFlag || null, res.priceFlag); next.priceFlag = res.priceFlag; next.suspects = res.suspects; }
     if (curIsSentinel) {
@@ -1083,12 +1984,14 @@ export function recomputeInvoice(savedInvoice, clientCatalog, generalCatalog, de
       if (res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
       if (res.category && res.category !== l.category) { change('category', l.category, res.category); next.category = res.category; }
       if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+      adoptSplit();
     } else if (!flagged) {
       // CONFIRMED real name, clean re-resolve: snap to the canonical library name + taxable;
       // keep the stored category. Never clobber a real name with a sentinel (library item
       // may have been removed) and never touch a price-flagged confirmed line.
       if (!resIsSentinel && res.name && res.name !== l.name) { change('name', l.name, res.name); next.name = res.name; }
       if (!!res.taxable !== !!l.taxable) { change('taxable', !!l.taxable, !!res.taxable); next.taxable = !!res.taxable; }
+      adoptSplit();
     }
     return next;
   });

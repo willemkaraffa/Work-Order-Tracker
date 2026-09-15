@@ -7,7 +7,7 @@
 import React from 'react';
 import { ActionBtn } from './primitives.jsx';
 import { HeaderChips, useServiceLibraryStore } from './app.jsx';
-import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow, bidItemsToInvoiceLines, reconcileBlockToInvoice, normWoNum, sentinelTag, upsertRemittanceHistory, removeRemittanceById } from './orders-logic.js';
+import { money, matchMsrRow, reconcileMsrRow, matchAmhRow, reconcileAmhRow, bidItemsToInvoiceLines, reconcileBlockToInvoice, normWoNum, sentinelTag, razorSyncRows, upsertRemittanceHistory, removeRemittanceById } from './orders-logic.js';
 
 // Item 1: load + persist the remittance_history KV array (window.storage over
 // wo-data.json). Mirrors useServiceLibraryStore (app.jsx): mount-load, callback-persist,
@@ -122,12 +122,21 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const match = ens ? { order: ens, matchBy: 'woId' } : matchMsrRow(row, orders);
           let items = [];
           let stated = null;
+          // WHY-not, carried to the block: an empty read here used to fall through as a
+          // bare 'no-items' with nothing the user could act on, while the invoice editor
+          // explained the same read. main.js sets r.reason; a thrown/failed read becomes
+          // 'read-failed:<msg>' instead of being swallowed by the catch.
+          let reason = null;
           if (match.order && window.woFolder && window.woFolder.readBidLineItems) {
             try {
               const r = await window.woFolder.readBidLineItems(match.order, row.amount);
               if (r && r.ok && Array.isArray(r.items)) items = r.items;
               if (r && Number.isFinite(Number(r.statedTotal))) stated = Number(r.statedTotal);
-            } catch (_) { /* no folder / read error -> reconcile flags no-items */ }
+              if (!r || !r.ok) reason = 'read-failed:' + ((r && r.error) || 'unknown');
+              else if (r.reason) reason = r.reason;
+            } catch (e) { reason = 'read-failed:' + (e.message || e); }
+          } else if (match.order) {
+            reason = 'no-desktop';   // web build: no woFolder IPC bridge
           }
           // Resolve each read line against the MSR library so its taxable flag drives the
           // per-line divide-out breakdown (reuses the resolveBidLine matcher). Shape in:
@@ -135,7 +144,7 @@ export function RemittancesModule({ orders, toast, onCaptureAmh, onCaptureAmhBat
           const resolved = bidItemsToInvoiceLines(
             items.map(it => ({ name: String(it.desc || ''), qty: it.qty, price: it.unitPrice })),
             msrLib, 'MSR', genLib);
-          return reconcileMsrRow(row, match, resolved, stated);
+          return reconcileMsrRow(row, match, resolved, stated, reason);
         }));
       }
       const fileName = String(res.path || '').split(/[\\/]/).pop() || 'remittance.pdf';
@@ -422,6 +431,15 @@ function RemittanceHistoryPanel({ history, onOpen, onDelete }) {
 function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
   const st = STATUS_STYLE[b.status] || STATUS_STYLE.unmatched;
   const offBy = Math.abs(b.delta);
+  // Fallback agreement for razorSyncRows; each stored line normally carries its own.
+  const agreement = source === 'msr' ? 'MSR' : 'AMH';
+  // ONE razorSyncRows call site for the whole block: the table below renders from it and
+  // the stepper walks it, so the rows a user sees and the fields they copy cannot drift.
+  const entries = (b.lines || []).map(l => razorSyncRows(l, agreement));
+  // The stepper's cursor is user-driven state and must NOT carry over to a different
+  // block: ReportBlock is keyed by array INDEX, so a reloaded report reuses the same
+  // instance for a different WO. Remount it when the block or its entry-row count moves.
+  const stepperKey = (b.woId || b.invoiceNum || '') + ':' + entries.reduce((n, e) => n + e.length, 0);
   // Fetch shows for any AMH block matched to a WO (re-pull per-line tax / aged-out items).
   const showFetch = onFetch && b.orderId;
   // Save shows once there are lines to persist AND a WO to save onto; AMH aggregate-
@@ -490,37 +508,51 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
             <span>Item</span><span style={{ textAlign: 'right' }}>Pre-tax</span>
             <span style={{ textAlign: 'right' }}>Tax</span><span style={{ textAlign: 'right' }}>Post-tax</span>
           </div>
-          {b.lines.map((l, i) => {
+          {b.lines.flatMap((l, i) => {
             // RazorSync entry: the catalog SENTINEL chip, the Description, and the PRE-TAX
-            // Price are each click-to-copy (2d). Price copies l.pre (pre-tax) because
-            // RazorSync re-applies tax on a taxable-sentinel line -- copying post would
-            // double-tax; non-taxable lines have pre === post anyway.
-            const tag = sentinelTag(l);
-            return (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '3px 0', fontSize: 13, borderTop: '1px solid var(--border-1)' }}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-1)', minWidth: 0 }}>
-                  {tag && (
-                    <span onClick={onCopy ? () => onCopy(tag) : undefined}
-                      title={onCopy ? 'Click to copy catalog name ' + tag : tag}
+            // Price are each click-to-copy (2d). Price is pre-tax because RazorSync
+            // re-applies tax on a taxable-sentinel line -- copying post would double-tax;
+            // non-taxable lines have pre === post anyway.
+            // A MIXED tax-inclusive line enters RazorSync as TWO rows (Fix 7), so render
+            // one grid row PER ENTRY row. The line's own tax/post sit on the LAST entry
+            // row, so the per-line figures stay intact and are still shown exactly once.
+            const entry = entries[i];
+            return entry.map((e, j) => {
+              const last = j === entry.length - 1;
+              return (
+              <div key={i + '-' + j} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px 90px', gap: 8, padding: '3px 0', fontSize: 13, borderTop: j === 0 ? '1px solid var(--border-1)' : 'none' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-1)', minWidth: 0, paddingLeft: j > 0 ? 14 : 0 }}>
+                  {e.tag && (
+                    <span onClick={onCopy ? () => onCopy(e.tag) : undefined}
+                      title={onCopy ? 'Click to copy catalog name ' + e.tag : e.tag}
                       style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, padding: '1px 6px', borderRadius: 5,
                         border: '1px solid var(--border-1)', color: 'var(--text-2)', background: 'var(--bg-canvas)',
-                        cursor: onCopy ? 'pointer' : 'default' }}>{tag}</span>
+                        cursor: onCopy ? 'pointer' : 'default' }}>{e.tag}</span>
                   )}
-                  <span onClick={onCopy ? () => onCopy(l.desc || '') : undefined}
+                  <span onClick={onCopy ? () => onCopy(e.desc) : undefined}
                     title={onCopy ? 'Click to copy description' : undefined}
                     style={{ cursor: onCopy ? 'pointer' : 'default', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {l.desc || '(no description)'}{l.qty > 1 ? ' ×' + l.qty : ''}
+                    {e.desc || '(no description)'}{j === 0 && l.qty > 1 ? ' ×' + l.qty : ''}
                   </span>
+                  {/* A split line shows the SAME wording twice, so say which portion each
+                      row is. Display only -- it is deliberately NOT part of e.desc, which
+                      is the text pasted into RazorSync. */}
+                  {entry.length > 1 && (
+                    <span style={{ flexShrink: 0, fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>
+                      {j === 0 ? 'material portion' : 'labor, pre-tax'}
+                    </span>
+                  )}
                 </span>
-                <span onClick={onCopy ? () => onCopy(l.pre) : undefined}
+                <span onClick={onCopy ? () => onCopy(e.price) : undefined}
                   title={onCopy ? 'Click to copy pre-tax price' : undefined}
-                  style={{ textAlign: 'right', color: 'var(--text-2)', cursor: onCopy ? 'pointer' : 'default' }}>{fmt(l.pre)}</span>
-                <span style={{ textAlign: 'right', color: l.tax > 0 ? 'var(--text-1)' : 'var(--text-3)' }}>{fmt(l.tax)}</span>
-                <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{fmt(l.post)}</span>
+                  style={{ textAlign: 'right', color: 'var(--text-2)', cursor: onCopy ? 'pointer' : 'default' }}>{fmt(e.price)}</span>
+                <span style={{ textAlign: 'right', color: l.tax > 0 ? 'var(--text-1)' : 'var(--text-3)' }}>{last ? fmt(l.tax) : ''}</span>
+                <span style={{ textAlign: 'right', color: 'var(--text-2)' }}>{last ? fmt(l.post) : ''}</span>
               </div>
-            );
+              );
+            });
           })}
-          <CopyStepper lines={b.lines} onCopy={onCopy} />
+          <CopyStepper key={stepperKey} lines={b.lines} entries={entries} onCopy={onCopy} />
         </div>
       )}
 
@@ -552,17 +584,24 @@ function ReportBlock({ b, fmt, source, busy, onFetch, onSave, onCopy }) {
 // pre-tax price] -- copying one field per click so the user can tab straight through the
 // RazorSync form. Top-level component (A5), one per ReportBlock. Keeps the per-field
 // buttons above as a fallback.
-function CopyStepper({ lines, onCopy }) {
+function CopyStepper({ lines, entries, onCopy }) {
   const steps = React.useMemo(() => {
     const out = [];
-    for (const l of Array.isArray(lines) ? lines : []) {
+    (Array.isArray(lines) ? lines : []).forEach((l, i) => {
       const line = l.desc || '(no description)';
-      out.push({ value: sentinelTag(l), line, field: 'catalog name' });
-      out.push({ value: l.desc || '', line, field: 'description' });
-      out.push({ value: l.pre, line, field: 'pre-tax price' });
-    }
+      // The SAME entry rows the table above renders, computed once by ReportBlock, so the
+      // rows the user sees and the fields this walks can never fall out of step. A mixed
+      // line contributes two RazorSync rows (Fix 7), so two sets of three fields.
+      const entry = (entries && entries[i]) || [];
+      for (const e of entry) {
+        const label = entry.length > 1 ? line + ' · ' + e.tag : line;
+        out.push({ value: e.tag, line: label, field: 'catalog name' });
+        out.push({ value: e.desc, line: label, field: 'description' });
+        out.push({ value: e.price, line: label, field: 'pre-tax price' });
+      }
+    });
     return out;
-  }, [lines]);
+  }, [lines, entries]);
   // cursor = the next field to copy. This is LEGIT user-driven state (each click advances
   // it); the renderer cannot compute it, so useState is correct here -- NOT an A1/A2
   // derived-state smell. Do not hoist or derive it.

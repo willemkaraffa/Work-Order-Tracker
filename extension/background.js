@@ -80,24 +80,39 @@ pollCommand();
 // off-screen batch capture.)
 const MSR_TAB_MATCH = '*://amherst.my.site.com/*';
 
-// WHICH Amherst tab to host the hidden list iframe.
+// WHICH Amherst tab the scan runs in.
 //
-// The 2026-07-22 wrong-tab hazard (scanning a stale WORK ORDER DETAIL tab's own
-// /workorder/ anchors instead of the pending-bid list) is gone: the scan now loads
-// the canonical MSR_ASSESSMENT_URL in a same-origin iframe rather than reading the
-// host tab's DOM, so which page the tab happens to show no longer matters and
-// multi-tab ambiguity is no longer a failure.
+// The scan reads the HOST TAB's OWN DOM (content.js scanMsrList), so the tab has to
+// BE a work order list page. Picking any amherst tab was only safe while the scan
+// loaded MSR_ASSESSMENT_URL into its own hidden iframe; that iframe path is gone, so
+// a detail tab now either reports "not a list page" or, worse, wins on being active
+// while a real list tab sits open in the same window.
 //
-// Preference order: the tab the user is on, then any match.
+// URL-ONLY, deliberately the same rule as isMSRListPage() in content.js: /partner/s/
+// and not /workorder/. There is no DOM check to mirror any more -- readiness is judged
+// downstream from the item count, not from whether Aura has painted yet.
+//
+// Preference: the active tab if it IS a list page, then the first list-page tab.
+function isMsrListUrl(url) {
+  // tab.url can be undefined (no host permission yet) or a non-http scheme; a tab we
+  // cannot parse is simply not a candidate.
+  try {
+    const u = new URL(url || '');
+    return u.hostname.includes('amherst.my.site.com')
+      && u.pathname.includes('/partner/s/')
+      && !u.pathname.includes('/workorder/');
+  } catch (_) { return false; }
+}
+
 async function pickMsrTab() {
-  const active = await chrome.tabs.query({ url: MSR_TAB_MATCH, active: true, currentWindow: true });
-  if (active && active[0]) return { tab: active[0], matches: active };
-  const all = await chrome.tabs.query({ url: MSR_TAB_MATCH });
-  if (!all || !all.length) return { tab: null, matches: [] };
-  // Any amherst tab can host the hidden list iframe (the scan loads
-  // MSR_ASSESSMENT_URL itself rather than reading the host tab's own DOM),
-  // so ambiguity no longer matters: pick the first match.
-  return { tab: all[0], matches: all };
+  const all = (await chrome.tabs.query({ url: MSR_TAB_MATCH })) || [];
+  // matches = the tabs the scan could actually use, so the caller's "N tabs open"
+  // never counts detail tabs it would refuse anyway.
+  const lists = all.filter((t) => isMsrListUrl(t.url));
+  if (!lists.length) return { tab: null, matches: [] };
+  const active = (await chrome.tabs.query({ url: MSR_TAB_MATCH, active: true, currentWindow: true })) || [];
+  const activeList = active.find((t) => isMsrListUrl(t.url));
+  return { tab: activeList || lists[0], matches: lists };
 }
 
 // POST scan result to the tracker. `source.error`, when set, tells the app the
@@ -116,20 +131,17 @@ async function postFound(items, source) {
 
 async function backgroundFindNew() {
   const { tab, matches } = await pickMsrTab();
-  if (!tab && !matches.length) {
-    // LOG BEFORE RETURNING. This bail printed nothing, so a Chrome restart (whose
-    // restored tabs materialize late) produced an unexplainable empty console.
-    console.log('[wo] find-new: BAIL, chrome.tabs.query found 0 amherst tabs');
-    const msg = 'Open an MSR list page (amherst.my.site.com) first.';
-    notify('Find new MSR WOs', msg);
-    await postFound([], { error: msg, tabCount: 0 });
-    return;
-  }
   if (!tab) {
-    console.log('[wo] find-new: BAIL, ' + matches.length + ' amherst tabs, none active');
-    const msg = matches.length + ' Amherst tabs are open and none is active. Click the tab showing the list you want scanned, then run this again.';
+    // No LIST tab. Name which of the two it is: an amherst tab that is open but sitting
+    // on a WO detail page is the case the user hits after clicking through from a list,
+    // and telling them "open amherst" when amherst is already open reads as a bug.
+    const anyAmherst = (await chrome.tabs.query({ url: MSR_TAB_MATCH })) || [];
+    console.log('[wo] find-new: BAIL, no list tab (' + anyAmherst.length + ' amherst tabs open)');
+    const msg = anyAmherst.length
+      ? 'Amherst is open but not on a work order LIST page. Go to an MSR list (e.g. work orders in assessment), then try again.'
+      : 'Open an MSR list page (amherst.my.site.com) first.';
     notify('Find new MSR WOs', msg);
-    await postFound([], { error: msg, tabCount: matches.length });
+    await postFound([], { error: msg, tabCount: anyAmherst.length });
     return;
   }
   console.log('[wo] find-new: dequeued, host tab', tab.id, tab.url);

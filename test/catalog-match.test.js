@@ -14,11 +14,18 @@
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
 const { resolveBidLine, bidItemsToInvoiceLines, invoiceHasServiceCall, categoryLabel, isPmListed, sentinelTag } = loadEsm('src/orders-logic.js');
+const { matchTokens } = require('../text-normalize.js');
 
 // Inert filler: unique throwaway tokens, never shared with any test wording, purely to
 // grow N so IDF(distinctive single token) reaches the live-catalog range.
 const filler = (n) => Array.from({ length: n }, (_, i) => (
   { name: `Zzq${i} Wodget${i}`, desc: '', price: 1000 + i, taxable: false }));
+// "Replace" LEADS dozens of real library names, so live it is GENERIC (idf below
+// MATCH_GENERIC_IDF) and drops out of the distinctive sets on both sides. A fixture
+// without these reads the verb as RARE and every gate skews. Sized so idf('replac')
+// lands under 1.5 exactly as it does against the real library.
+const verbFiller = (n) => Array.from({ length: n }, (_, i) => (
+  { name: `Replace Zzv${i} Gizmo${i}`, desc: '', price: 2000 + i, taxable: false }));
 
 // Tonnage variants share heat/pump/ton; price is the only separator (per the money rule).
 const AMH = [
@@ -37,6 +44,8 @@ const GENERAL = [
   { name: 'Toilet Fill Valve Replacement', desc: '', price: 35, taxable: true },
   { name: 'Water Heater Replacement', desc: '', price: 950, taxable: true },
   { name: 'Shower Cartridge Replacement', desc: '', price: 95, taxable: true },
+  // Real live General item. "Label ..." lines are the act of labelling, i.e. LABOR.
+  { name: 'Label Breakers', desc: '', price: 25, taxable: true },
   // Sized to the live General catalog range so a lone rare token (capacitor) clears
   // MATCH_SOLO_IDF (4.0) exactly as it does against the real ~150-item library.
   ...filler(150),
@@ -206,6 +215,133 @@ test('invoiceHasServiceCall detects diagnostic/service-call lines', () => {
   assert.strictEqual(invoiceHasServiceCall([{ name: 'Diagnostic Fee', desc: '' }]), true);
   assert.strictEqual(invoiceHasServiceCall([{ name: 'Materials!', desc: '9 lbs R410A' }]), false);
   assert.strictEqual(invoiceHasServiceCall([]), false);
+});
+
+// ---- Fix 4: stem bridge + exact-price confirm outside the top group + terse bids ----
+
+test('stem: verb and noun forms of one word collapse to ONE token', () => {
+  // Old stemmer was a bare /(ing|ed|es|s)$/ strip: "replacing"/"replaced" -> "replac"
+  // but "replace" and "replacement" stayed whole, so one word was THREE tokens and a
+  // bid never met a library item that spelled it differently.
+  assert.deepStrictEqual(matchTokens('replace replacing replaced replacement'),
+    ['replac', 'replac', 'replac', 'replac']);
+  assert.deepStrictEqual(matchTokens('install installed installing installation'),
+    ['install', 'install', 'install', 'install']);
+  // STACKED suffixes: a plural sits on top of a derivational suffix, so one pass is
+  // not enough ("replacements" would stop at "replacement").
+  assert.deepStrictEqual(matchTokens('replacements installations'), ['replac', 'install']);
+  assert.deepStrictEqual(matchTokens('hole holes'), ['hol', 'hol']);
+});
+
+test('stem: min-length guard keeps short words whole ("ring" is not "r")', () => {
+  // The old strip destroyed identity nouns: ring -> r, using -> us, holes -> hol.
+  assert.deepStrictEqual(matchTokens('wax ring'), ['wax', 'ring']);
+  assert.deepStrictEqual(matchTokens('using'), ['using']);
+});
+
+// Two real MSR rows whose prices differ; the LONGER name outscores the shorter one on
+// a bid that is actually the shorter item.
+const PLUMB = [
+  { name: 'Toilet with Wax Ring and Bolts', desc: '', price: 11.10, taxable: true },
+  { name: 'Wax Ring and Bolts', desc: '', price: 7.55, taxable: true },
+  ...filler(150),
+];
+
+test('exact-price confirm OUTSIDE the top group (wax ring loses the top slot)', () => {
+  // "Toilet with Wax Ring and Bolts" (11.10) outscores "Wax Ring and Bolts" (7.55)
+  // because the bid also says "toilet", but the bid PRICE is the wax ring's. Top group
+  // has no price hit; the lower-scored candidate carries 2 shared distinctive tokens
+  // AND the exact price, so it confirms.
+  const l = resolveBidLine('to instal new wax ring while resetting toilet', 7.55, PLUMB, null, 'MSR');
+  assert.strictEqual(l.name, 'Wax Ring and Bolts');
+  assert.strictEqual(l.priceFlag, undefined);
+  assert.strictEqual(l.unitPrice, 7.55);
+});
+
+// The counterexample the resolveInCatalog comment documents: a coincidental price twin
+// that shares exactly ONE distinctive token.
+const SHOWER = [
+  { name: 'Tub and Shower Valve', desc: '', price: 220, taxable: true },
+  { name: 'Shower Pan', desc: '', price: 260, taxable: true },
+  ...filler(150),
+];
+
+test('exact-price confirm REFUSES a 1-token price twin (shower valve -> Shower Pan)', () => {
+  // "shower valve" $260 top-matches "Tub and Shower Valve" ($220, price off) while
+  // "Shower Pan" coincidentally reads $260 and shares only "shower" (distinctCount 1).
+  // Confirming the pan would be a silent wrong identity, so it stays a suspect.
+  const l = resolveBidLine('shower valve', 260, SHOWER, null, 'MSR');
+  assert.ok(/Labor!|Materials!/.test(l.name));
+  assert.strictEqual(l.priceFlag, 'red');
+  assert.strictEqual(l.suspects.length, 1);
+  assert.strictEqual(l.suspects[0].name, 'Tub and Shower Valve');
+});
+
+test('TWO candidates at the same exact price is ambiguous -> confirm neither', () => {
+  const AMBIG = [
+    { name: 'Toilet Wax Ring Bolts and Flange', desc: '', price: 11.10, taxable: true },
+    { name: 'Wax Ring and Bolts', desc: '', price: 7.55, taxable: true },
+    { name: 'Wax Ring Gasket', desc: '', price: 7.55, taxable: true },
+    ...filler(150),
+  ];
+  const l = resolveBidLine('instal toilet wax ring', 7.55, AMBIG, null, 'MSR');
+  assert.ok(/Labor!|Materials!/.test(l.name));            // identity not decidable
+  assert.strictEqual(l.priceFlag, 'red');
+  assert.strictEqual(l.suspects[0].name, 'Toilet Wax Ring Bolts and Flange');
+});
+
+// A terse bid against a verbose catalog name. Coverage is measured over the CANDIDATE's
+// distinctive mass, so "Replace toilet" covers only 0.25 of this name and never scored.
+const TERSE = [
+  { name: 'Toilet with Wax Ring and Bolts', desc: '', price: 11.10, taxable: true },
+  ...filler(110), ...verbFiller(40),
+];
+
+test('terse bid confirms when ALL its distinctive tokens are shared AND price is exact', () => {
+  const l = resolveBidLine('Replace toilet', 11.10, TERSE, null, 'MSR');
+  assert.strictEqual(l.name, 'Toilet with Wax Ring and Bolts');
+  assert.strictEqual(l.priceFlag, undefined);
+});
+
+test('terse route needs BOTH conditions: exact price alone does NOT let it in', () => {
+  // Same price, but "flange" is a distinctive word the human wrote that the item does
+  // not have -> full bid coverage fails, so the route is closed and nothing matches.
+  const l = resolveBidLine('Replace toilet flange', 11.10, TERSE, null, 'MSR');
+  assert.strictEqual(l.priceFlag, undefined);
+  assert.strictEqual(l.suspects, undefined);
+});
+
+test('terse route needs BOTH conditions: full coverage alone does NOT let it in', () => {
+  // Every distinctive bid token is present, but the price is off -> no route, no flag.
+  const l = resolveBidLine('Replace toilet', 20, TERSE, null, 'MSR');
+  assert.strictEqual(l.priceFlag, undefined);
+  assert.strictEqual(l.suspects, undefined);
+});
+
+// ---- "label" is an ACTION VERB (was missing -> labor lines filed as material) ----
+
+test('label line at the library price -> confirmed, category LABOR not material', () => {
+  const l = resolveBidLine('Label breakers', 25, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Label Breakers');
+  assert.strictEqual(l.category, 'labor');
+  assert.strictEqual(l.taxable, true);
+});
+
+test('label line off the library price -> Labor! sentinel, TAXABLE (real WO 03278789)', () => {
+  // Was 'Materials!' + taxable:false, which billed a labor line as a non-taxable
+  // material. The price is off 25, so it stays a flagged sentinel; only the side moves.
+  const l = resolveBidLine('Label Breakers and Disconnect', 50, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Labor!');
+  assert.strictEqual(l.category, 'labor');
+  assert.strictEqual(l.taxable, true);
+  assert.ok(l.suspects && l.suspects.some(s => s.name === 'Label Breakers'));
+});
+
+test('a BOUGHT label still reads material -- the "Material" lead wins first', () => {
+  const l = resolveBidLine('Material - breaker labels', 10, GENERAL, null, 'General');
+  assert.strictEqual(l.name, 'Materials!');
+  assert.strictEqual(l.category, 'material');
+  assert.strictEqual(l.taxable, false);
 });
 
 console.log('catalog-match test');

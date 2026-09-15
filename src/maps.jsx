@@ -10,7 +10,7 @@ import {
   itinTodayStr, itinShiftDay, useCollapsedSection, HeaderChips, Modal, toDetailData,
 } from './app.jsx';
 import { NoteCard } from './detail.jsx';
-import { orderNumberMatches, phoneMatches } from './orders-logic.js';
+import { orderNumberMatches, phoneMatches, isUpcomingSchedule } from './orders-logic.js';
 import { useTypeToSearch } from './search-hook.js';
 
 // Build the teardrop divIcon for a WO marker. Extracted from the MapsModule
@@ -23,7 +23,9 @@ import { useTypeToSearch } from './search-hook.js';
 export function woMarkerIcon(L, o, g, cfg) {
   const { statusColors, statusTags, typeColors, markerColors, overdueCfg } = cfg;
   const suspect = !!(g && g.suspect);
-  const isScheduled = !!(o.schedule && o.schedule.date);
+  // Retention (S1): schedules survive completion, so gold/overdue must gate on
+  // live-and-today-or-later, not on "has a schedule".
+  const isScheduled = isUpcomingSchedule(o, statusTags);
   const isOverdue = isScheduled && isOverdueSched(o.schedule.date, o.schedule.start);
   const tag = statusTags[o.status];
   const statusPill = statusColors && statusColors[o.status];
@@ -100,9 +102,9 @@ export function MapInset({ wo, geocache, statusColors, statusTags, mapMarkerColo
 // (same notes shape as the detail pane) + NoteCard with no handlers (-> no
 // edit/pin/delete affordances). Shows the "More Information" misc note (o.notes)
 // plus every note card, so a tech can read a WO without leaving the map.
-function NotesViewModal({ order, onClose }) {
+function NotesViewModal({ order, notes, onClose }) {
   if (!order) return null;
-  const d = toDetailData(order);
+  const d = toDetailData(order, undefined, notes);
   const accent = DEFAULT_MORE_INFO_COLOR;
   const misc = (d.raw && d.raw.notes) || '';
   return (
@@ -126,7 +128,7 @@ function NotesViewModal({ order, onClose }) {
   );
 }
 
-export function MapsModule({ activeOrders, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
+export function MapsModule({ activeOrders, notes, geocache, defaultView, selected, setSelected, routeStops, setRouteStops, techs, onSendRoute, progress, onOpenWO, onWoAction, mapsHomeState, mapsHomeAddress, mapsHomeCity, locationIqKey, mapMarkerColors, mapTypeColors, overdueCfg, overdueTick, statusTags, statusColors, techColors, statuses, hiddenTypes, setHiddenTypes }) {
   const [query, setQuery] = React.useState('');
   const searchRef = React.useRef(null);
   useTypeToSearch({ setValue: setQuery, inputRef: searchRef });
@@ -138,11 +140,11 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
   // ids the user has staged for a route. "Open in Google Maps" passes them as
   // waypoints to /maps/dir; origin defaults to the home address from settings.
   // State is session-local (does not persist) so it never blocks normal use.
-  // routeStops/setRouteStops are now App-owned props (shared with Itinerary).
+  // routeStops/setRouteStops are now App-owned props (shared with Schedule).
   // Route panel collapse: always visible at the panel bottom, collapsed by
   // default. Reuses the sidebar-section collapse store.
   const [routeOpen, toggleRoutePanel] = useCollapsedSection('maps-route', false);
-  // Target tech for "Send to Itinerary" (commits the staged route to a day).
+  // Target tech for "Send to Schedule" (commits the staged route to a day).
   const [sendTech, setSendTech] = React.useState('');
   const inRoute = React.useCallback((id) => routeStops.includes(id), [routeStops]);
   const toggleRoute = React.useCallback((id) => {
@@ -458,16 +460,27 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       // Otherwise: popup was previously dismissed by the user. Leave it
       // closed until they pick a different WO.
     }
-  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors, techColors, routeDay, routeStops]);
+    // defaultView/markerColors/typeColors are read in the body but were missing
+    // here, so those settings never repainted. All three are stable identities
+    // (memo/settings object), so adding them costs no extra runs.
+  }, [list, geocache, selected, overdueCfg, overdueTick, statusTags, statusColors, techColors, routeDay, routeStops, defaultView, markerColors, typeColors]);
 
   // Pan to the selected WO when selection changes. Does NOT touch the
   // popup - that is handled by the render-markers effect above so a
   // geocache update never resurrects a popup the user closed.
+  //
+  // geocache IS a dep here, on purpose: a WO can be selected BEFORE its address
+  // is geocoded (Jump to Map on a fresh import), and at that moment
+  // markerByIdRef has no marker for it, so the pan is skipped. Without geocache
+  // in the deps nothing ever retries and the selection silently never gets
+  // panned to. Re-running when the cache fills pans as soon as the marker exists.
+  // ACCEPTED TRADEOFF, do not "simplify" this back: an already-visible selection
+  // re-pans on every geocache update while background geocoding streams in.
   React.useEffect(() => {
     if (!selected || !mapRef.current) return;
     const m = markerByIdRef.current[selected];
     if (m) mapRef.current.panTo(m.getLatLng());
-  }, [selected]);
+  }, [selected, geocache]);
 
   // Geocoder lives at the App level (runs at startup + after imports). The
   // Maps module only reads the cache + progress here.
@@ -727,7 +740,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
                           background: 'transparent', color: 'var(--accent)',
                           fontFamily: 'inherit', fontSize: 13, fontWeight: 600,
                           cursor: tech ? 'pointer' : 'default', opacity: tech ? 1 : 0.5,
-                        }}>Send to Itinerary</button>
+                        }}>Send to Schedule</button>
                     </div>
                   );
                 })()}
@@ -793,18 +806,23 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
         let left = ctxMenu.x;
         if (left + w > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - w - pad);
         if (top + h > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - h - pad);
-        const item = (label, onClick, danger) => (
-          <div
-            onClick={() => { onClick(); closeCtxMenu(); }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-            style={{
-              padding: '7px 12px', fontSize: 13,
-              color: danger ? 'var(--flag-emergency)' : 'var(--text-1)',
-              cursor: 'pointer', userSelect: 'none',
-            }}
-          >{label}</div>
-        );
+        const item = (label, onClick, danger, opts) => {
+          const disabled = !!(opts && opts.disabled);
+          return (
+            <div
+              title={opts && opts.title ? opts.title : undefined}
+              onClick={() => { if (disabled) return; onClick(); closeCtxMenu(); }}
+              onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+              onMouseLeave={(e) => { if (!disabled) e.currentTarget.style.background = 'transparent'; }}
+              style={{
+                padding: '7px 12px', fontSize: 13,
+                color: disabled ? 'var(--text-3)' : danger ? 'var(--flag-emergency)' : 'var(--text-1)',
+                cursor: disabled ? 'default' : 'pointer', userSelect: 'none',
+                opacity: disabled ? 0.5 : 1,
+              }}
+            >{label}</div>
+          );
+        };
         return (
           <div
             onClick={(e) => e.stopPropagation()}
@@ -832,14 +850,15 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
               {o && item('View notes', () => setNotesWO(o.id))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {onOpenWO && item('Open WO details', () => onOpenWO(ctxMenu.woId))}
-              {onWoAction && item(o && o.schedule && o.schedule.date ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
+              {onWoAction && item(o && isUpcomingSchedule(o, statusTags) ? 'Reschedule' : 'Schedule', () => onWoAction(ctxMenu.woId, 'openScheduleForm'))}
               {onWoAction && statuses && statuses.length > 0 && (
                 <div onClick={(e) => { e.stopPropagation(); setCtxStatus(true); }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   style={{ padding: '7px 12px', fontSize: 13, color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }}>Change status ▸</div>
               )}
-              {onWoAction && item('Jump to itinerary', () => onWoAction(ctxMenu.woId, 'jumpItinerary'))}
+              {onWoAction && item('Jump to schedule', () => onWoAction(ctxMenu.woId, 'jumpItinerary'), false,
+                (o && o.schedule && o.schedule.date) ? null : { disabled: true, title: 'Not scheduled yet' })}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
               {item(inRoute(ctxMenu.woId) ? 'Remove from route' : 'Add to route', () => toggleRoute(ctxMenu.woId))}
               <div style={{ height: 1, background: 'var(--border-1)', margin: '4px 0' }} />
@@ -853,6 +872,7 @@ export function MapsModule({ activeOrders, geocache, defaultView, selected, setS
       {notesWO && (
         <NotesViewModal
           order={(activeOrders || []).find(o => o.id === notesWO)}
+          notes={notes}
           onClose={() => setNotesWO(null)}
         />
       )}

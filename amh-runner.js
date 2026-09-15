@@ -104,6 +104,22 @@ function mintToken(profileDir) {
     : path.join(__dirname, 'amh-pw-token.js');
   const env = { ...process.env };
   delete env.CHROME_CRASHPAD_PIPE_NAME;
+  // PACKAGED RESOLUTION FIX. The script runs from resourcesPath (extraResources, OUTSIDE
+  // app.asar), so its require('playwright') searched resources/node_modules -> the install
+  // root -> the user profile, and found nothing: playwright is packed INSIDE app.asar, which
+  // a plain node process cannot read. Every packaged capture therefore died as
+  // AMH_RELOGIN_REQUIRED, and the re-login offered to fix it failed the same way. build.asarUnpack
+  // now lays playwright down at app.asar.unpacked/node_modules (it must be unpacked regardless:
+  // playwright spawns its own driver EXECUTABLE out of its package dir, and nothing can be
+  // executed from inside an asar), and NODE_PATH points the child at it.
+  env.NODE_PATH = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
+    : path.join(__dirname, 'node_modules');
+  // STILL system node, NOT process.execPath + ELECTRON_RUN_AS_NODE. Measured 2026-08-24:
+  // playwright-core/lib/bootstrap.js (pulled in by require('playwright')) hard-gates on
+  // process.versions.node and calls process.exit(1) below major 20; Electron 28.3.3 bundles
+  // Node 18.18.2, so Electron-as-node fails 100% of the time. That leaves system Node 20+ as
+  // a hard requirement on the end-user machine until Electron is upgraded past 30.
   return new Promise((resolve, reject) => {
     let proc;
     try {

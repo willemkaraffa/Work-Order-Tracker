@@ -3,7 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Storage API
 contextBridge.exposeInMainWorld('storage', {
   get:    (key)        => ipcRenderer.invoke('storage-get', key),
-  set:    (key, value) => ipcRenderer.invoke('storage-set', key, value),
+  // opts (optional): { skipBackup } -- see writeStore in main.js. Two-arg callers
+  // are unaffected (opts arrives undefined = rotate the ring as before).
+  set:    (key, value, opts) => ipcRenderer.invoke('storage-set', key, value, opts),
   delete: (key)        => ipcRenderer.invoke('storage-delete', key),
   list:   (prefix)     => ipcRenderer.invoke('storage-list', prefix)
 });

@@ -17,7 +17,6 @@ env   : AMH_EMAIL / AMH_PASSWORD (required for fresh login)
 """
 from __future__ import annotations
 import datetime, json, os, re, subprocess, sys, time, urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -348,11 +347,29 @@ OPEN_BUCKETS = ["AllOpen", "SchedulingRequired", "Scheduled", "InProgress",
                 "ActionRequired", "PendingAMHAction"]
 
 
+BUCKET_ROW_CAP = 50   # rows the server actually returns per tab, measured (see below)
+
+
 def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> list:
-    """One VendorAdminOrders tab, paginated. Loop pageIndex while hasNextPage is true,
-    accumulating envelopes -- this also fixes the ~100-most-recent age-out the retired
-    GET Order/Query had. Guards: stop on an empty batch and cap at max_pages so a stuck
-    hasNextPage cannot spin forever."""
+    """One VendorAdminOrders tab. THE PAGINATION DOES NOT WORK AND CANNOT BE MADE TO --
+    the server hard-caps a tab at BUCKET_ROW_CAP rows and offers no way past it. Measured
+    live 2026-08-24 against the real API:
+      * pageSize 50, 100 and 200 all return 50 rows
+      * hasNextPage is ALWAYS false, so the loop always breaks after page 0
+      * pageIndex 1 returns an empty list
+      * sortBy / sortAscending are ignored (ascending and descending return the same 50)
+    The loop is kept ONLY so that a server which later starts honouring hasNextPage is
+    picked up for free; today it is one request.
+
+    So this did NOT fix the ~100-most-recent age-out the retired GET Order/Query had, it
+    HALVED it (100 -> 50). The only reason nothing is lost today is that fetch_open_orders
+    unions the NARROW status tabs, which sit far under the cap (AllOpen burns 37 of its 50
+    slots on Completed rows that _CLOSED_STATUSES discards immediately). A tab returning
+    exactly BUCKET_ROW_CAP rows is indistinguishable from a truncated one -- hence the
+    warning below, which is the only signal that open WOs went missing.
+
+    Guards: stop on an empty batch and cap at max_pages so a stuck hasNextPage cannot spin
+    forever."""
     out: list = []
     page = 0
     while page < max_pages:
@@ -362,6 +379,10 @@ def _fetch_bucket(token: str, bucket: str, page_size: int, max_pages: int) -> li
         resp = api_post("Order/VendorAdminOrders", token, body)
         batch = as_order_list(resp)
         out.extend(batch)
+        if len(batch) >= BUCKET_ROW_CAP:
+            print(f"[API] WARNING: bucket {bucket} returned {len(batch)} rows, at the "
+                  f"{BUCKET_ROW_CAP}-row server cap. Rows past it are UNREACHABLE, so "
+                  f"open WOs may be missing from this run.", file=sys.stderr)
         has_next = bool(resp.get("hasNextPage")) if isinstance(resp, dict) else False
         if not has_next or not batch:
             break
@@ -394,10 +415,20 @@ def normalize_text(value: object) -> str:
 
 
 def choose_options_for_bid(bid: Optional[dict]) -> List[dict]:
+    """The options AMH actually approved. Live option objects carry NO isApproved key
+    (proven on WO 9831067) -- approval is in statusName, and the REJECTED option can be
+    the isPreferred one, so the old isPreferred fallback returned the unpaid price
+    ($269.50 captured vs $1714.50 paid). A Rejected option is never returned by ANY
+    branch. isApproved is kept first for payloads that do send it."""
     if not bid:
         return []
-    options = bid.get("options", []) or []
+    options = [o for o in (bid.get("options", []) or [])
+               if normalize_text(o.get("statusName")).lower() != "rejected"]
     approved = [o for o in options if o.get("isApproved")]
+    if approved:
+        return approved
+    approved = [o for o in options
+                if normalize_text(o.get("statusName")).lower() == "approved"]
     if approved:
         return approved
     preferred = [o for o in options if o.get("isPreferred")]
@@ -513,43 +544,29 @@ def extract_issues(issue_instances: dict):
     return wo_type, "\n\n".join(note_blocks)
 
 
-def hydrate_customers(token: str, items: list, workers: int = 8) -> int:
-    """Fill in `customers` from the single-WO endpoint. THE LIST FEED HAS NO CONTACTS.
-
-    Proven live 2026-08-19: POST Order/VendorAdminOrders returns customers:[] for EVERY
-    order, while GET Order/{guid} on the SAME order returns the real customers with their
-    phone numbers. Every other field build_wo reads (order.*, condititionIssueInstances,
-    remedyInstances, bids, property.address) is byte-identical between the two, so ONLY
-    customers needs the extra call -- but without it every bulk-captured WO was written
-    with phone="", contactName="" and contacts=[], silently.
-
-    Threaded: an open set is ~56 WOs at ~2s per call, which is ~2 min sequential.
-    Skips any envelope that already has customers, so the GUID path pays nothing.
-    Best effort -- a failed lookup leaves that WO contactless rather than failing capture.
-    Returns the number of WOs that gained contacts."""
-    todo = [it for it in items
-            if not (it.get("customers") or []) and (it.get("order") or it).get("id")]
-    if not todo:
-        return 0
-    today = today_api_value()
-
-    def one(item):
-        oid = (item.get("order") or item).get("id")
-        try:
-            env = api_get("Order/" + oid, token, {"today": today})
-        except Exception as exc:
-            print(f"[API] contacts lookup {oid} failed ({exc}).", file=sys.stderr)
-            return 0
-        cust = (env or {}).get("customers") or []
-        if not cust:
-            return 0
+def hydrate_customers(token: str, item: dict) -> dict:
+    """The VendorAdminOrders LIST feed returns customers as an EMPTY array on every
+    envelope (proven live 2026-08-21: list customers=arr0, GET Order/{guid} customers=arr2
+    for the same WO). Every other sub-collection matches, so customers is the one hole --
+    which silently blanked wo.phone/contactName on the whole bulk path while the single-WO
+    GUID path stayed correct. Refill from the detail endpoint when the list left it empty.
+    Best effort: on failure the WO still imports, just without a contact."""
+    if not isinstance(item, dict) or (item.get("customers") or []):
+        return item
+    order = item.get("order") or item
+    oid = normalize_text(order.get("id"))
+    if not oid:
+        return item
+    try:
+        detail = api_get("Order/" + oid, token, {"today": today_api_value()})
+    except Exception as exc:
+        print(f"[API] customer hydrate failed for {normalize_text(order.get('name'))} ({exc}).",
+              file=sys.stderr)
+        return item
+    cust = (detail or {}).get("customers") or []
+    if cust:
         item["customers"] = cust
-        return 1
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        filled = sum(pool.map(one, todo))
-    print(f"[API] contacts: filled {filled}/{len(todo)} WO(s) from Order/{{id}}.", file=sys.stderr)
-    return filled
+    return item
 
 
 def extract_contacts(customers: list):
@@ -685,10 +702,9 @@ def main():
         live = [(name, item) for name, item in order_map.items()
                 if normalize_text((item.get("order") or item).get("statusName")).lower()
                 not in _CLOSED_STATUSES]
-        hydrate_customers(token, [it for _, it in live])
         for name, item in live:
             try:
-                results[name] = build_wo(item)
+                results[name] = build_wo(hydrate_customers(token, item))
             except Exception as exc:
                 results[name] = {"ok": False, "error": f"extract failed: {exc}"}
         print(f"  all-open: {len(results)} WO(s)", file=sys.stderr)
@@ -702,11 +718,8 @@ def main():
                 results[wo_num] = {"ok": False,
                                    "error": f"WO {stripped} not found in AMH active or admin (Posted) orders."}
                 continue
-            # Both sources here are LIST envelopes (order_map / fetch_admin_order), so
-            # neither carries customers. Same lookup as the bulk path, one WO wide.
-            hydrate_customers(token, [item])
             try:
-                results[wo_num] = build_wo(item)
+                results[wo_num] = build_wo(hydrate_customers(token, item))
                 w = results[wo_num]["wo"]
                 print(f"  {wo_num}: type={w['type']} items={len(w['bidItems'])} ${w['bidAmount']}",
                       file=sys.stderr)

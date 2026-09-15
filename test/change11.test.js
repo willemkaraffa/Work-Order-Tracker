@@ -24,7 +24,8 @@ const { loadEsm } = require('./_load.js');
 const {
   phaseFor, phaseForOrder, daysSince, ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, itinTodayStr,
-  wasVisited, isTrashedReimport, clearsScheduleOnSet,
+  wasVisited, isTrashedReimport, clearsScheduleOnSet, isLiveSchedule, isOverdueDismissed,
+  migrateNoteCardsToNotes,
 } = loadEsm('src/orders-logic.js');
 const { DEFAULT_PHASES, DEFAULT_STATUSES, isCompletionStatusName } = loadEsm('src/constants.js');
 const isCompletionStatus = isCompletionStatusName; // existing test bodies call isCompletionStatus
@@ -67,8 +68,7 @@ function applySetStatus(o, payload) {
       prevStatus: o.prevStatus || payload,
       status: 'Complete - Pending Approval',
     };
-    if (next.schedule) delete next.schedule;
-    return next;
+    return next; // S1: schedule RETAINED through the auto-flip
   }
   return { ...o, status: payload };
 }
@@ -87,13 +87,13 @@ function test(name, fn) {
 
 // ─── State-transition tests ──────────────────────────────────────────────────
 
-test('markComplete: saves prevStatus + hardcodes + unschedules', () => {
+test('markComplete: saves prevStatus + hardcodes + KEEPS the schedule (S1 retention)', () => {
   const o = { id: 'A', tab: 'active', status: 'Bid Submitted - Job Complete', schedule: { date: '2030-01-01', start: '09:00' } };
   const r = markComplete(o);
   assert.strictEqual(r.tab, 'complete');
   assert.strictEqual(r.status, 'Complete - Pending Approval');
   assert.strictEqual(r.prevStatus, 'Bid Submitted - Job Complete');
-  assert.strictEqual(r.schedule, undefined);
+  assert.deepStrictEqual(r.schedule, { date: '2030-01-01', start: '09:00' });
 });
 
 test('markComplete: idempotent on prevStatus when called twice', () => {
@@ -152,11 +152,11 @@ test('restore: prevStatus missing falls back to Open', () => {
   assert.strictEqual(r.status, 'Open');
 });
 
-test('sendToInvoice: tab=sent + unschedules', () => {
+test('sendToInvoice: tab=sent + KEEPS the schedule (S1 retention)', () => {
   const o = { id: 'A', tab: 'complete', status: 'Complete - Pending Approval', schedule: { date: '2030-01-01', start: '10:00' } };
   const r = sendToInvoice(o);
   assert.strictEqual(r.tab, 'sent');
-  assert.strictEqual(r.schedule, undefined);
+  assert.deepStrictEqual(r.schedule, { date: '2030-01-01', start: '10:00' });
 });
 
 test('applySetStatus: Active + Pending-Complete → auto-flip + hardcode', () => {
@@ -211,14 +211,14 @@ test('reconciler: deleted WO without Cancelled status → hardcoded + schedule c
   assert.strictEqual(r.orders[0].prevStatus, 'Parts Pending');
 });
 
-test('reconciler: Active + Pending-Complete → tab=complete, status=hardcoded, prevStatus saved', () => {
+test('reconciler: Active + Pending-Complete → tab=complete, status=hardcoded, prevStatus saved, schedule kept', () => {
   const o = { id: 'A', tab: 'active', status: 'Pending-Complete', schedule: { date: '2030-01-01', start: '09:00' } };
   const r = reconcileV5([o], DEFAULT_PHASES);
   assert.strictEqual(r.flipped, 1);
   assert.strictEqual(r.orders[0].tab, 'complete');
   assert.strictEqual(r.orders[0].status, 'Complete - Pending Approval');
   assert.strictEqual(r.orders[0].prevStatus, 'Pending-Complete');
-  assert.strictEqual(r.orders[0].schedule, undefined);
+  assert.deepStrictEqual(r.orders[0].schedule, { date: '2030-01-01', start: '09:00' });
 });
 
 test('reconciler: Active + user-custom Job Complete status → flips to Complete', () => {
@@ -246,17 +246,19 @@ test('reconciler: tab=complete with raw status → hardcoded', () => {
   assert.strictEqual(r.orders[0].prevStatus, 'Bid Submitted - Job Complete');
 });
 
-test('reconciler: expired schedule cleared even on Active+normal status', () => {
+// S1: Pass 4 (expiry) is GONE. Nothing expires; a past date is simply kept so the
+// calendar can show past days. Only trash/cancel still clears a schedule.
+test('reconciler: past schedule KEPT on Active+normal status (no expiry any more)', () => {
   const o = { id: 'A', tab: 'active', status: 'Parts Pending', schedule: { date: '2020-01-01', start: '09:00' } };
   const r = reconcileV5([o], DEFAULT_PHASES);
-  assert.strictEqual(r.expiredCleared, 1);
-  assert.strictEqual(r.orders[0].schedule, undefined);
+  assert.strictEqual(r.expiredCleared, undefined);
+  assert.deepStrictEqual(r.orders[0].schedule, { date: '2020-01-01', start: '09:00' });
+  assert.strictEqual(r.orders[0], o, 'a past schedule alone must not rewrite the WO');
 });
 
 test('reconciler: future schedule NOT cleared', () => {
   const o = { id: 'A', tab: 'active', status: 'Parts Pending', schedule: { date: '2099-01-01', start: '09:00' } };
   const r = reconcileV5([o], DEFAULT_PHASES);
-  assert.strictEqual(r.expiredCleared, 0);
   assert.deepStrictEqual(r.orders[0].schedule, { date: '2099-01-01', start: '09:00' });
 });
 
@@ -392,13 +394,27 @@ test('migrateOrders: id-less note card gets a stable id', () => {
   assert.ok(r[0].noteCards[0].id, 'expected an id assigned');
 });
 
-test('migrateOrders: active WO in a complete-flagged phase → tab=complete + unscheduled', () => {
+// Admin S1: migrateOrders still speaks o.noteCards (it is the pre-3.0 upgrade
+// path); app.jsx hands its output to migrateNoteCardsToNotes, so the archive
+// card it mints ends up in the ONE flat notes array, not back on the order.
+test('migrateOrders: its archive card lands in the flat notes array, not on the order', () => {
+  const r = migrateOrders([{ id: 'A', tab: 'active', status: 'Open', priority: 'High' }], DEFAULT_PHASES);
+  const moved = migrateNoteCardsToNotes(r, []);
+  assert.strictEqual('noteCards' in moved.orders[0], false);
+  const note = moved.notes.find(n => n.body === 'Imported priority: High');
+  assert.ok(note, 'archive card did not migrate');
+  assert.strictEqual(note.woId, 'A');
+  // Idempotent: a second pass over the already-migrated orders adds nothing.
+  assert.strictEqual(migrateNoteCardsToNotes(moved.orders, moved.notes).notes.length, moved.notes.length);
+});
+
+test('migrateOrders: active WO in a complete-flagged phase → tab=complete, schedule kept', () => {
   const phases = DEFAULT_PHASES.map(p => p.id === 'done' ? { ...p, complete: true } : p);
   const r = migrateOrders([
     { id: 'A', tab: 'active', status: 'Closed', schedule: { date: '2099-01-01', start: '09:00' } },
   ], phases);
   assert.strictEqual(r[0].tab, 'complete');
-  assert.strictEqual(r[0].schedule, undefined);
+  assert.deepStrictEqual(r[0].schedule, { date: '2099-01-01', start: '09:00' });
 });
 
 test('migrateOrders: non-array input passes through', () => {
@@ -666,14 +682,13 @@ test('reconciler: mixed batch — 5 different states reconcile correctly in one 
     { id: 'P1', tab: 'paid', status: 'X', dateCreated: '2026-04-28' },                                      // → sent
     { id: 'C1', tab: 'complete', status: 'Bid Submitted - Job Complete', dateCreated: '2026-04-28' },        // → hardcoded status
     { id: 'T1', deleted: true, tab: 'active', status: 'Parts Pending', dateCreated: '2026-04-28', schedule: { date: '2026-05-28', start: '10:00' } }, // → Cancelled + unschedule
-    { id: 'E1', tab: 'active', status: 'Open', dateCreated: '2026-04-28', schedule: { date: '2020-01-01', start: '09:00' } }, // expired → unschedule
+    { id: 'E1', tab: 'active', status: 'Open', dateCreated: '2026-04-28', schedule: { date: '2020-01-01', start: '09:00' } }, // past date → KEPT (S1)
   ];
   const r = reconcileV5(orders, USER_PHASES);
   assert.strictEqual(r.flipped, 1);
   assert.strictEqual(r.promotedFromInvoiced, 2);
   assert.strictEqual(r.hardcodedComplete, 1);
   assert.strictEqual(r.hardcodedCancelled, 1);
-  assert.strictEqual(r.expiredCleared, 1);
   // Verify each WO landed where expected
   const byId = Object.fromEntries(r.orders.map(o => [o.id, o]));
   assert.strictEqual(byId.A1.tab, 'active');
@@ -684,8 +699,75 @@ test('reconciler: mixed batch — 5 different states reconcile correctly in one 
   assert.strictEqual(byId.C1.status, 'Complete - Pending Approval');
   assert.strictEqual(byId.C1.prevStatus, 'Bid Submitted - Job Complete');
   assert.strictEqual(byId.T1.status, 'Cancelled');
-  assert.strictEqual(byId.T1.schedule, undefined);
-  assert.strictEqual(byId.E1.schedule, undefined);
+  assert.strictEqual(byId.T1.schedule, undefined);              // trash still clears
+  assert.deepStrictEqual(byId.E1.schedule, { date: '2020-01-01', start: '09:00' }); // past date kept
+});
+
+// ─── isLiveSchedule (S1 retention predicate) ─────────────────────────────────
+// Schedules now survive complete/sent/visited/past dates, so every read consumer
+// that used to mean "is upcoming" composes this predicate with a date test.
+// NOTE the predicate deliberately does NO date comparison of its own.
+
+const LIVE_TAGS = { 'Visited': 'visited', 'On Site': 'onsite' };
+const SCHED = { date: '2099-01-01', start: '09:00' };
+
+test('isLiveSchedule: active + scheduled → true', () => {
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'Open', schedule: SCHED }, LIVE_TAGS), true);
+});
+
+test('isLiveSchedule: no schedule / no date → false', () => {
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'Open' }, LIVE_TAGS), false);
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'Open', schedule: {} }, LIVE_TAGS), false);
+  assert.strictEqual(isLiveSchedule(null, LIVE_TAGS), false);
+});
+
+test('isLiveSchedule: complete / sent / trash tab → false', () => {
+  assert.strictEqual(isLiveSchedule({ tab: 'complete', status: 'Open', schedule: SCHED }, LIVE_TAGS), false);
+  assert.strictEqual(isLiveSchedule({ tab: 'sent', status: 'Open', schedule: SCHED }, LIVE_TAGS), false);
+  assert.strictEqual(isLiveSchedule({ deleted: true, tab: 'active', status: 'Open', schedule: SCHED }, LIVE_TAGS), false);
+});
+
+test('isLiveSchedule: visited-tagged or "Job Complete" status → false (mirrors clearsScheduleOnSet)', () => {
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'Visited', schedule: SCHED }, LIVE_TAGS), false);
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'Job Complete - Enter Bid', schedule: SCHED }, LIVE_TAGS), false);
+});
+
+test('isLiveSchedule: onsite stays live (only the overdue nag silences onsite)', () => {
+  assert.strictEqual(isLiveSchedule({ tab: 'active', status: 'On Site', schedule: SCHED }, LIVE_TAGS), true);
+});
+
+test('isLiveSchedule: does NOT compare dates itself (past date still live)', () => {
+  const past = { tab: 'active', status: 'Open', schedule: { date: '2020-01-01', start: '09:00' } };
+  assert.strictEqual(isLiveSchedule(past, LIVE_TAGS), true);
+  // Callers add the date test: chip/marker = live && date >= today.
+  assert.strictEqual(isLiveSchedule(past, LIVE_TAGS) && past.schedule.date >= itinTodayStr(), false);
+});
+
+// ─── Persisted overdue dismissals (nag until dismissed, then stop) ───────────
+
+test('isOverdueDismissed: nothing stored → not dismissed', () => {
+  assert.strictEqual(isOverdueDismissed({}, 'overdue-03475941', '2026-08-14'), false);
+  assert.strictEqual(isOverdueDismissed(null, 'overdue-03475941', '2026-08-14'), false);
+});
+
+test('isOverdueDismissed: dismissed for the CURRENT schedule date → suppressed', () => {
+  const store = { 'overdue-03475941': '2026-08-14' };
+  assert.strictEqual(isOverdueDismissed(store, 'overdue-03475941', '2026-08-14'), true);
+});
+
+test('isOverdueDismissed: reschedule RE-ARMS the nag (the stable-id bug)', () => {
+  // Dismissed while scheduled 08-14, then rescheduled to 08-20. The notif id is
+  // 'overdue-' + o.id and never changes, so a bare id set would silence this WO
+  // forever. Keying on the schedule date makes the second overdue nag again.
+  const store = { 'overdue-03475941': '2026-08-14' };
+  assert.strictEqual(isOverdueDismissed(store, 'overdue-03475941', '2026-08-20'), false);
+  // Dismiss again at the new date -> suppressed again, old key is harmless.
+  const store2 = { ...store, 'overdue-03475941': '2026-08-20' };
+  assert.strictEqual(isOverdueDismissed(store2, 'overdue-03475941', '2026-08-20'), true);
+});
+
+test('isOverdueDismissed: a WO with no schedule date is never suppressed', () => {
+  assert.strictEqual(isOverdueDismissed({ 'overdue-A': '2026-08-14' }, 'overdue-A', undefined), false);
 });
 
 // ─── Report ──────────────────────────────────────────────────────────────────

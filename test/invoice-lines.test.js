@@ -5,7 +5,7 @@
 // the esbuild bridge. Exit: 0 pass / 1 fail.
 const assert = require('assert');
 const { loadEsm } = require('./_load.js');
-const { bidItemsToInvoiceLines } = loadEsm('src/orders-logic.js');
+const { bidItemsToInvoiceLines, razorSyncRows, TAX_RATE } = loadEsm('src/orders-logic.js');
 
 const results = [];
 function test(name, fn) {
@@ -132,6 +132,66 @@ test('catalog hit taxable flag still wins over the miss inference', () => {
   const catalog = withFiller({ name: 'Clear condensate drain line', price: 90, taxable: false });
   const lines = bidItemsToInvoiceLines(WO9767507, catalog, 'General');
   assert.strictEqual(lines[1].taxable, false);        // library says non-taxable
+});
+
+// ---- Fix 7: RazorSync two-line entry for a MIXED tax-inclusive line ----
+// RazorSync taxes PER LINE from the catalog item, so a line that is part taxed labor and
+// part untaxed material cannot enter as one row. Material goes under `Materials!` and the
+// PRE-TAX labor under `MSR!`; RazorSync re-adds 7.25% to the second row and the pair
+// lands on the face price.
+const money = (n) => Math.round(Number(n) * 100) / 100;
+// share = labor/(material+labor) = 200/600 = 1/3. face 900 -> labor 300, preTaxLabor
+// 279.72, tax 20.28, pre 879.72, material row 600.00.
+const MIXED = { name: 'Water Heater Replacement', desc: 'Replace 50 gallon water heater',
+  qty: 1, unitPrice: 900, category: 'labor', agreement: 'MSR',
+  material: 400, labor: 200, pre: 879.72, tax: 20.28, post: 900 };
+
+test('razorSyncRows: MIXED MSR line splits into Materials! then MSR!', () => {
+  const rows = razorSyncRows(MIXED, 'MSR');
+  assert.strictEqual(rows.length, 2);
+  assert.strictEqual(rows[0].tag, 'Materials!');      // material FIRST, entry order
+  assert.strictEqual(rows[1].tag, 'MSR!');
+  assert.strictEqual(rows[0].price, 600);
+  assert.strictEqual(rows[1].price, 279.72);
+  assert.strictEqual(rows[0].desc, MIXED.desc);       // both rows carry the same wording
+  assert.strictEqual(rows[1].desc, MIXED.desc);
+});
+
+test('razorSyncRows: the two rows sum to PRE-TAX, and to FACE once RazorSync taxes', () => {
+  const rows = razorSyncRows(MIXED, 'MSR');
+  assert.strictEqual(money(rows[0].price + rows[1].price), MIXED.pre);
+  assert.strictEqual(money(rows[0].price + rows[1].price * TAX_RATE), MIXED.post);
+});
+
+test('razorSyncRows: qty > 1 splits the FULL face, not the unit', () => {
+  const rows = razorSyncRows({ ...MIXED, qty: 2, unitPrice: 450 }, 'MSR');
+  assert.strictEqual(money(rows[0].price + rows[1].price * TAX_RATE), 900);
+});
+
+test('razorSyncRows: labor-only and material-only lines stay ONE row', () => {
+  // The 19 diagnostics/cleanings are labor-only; the 4 refrigerants are material-only.
+  const laborOnly = { ...MIXED, name: 'Clean Condenser', material: 0, labor: 150,
+    unitPrice: 150, pre: 139.86, tax: 10.14, post: 150 };
+  assert.strictEqual(razorSyncRows(laborOnly, 'MSR').length, 1);
+  const materialOnly = { ...MIXED, name: 'R410a', category: 'material', material: 62.50,
+    labor: 0, unitPrice: 62.50, pre: 62.50, tax: 0, post: 62.50 };
+  const solo = razorSyncRows(materialOnly, 'MSR');
+  assert.strictEqual(solo.length, 1);
+  assert.strictEqual(solo[0].price, 62.50);
+});
+
+test('razorSyncRows: a line with NO split stays one row', () => {
+  const { material, labor, ...noSplit } = MIXED;   // eslint-disable-line no-unused-vars
+  const rows = razorSyncRows(noSplit, 'MSR');
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].price, noSplit.pre);
+});
+
+test('razorSyncRows: an AMH line NEVER splits (D7, its columns are cost basis)', () => {
+  const rows = razorSyncRows({ ...MIXED, agreement: 'AMH' }, 'AMH');
+  assert.strictEqual(rows.length, 1);
+  // General is not tax-inclusive either.
+  assert.strictEqual(razorSyncRows({ ...MIXED, agreement: 'General' }, 'General').length, 1);
 });
 
 console.log('invoice-lines test');

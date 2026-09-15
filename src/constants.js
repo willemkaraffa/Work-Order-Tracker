@@ -31,9 +31,12 @@ export const DEFAULT_PMS = [
 //   taxableInclusive     a TAXABLE line's price already includes tax -> divide it
 //                        back out so grand = face (MSR only). AMH/General taxable
 //                        lines are pre-tax, so tax is added on top.
-//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line. AMH/MSR
-//                        default FALSE (AMH inclusive; MSR tax-included sheets); a
-//                        service-call/diagnostic/emergency wording overrides to taxable.
+//   defaultLaborTaxable  taxable default for an unmatched (miss-path) LABOR line. Only
+//                        AMH defaults FALSE (Premier pricing is inclusive and carries its
+//                        own per-line vendorTax); General and MSR labor default TRUE -- an
+//                        MSR price is tax-inclusive, so its labor portion IS tax-bearing
+//                        (roadmap-handoffs/msr-tax-accuracy.md D1). A service-call/
+//                        diagnostic/emergency wording overrides to taxable everywhere.
 export const CATALOG_TAX = {
   General: { taxableInclusive: false, defaultLaborTaxable: true },
   AMH:     { taxableInclusive: false, defaultLaborTaxable: false },
@@ -199,6 +202,23 @@ export const TYPE_COLORS = {
   P: '#0891b2', // Plumbing - cyan
   H: '#dc2626', // HVAC - red
   E: '#eab308', // Electrical - amber (legacy data only)
+};
+
+// Admin S5: one hue per NOTE FLAG, so a lit toolbar button and a row dot say
+// WHICH flag is set, not merely that one is. Semantic and theme-independent,
+// same house pattern as TYPE_COLORS. Every hue here is separated from what is
+// already spoken for: TYPE_COLORS cyan #0891b2 / red #dc2626 / amber #eab308,
+// map suspect violet #9333ea, more-info #d97706, returnPending #f59e0b and the
+// gray #6b7280 fallback. ONE deliberate collision: journal gold IS TYPE_COLORS.E,
+// accepted because E is legacy-only Electrical data that renders nowhere near a
+// note, and a gold star is the strongest semantics available for "starred".
+export const FLAG_COLORS = {
+  task:     '#16a34a', // green
+  reminder: '#db2777', // pink
+  calendar: '#2563eb', // blue
+  parts:    '#4f46e5', // indigo
+  journal:  '#eab308', // gold
+  wo:       '#14b8a6', // teal
 };
 
 // Default colors for map marker categories. User can override individually

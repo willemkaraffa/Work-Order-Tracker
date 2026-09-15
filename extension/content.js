@@ -391,10 +391,17 @@
   // Sub-Status, and Street, so new WOs can be bulk-imported from the list alone
   // (no per-detail visit). Detailed complaint/phone come from a later per-WO
   // capture on the detail page (scrapeMSR).
+  //
+  // IDENTITY ONLY: this answers WHICH page we are on, from the URL, never whether it
+  // has painted. A querySelector('a[href*="/workorder/"]') readiness check used to be
+  // ANDed in here and was removed: Aura lazy-renders the datatable, so a list the user
+  // had only just opened -- or one that is genuinely empty -- reported as "not a list
+  // page" and the scan showed the wrong error. Readiness is the caller's to judge,
+  // from the item count.
   function isMSRListPage() {
     const h = location.hostname, p = location.pathname;
     return h.includes('amherst.my.site.com') && p.includes('/partner/s/')
-      && !/\/workorder\//.test(p) && !!document.querySelector('a[href*="/workorder/"]');
+      && !/\/workorder\//.test(p);
   }
 
   // Trade from the URL slug (…/workorder/{id}/{slug}). Address-based slugs
@@ -792,7 +799,7 @@
     // surfaced only as "MSR page not ready" with no way to tell it apart from a
     // render failure.
     if (msg.action === 'ping') {
-      sendResponse({ ok: true, url: location.href, onList: /work-orders-in-assessment|work-orders-pending/i.test(location.pathname) });
+      sendResponse({ ok: true, url: location.href, onList: isMSRListPage() });
       return;
     }
     if (msg.action === 'fieldCaptured') {
@@ -852,7 +859,8 @@
       // Tall viewport so most content is "in view" and rendered without scrolling.
       f.style.cssText = 'position:fixed;left:-99999px;top:0;width:1280px;height:3000px;opacity:0;border:0';
       let settled = false;
-      const finish = (doc) => { if (settled) return; settled = true; try { f.remove(); } catch (_) {} resolve(doc); };
+      let hardTimer = null;
+      const finish = (doc) => { if (settled) return; settled = true; clearTimeout(hardTimer); try { f.remove(); } catch (_) {} resolve(doc); };
       f.onload = () => {
         let n = 0;
         (function poll() {
@@ -877,7 +885,7 @@
           setTimeout(poll, 500);
         })();
       };
-      setTimeout(() => finish(null), 35000); // hard timeout
+      hardTimer = setTimeout(() => finish(null), 35000); // hard timeout
       f.src = url;
       document.body.appendChild(f);
     });
@@ -927,37 +935,27 @@
       sendResponse({ ok: false, error: 'not on an MSR page' });
       return;
     }
-    // ACK IMMEDIATELY, SCAN AFTERWARDS. Holding the message channel open for the
-    // up-to-35s iframe load does not survive MV3: the service worker sleeps during
-    // the wait and the response is lost (seen live: no result ever posted). Mirror
-    // startMsrCapture/msrCaptureResult: ack now, post the result via a fresh message.
+    // ACK IMMEDIATELY. The result goes back as its OWN message, not as this
+    // response: mirror startMsrCapture/msrCaptureResult so the worker is never
+    // waiting on an open channel.
     sendResponse({ ok: true, started: true });
-    (async () => {
-      // PREFER THE LIVE TAB. Re-rendering the whole Lightning SPA in an off-screen
-      // iframe is the unreliable part (the same lazy-render that killed MSR batch
-      // capture). When the host tab ALREADY IS the assessment/pending list, its DOM is
-      // real, on-screen and fully rendered -- scan that and skip the iframe entirely.
-      let items = [], via = 'iframe';
-      if (/work-orders-in-assessment|work-orders-pending/i.test(location.pathname)) {
-        items = scanMsrList(document);
-        if (items.length) via = 'live tab';
-      }
-      if (!items.length) {
-        console.log('[wo] find-new: loading hidden assessment list iframe');
-        const doc = await loadInIframe(MSR_ASSESSMENT_URL, 'list');
-        // NO `|| document` FALLBACK. On a WO-detail host tab that scraped the detail
-        // page's own anchors and returned a handful of plausible-but-wrong WOs that
-        // were indistinguishable from a real scan of the list.
-        items = doc ? scanMsrList(doc) : [];
-      }
-      console.log('[wo] find-new: via=' + via + ' items=' + items.length);
-      // ZERO IS ALWAYS A FAILURE, NEVER A CLEAN SCAN. The open list is never empty in
-      // practice, and reporting 0 silently as "no new WOs" is exactly how a list that
-      // failed to render read as a list with nothing new on it.
-      chrome.runtime.sendMessage({ action: 'foundWosResult', items,
-        error: items.length ? ''
-          : 'MSR list did not render - 0 work orders were visible to the scan. Open the pending/assessment list in Chrome, let it finish loading, then run Find new again.' });
-    })();
+    // Scan the list page the USER ALREADY HAS OPEN. Handing the portal's WO numbers
+    // to the app, which diffs them against the tracker, is the whole job, and this
+    // content script is already running in that tab, so `document` IS the rendered
+    // list. The previous version re-fetched those same lists into hidden Aura
+    // iframes; loadInIframe returns a doc even when polling times out, so a blank
+    // Aura shell was indistinguishable from a rendered list and got reported as a
+    // clean scan with zero items and no error.
+    const onList = isMSRListPage();
+    const items = onList ? scanMsrList(document) : [];
+    console.log('[wo] find-new: scanned host list, items=' + items.length);
+    // Three outcomes, kept apart so every message the user sees is true. Zero rows on a
+    // real list page is NOT a clean scan -- Aura may not have painted the datatable yet
+    // -- and reporting it as success is exactly the silent zero this rewrite removed.
+    let error = '';
+    if (!onList) error = 'MSR list page not open (open an MSR work order list page, then try again).';
+    else if (!items.length) error = 'MSR list has no rows yet (let the list finish loading, then try again).';
+    chrome.runtime.sendMessage({ action: 'foundWosResult', items, error });
     // no async sendResponse; do NOT return true.
   });
 

@@ -8,6 +8,7 @@ const { runAmhCapture, acquireToken, withProfileLock, profileDirFor, STDERR_KEY 
 const { parseMsrRemittance, parseAmhRemittance } = require('./remittance-runner');
 const libraryIO      = require('./library_io');
 const { chooseBidCoFiles, selectBidItems, resolveBidSheetName, dedupeLineItems, parseOtherCell } = require('./bid-select');
+const backupLogic    = require('./backup-logic');
 
 // Single-instance guard. A second launch focuses the existing window
 // instead of trying to spin up another renderer + bridge server.
@@ -29,7 +30,8 @@ app.on('second-instance', () => {
 // ── Data storage ──────────────────────────────────────────────────────────────
 const dataPath   = path.join(app.getPath('userData'), 'wo-data.json');
 const backupDir  = path.join(app.getPath('userData'), 'backups');
-const MAX_BACKUPS = 10;
+const milestoneDir = path.join(backupDir, backupLogic.MILESTONE_DIR);
+const { MAX_BACKUPS, MAX_MILESTONES } = backupLogic;
 
 function readStore() {
   try {
@@ -46,22 +48,52 @@ function rotateBackups() {
     const dest = path.join(backupDir, `wo-data.${ts}.json`);
     fs.copyFileSync(dataPath, dest);
 
-    // Prune oldest beyond MAX_BACKUPS
+    // Prune oldest beyond MAX_BACKUPS. isRingBackup rejects the 'milestones'
+    // directory entry, so the ring never lists (let alone unlinks) a milestone.
     const files = fs.readdirSync(backupDir)
-      .filter(f => f.startsWith('wo-data.') && f.endsWith('.json'))
-      .map(f => ({ name: f, mtime: fs.statSync(path.join(backupDir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    files.slice(MAX_BACKUPS).forEach(f => {
-      try { fs.unlinkSync(path.join(backupDir, f.name)); } catch(e) {}
+      .filter(backupLogic.isRingBackup)
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(backupDir, f)).mtimeMs }));
+    backupLogic.pruneList(files, MAX_BACKUPS).forEach(name => {
+      try { fs.unlinkSync(path.join(backupDir, name)); } catch(e) {}
     });
   } catch(e) {
     console.log('Backup rotation failed (non-fatal):', e.message);
   }
 }
 
-function writeStore(store) {
+// Milestone tier: a rollback archive the churn ring cannot evict (see
+// backup-logic.js). One snapshot per day and one per app version, kept in the
+// backups/milestones/ SUBDIRECTORY. Non-fatal throughout: a backup failure must
+// never block startup.
+function takeMilestoneIfDue() {
+  try {
+    if (!fs.existsSync(dataPath)) return;
+    const statePath = path.join(milestoneDir, backupLogic.MILESTONE_STATE);
+    let last = null;
+    try { last = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch(e) { last = null; }
+    const now = Date.now();
+    const reason = backupLogic.milestoneDue(now, app.getVersion(), last);
+    if (!reason) return;
+    fs.mkdirSync(milestoneDir, { recursive: true });
+    fs.copyFileSync(dataPath, path.join(milestoneDir, backupLogic.milestoneFileName(reason, now)));
+    fs.writeFileSync(statePath, JSON.stringify({ at: now, version: app.getVersion() }), 'utf8');
+
+    const files = fs.readdirSync(milestoneDir)
+      .filter(backupLogic.isMilestoneBackup)
+      .map(f => ({ name: f, mtime: fs.statSync(path.join(milestoneDir, f)).mtimeMs }));
+    backupLogic.pruneList(files, MAX_MILESTONES).forEach(name => {
+      try { fs.unlinkSync(path.join(milestoneDir, name)); } catch(e) {}
+    });
+  } catch(e) {
+    console.log('Milestone backup failed (non-fatal):', e.message);
+  }
+}
+
+// opts.skipBackup: the caller opts out of the ring snapshot. Note writes use it
+// (src/data.js) because they are the high-churn path that flooded the ring.
+function writeStore(store, opts) {
   fs.mkdirSync(path.dirname(dataPath), { recursive: true });
-  rotateBackups();
+  if (!(opts && opts.skipBackup)) rotateBackups();
   fs.writeFileSync(dataPath, JSON.stringify(store, null, 2), 'utf8');
 }
 
@@ -469,6 +501,11 @@ function registerGlobalHotkey(combo) {
 }
 
 app.whenReady().then(() => {
+  // BEFORE the window. src/data.js runs migrateNoteCardsToNotes/migrateEntriesToNotes
+  // as the renderer loads and then writes, so once the window is up the file on disk
+  // is ALREADY migrated and a snapshot of it is worthless as a rollback point. This
+  // is the only moment a genuine pre-migration copy exists.
+  takeMilestoneIfDue();
   mainWin = createWindow();
   registerGlobalHotkey(currentHotkey);
   ensureTray();
@@ -487,8 +524,8 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 ipcMain.handle('storage-get', (_e, key) => {
   try { const s = readStore(); return s[key] !== undefined ? { key, value: s[key] } : null; } catch { return null; }
 });
-ipcMain.handle('storage-set', (_e, key, value) => {
-  try { const s = readStore(); s[key] = value; writeStore(s); return { key, value }; } catch { return null; }
+ipcMain.handle('storage-set', (_e, key, value, opts) => {
+  try { const s = readStore(); s[key] = value; writeStore(s, opts); return { key, value }; } catch { return null; }
 });
 ipcMain.handle('storage-delete', (_e, key) => {
   try { const s = readStore(); delete s[key]; writeStore(s); return { key, deleted: true }; } catch { return null; }
@@ -873,7 +910,17 @@ async function readSheetOtherItems(file, sheetName) {
         // diagnostic-only visit whose OTHER is blank (WO 03753381 Buffalo Way) still
         // reads; dedupeLineItems collapses it when OTHER restates "$85 Service Call".
         const desc = /diagnostic fee|service call/i.test(name) ? 'Service Call' : name;
-        items.push({ desc, unitPrice: Math.round(price * 100) / 100, qty: 1 });
+        // Fix 6: `price` above is the EXTENDED figure (the "Line Item Price" column is
+        // Qty x Total Price, and the fallback multiplies by q itself), so emitting qty 1
+        // hid the count AND compared an extended amount against the library's UNIT price,
+        // flagging real matches. Emit qty q at price/q instead: same line total, count
+        // visible, unit price is what the matcher wants. Guard: split only when the
+        // extended cents divide evenly by an integer q. A rounded unit price times the
+        // count would not sum back, and one cent of drift flips reconcileMsrRow from
+        // 'match' to 'off'. `src` is internal provenance for dedupeLineItems only.
+        const cents = Math.round(price * 100);
+        const split = Number.isInteger(q) && q > 1 && cents % q === 0;
+        items.push({ desc, unitPrice: (split ? cents / q : cents) / 100, qty: split ? q : 1, src: 'table' });
       }
     }
   }
@@ -888,7 +935,10 @@ async function readSheetOtherItems(file, sheetName) {
         if (stop) break;
         const desc = cellText(row, cDesc).trim();
         if (!desc) continue;
-        for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: 1 });
+        // Fix 6: carry parseOtherCell's qty through ("(2x) Clean Condenser" is 2 x $150,
+        // not 1 x $300); hardcoding 1 here threw the count away again. src tags the section
+        // so dedupeLineItems will not merge two genuine repeat OTHER lines into one.
+        for (const it of parseOtherCell(desc)) items.push({ desc: it.desc, unitPrice: it.unitPrice, qty: it.qty, src: 'other' });
       }
     }
   }
@@ -948,7 +998,9 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec, paid) => {
     // sheet (a CO fully restates the WO); additive union of bid+CO is the fallback for a
     // partially-itemized CO. Whichever total is closest to paid wins (primary on ties).
     const candidates = [];
-    for (const p of allBidCoSheets(r.folder)) {
+    const folderExists = fs.existsSync(r.folder);
+    const sheets = allBidCoSheets(r.folder);
+    for (const p of sheets) {
       let rows = [], statedTotal = null;
       try { const res = await readSheetOtherItems(p, sheetName); rows = (res && res.items) || []; statedTotal = (res && res.statedTotal != null) ? res.statedTotal : null; } catch (_) { rows = []; statedTotal = null; }
       if (!rows.length) continue;
@@ -956,7 +1008,18 @@ ipcMain.handle('read-bid-lineitems', async (_e, rec, paid) => {
       candidates.push({ name: path.basename(p), mtime, path: p, rows, statedTotal });
     }
     const sel = selectBidItems(candidates, paid);
-    return { ok: true, items: sel.items, count: sel.items.length, statedTotal: sel.statedTotal };
+    // SAY WHY there is nothing, instead of returning a silent empty. A bid sheet is read
+    // ONLY from this WO's own folder (<property>\WO <num>), which is the tree the app
+    // itself creates: a sheet sitting anywhere else belongs to no WO we can name, and
+    // guessing would invoice one WO's scope onto another (one property routinely holds
+    // several WOs). So "this WO has no folder yet" is a real, reportable state, not an
+    // error to swallow -- swallowing it is why folders predating the WO-number level read
+    // as "no bid sheet" with nothing the user could act on.
+    const reason = sel.items.length ? null
+      : !folderExists ? 'no-wo-folder'
+      : !sheets.length ? 'no-bid-sheet'
+      : 'sheets-had-no-rows';
+    return { ok: true, items: sel.items, count: sel.items.length, statedTotal: sel.statedTotal, reason, folder: r.folder };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 
@@ -1338,6 +1401,14 @@ function spawnRelogin() {
     : path.join(__dirname, 'amh-pw-login.js');
   const env = { ...process.env };
   delete env.CHROME_CRASHPAD_PIPE_NAME;   // leaks into the child msedge and crashes it
+  // Same packaged-resolution fix as amh-runner's mintToken (see the long WHY there): the
+  // script lives at resourcesPath, outside app.asar, so it cannot see the packed playwright.
+  // build.asarUnpack ships playwright unpacked and NODE_PATH aims the child at it. Interpreter
+  // stays system node: playwright-core's bootstrap process.exit(1)s below Node 20 and Electron
+  // 28 bundles Node 18, so ELECTRON_RUN_AS_NODE is not an option here (measured 2026-08-24).
+  env.NODE_PATH = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
+    : path.join(__dirname, 'node_modules');
   return new Promise((resolve) => {
     let proc;
     try {

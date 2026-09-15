@@ -1,0 +1,90 @@
+{
+  "intent": "docs/intent/2026-09-15-merge-main-into-schedule-retention.md",
+  "sha256": "890f497e122437d941c29dd5e2e4c01952d4ccf98432e45a8f577e3a5911af6f",
+  "source": "claude-code-transcript",
+  "evidence": {
+    "sessionId": "ebd12434-5875-4733-8dcc-b94eedaf9db3",
+    "uuid": "f1c7e9d3-8650-4f76-9da6-7248d15e3caf",
+    "timestamp": "2026-09-15T19:23:06.923Z",
+    "question": "Merge record revised for PO 0769989 (slice 16): L1 now checks package.json '#0769989', lock sha 076998966d6e, installed version 0.17.0; B1 records 6fdba72 changelog bug + containment (re-checked just now: main's entry and folder match MERGE_HEAD in index and tree; 51 records staged in _pending); B2 item 5: changelog.js must write a NEW 2026-09-15 entry; Part A adds your latest instruction verbatim; Part C adds your 'PO fix first' ruling. Conflict resolutions unchanged. Approve [intent 2026-09-15-merge-main-into-schedule-retention @ 890f497e1224]?",
+    "answer": "Approve"
+  },
+  "quotes": [
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "merge main into feat/schedule-retention"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Option 1 I was just trying to capture AMH work orders"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "The capture worked"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO fix implemented. Claude full restarted"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO main is now 294bac8 (slice 12: during a merge, falsification, changelog and fidelity count only files that differ from BOTH parents, so main's 70 po-frame-hooks records and its docs/changes entry no longer count). Finish the in-progress merge of main into feat/schedule-retention:"
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Keep MERGE_HEAD. Update the project-overseer dependency to 294bac8 (npm install github:willemkaraffa/Project-Overseer#294bac8)."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO main is now 6fdba72 (slices 13-15: Architect plans against Auditor's checklist; re-checks carry proven items; plan gate and changelog writer merge-aware, plan's own intent record always in scope). Keep MERGE_HEAD."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Before installing: revise the merge intent record (L1 and its wording pin 6fdba72, not 294bac8), get approval, re-observe before, redraft the plan, run the Auditor, approve the plan."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Then: npm install github:willemkaraffa/Project-Overseer#6fdba72, check node_modules/project-overseer/package.json says 0.16.0, run node node_modules/project-overseer/scripts/plan-check.js, then review, changelog entry, HISTORY.md line, fidelity, commit."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "If the Auditor marks items MISSING, do not label them; re-check once first."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "PO main is now 0769989 (slices 13-16). Slice 16: during a merge, an entry or methodology folder either parent committed is history, so changelog.js mints the merge's own entry and folder and never reuses main's. Keep MERGE_HEAD."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Revise the merge intent record so L1 and its wording pin 0769989; get approval; re-observe before; redraft the plan; run the Auditor; approve the plan."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Then: npm install github:willemkaraffa/Project-Overseer#0769989, check node_modules/project-overseer/package.json says 0.17.0, run plan-check.js, review, changelog.js (must write a NEW 2026-09-15 entry), HISTORY.md line, fidelity, commit."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Stage HISTORY.md, NEXT-STEPS.md and the changelog entry BEFORE the fidelity ruling."
+    },
+    {
+      "kind": "user",
+      "cited": null,
+      "quote": "Expected: the review still reads main's code (~86k chars, under budget); that is slice 12's stated limit, not a failure."
+    }
+  ],
+  "recordedAt": "2026-09-15T19:23:21.992Z"
+}

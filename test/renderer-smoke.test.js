@@ -14,20 +14,21 @@ function ok(label, cond, extra) {
   else { fails++; console.log('  FAIL ' + label + (extra ? ': ' + extra : '')); }
 }
 
-// Every window this test opens, so they can all be closed before exit. pretendToBeVisual
-// runs a requestAnimationFrame loop per window on a libuv handle; leaving several of them
-// open and then calling process.exit() raced libuv's teardown and aborted the process with
-// "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c" AFTER every
-// assertion had already printed ok. The runner saw a non-zero status and reported FAIL on
-// a test that passed.
-const doms = [];
-
 // Fresh jsdom + globals before each mount. app.jsx reads global document at
 // module-eval time, so this must run BEFORE loadEsm.
+// every jsdom we mint is kept here so teardown can close it (see the bottom of
+// this file); nothing else closes them. openIntervals is the companion for the
+// App's timers: the bundle's bare setInterval resolves to NODE's global, not the
+// jsdom window, so window.close() cannot reap them. wrap setInterval ONLY --
+// wrapping setTimeout abandons this file's own await/flush timers and the run
+// exits before a single assertion, printing a false clean pass.
+const openDoms = [];
+const openIntervals = [];
+const realSetInterval = global.setInterval;
 function freshDom(storageSeed) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>',
     { url: 'http://localhost/', pretendToBeVisual: true });
-  doms.push(dom);
+  openDoms.push(dom);
   global.window = dom.window;
   global.document = dom.window.document;
   global.HTMLElement = dom.window.HTMLElement;
@@ -35,6 +36,22 @@ function freshDom(storageSeed) {
   global.getComputedStyle = dom.window.getComputedStyle;
   global.requestAnimationFrame = dom.window.requestAnimationFrame || ((cb) => setTimeout(() => cb(Date.now()), 0));
   global.cancelAnimationFrame = dom.window.cancelAnimationFrame || clearTimeout;
+  global.setInterval = (...args) => {
+    const id = realSetInterval(...args);
+    openIntervals.push(id);
+    return id;
+  };
+  // fetch stub. mounting the real App fires live geocoding requests (nominatim,
+  // photon, census), and a smoke test must not depend on a third-party endpoint's
+  // availability; stubbing keeps the run fast and offline-safe. this does NOT fix
+  // the exit bug -- the interval cleanup in teardown does that. every consumer
+  // (parseOne, evaluate) guards with Array.isArray + length, so an empty array
+  // carrying an empty .features reads as 'no result' on all provider branches.
+  const emptyGeo = [];
+  emptyGeo.features = [];
+  const fetchStub = async () => ({ ok: true, status: 200, json: async () => emptyGeo });
+  global.fetch = fetchStub;
+  dom.window.fetch = fetchStub;
   // window.storage is the electron bridge useWorkOrders reads. Absent => empty
   // default data path. Seeded => exercises the real data/migration load path.
   if (storageSeed !== undefined) {
@@ -69,6 +86,11 @@ async function mountCase(label, seed) {
   const root = dom.window.document.getElementById('root');
   ok(label + ' mounts without throwing', !threw, threw && (threw.message + '\n' + String(threw.stack).split('\n').slice(1, 4).join('\n')));
   ok(label + ' root has rendered children', !!root && root.children.length > 0);
+  // App now mounts inside RootErrorBoundary, so a render throw no longer empties
+  // #root -- it paints the fallback. Without this assert the two checks above go
+  // false-green on exactly the crash they exist to catch.
+  const caught = dom.window.document.querySelector('[data-error-boundary]');
+  ok(label + ' error boundary did not catch', !caught, caught && caught.textContent);
 }
 
 (async () => {
@@ -78,8 +100,9 @@ async function mountCase(label, seed) {
   // Case 1: empty/default data (no stored WOs). Per lesson_test_empty_state.
   await mountCase('empty data', undefined);
 
-  // Case 2: one real-shaped WO with a saved note card + history. Exercises the
-  // data load + migrate path and the WO-list render on populated state.
+  // Case 2: one real-shaped WO with a saved note card + history, plus a legacy
+  // schedule entry and an already-migrated note. Exercises the data load +
+  // Admin S1 note migration path and the WO-list render on populated state.
   // TODO(note-card input-lock): this is the slot for the recurring edit-freeze
   // regression — drive open-WO -> edit saved note -> assert input stays writable
   // once jsdom interaction for the command center is wired (CLAUDE.md C3).
@@ -91,6 +114,10 @@ async function mountCase(label, seed) {
       noteCards: [{ id: 'n1', ts: Date.now(), type: 'Note', body: 'saved note', pinned: false, edited: false }],
       history: [{ ts: Date.now(), action: 'created' }],
     }],
+    // Pre-S1 array: must migrate into wo_data.notes on load, not crash the bell.
+    entries: [{ id: 'e1', kind: 'reminder', title: 'Call the PM', date: '2026-08-22', remindAt: 1, created: 1 }],
+    // Post-S1 record, already in the new shape.
+    notes: [{ id: 'n2', ts: Date.now(), body: 'flat note', pinned: true, flags: {}, woId: 'wo_smoke_1' }],
   };
   await mountCase('seeded WO', seed);
 
@@ -146,22 +173,21 @@ async function mountCase(label, seed) {
 
   console.log('');
   console.log(fails ? (fails + ' FAILURES') : 'ALL PASS');
-
-  // Close every window (stops its rAF loop), then let the loop turn so the handles
-  // finish closing before the process goes away.
-  for (const d of doms) { try { d.window.close(); } catch (_) {} }
-  await new Promise(r => setTimeout(r, 0));
-  await new Promise(r => setTimeout(r, 0));
-
-  // exitCode, NOT process.exit(): exit() tears the process down mid-teardown, which is
-  // the race above. Setting the code lets node leave once the loop is genuinely idle.
+  // teardown, in two parts, for two separate reasons.
+  // 1. the App registers its timers on Node's global setInterval, not on the
+  //    jsdom window, so closing the windows cannot reap them and the loop never
+  //    drains. clear the recorded ids or this file hangs forever.
+  // 2. the old hard process.exit aborted the process in win\async.c
+  //    (!(handle->flags & UV_HANDLE_CLOSING)) because it tore down esbuild's
+  //    still-live worker MessagePort, a uv_async_t, mid-close. that is why a
+  //    PASSING test reported FAIL under full-suite load, which shifted the
+  //    timing. letting node drain naturally removes the race instead of
+  //    narrowing it, so set exitCode and never exit hard.
+  for (const id of openIntervals) {
+    try { global.clearInterval(id); } catch { /* already cleared */ }
+  }
+  for (const d of openDoms) {
+    try { d.window.close(); } catch { /* already torn down */ }
+  }
   process.exitCode = fails ? 1 : 0;
-
-  // Watchdog for the opposite failure: if some handle still holds the loop open, this
-  // test would hang the whole runner. unref'd, so it never keeps the process alive on
-  // its own and only fires if we are still here 5s later.
-  setTimeout(() => {
-    console.log('renderer-smoke: event loop still busy after tests; forcing exit');
-    process.exit(fails ? 1 : 0);
-  }, 5000).unref();
 })();

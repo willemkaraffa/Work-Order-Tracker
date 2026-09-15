@@ -9,8 +9,9 @@ import {
 } from './app.jsx';
 import { bidItemsToInvoiceLines, orderNumberMatches, phoneMatches, findOtherViewMatches,
   TAX_RATE, money, computeInvoiceTotals, invoiceHasServiceCall, recomputeInvoice, isPmListed, renameSubCategory, renameCatalog, deleteCatalog, renamePage, deletePage, mergeCatalogAsPage,
-  addPage, removePage, renamePageInStore, addSection } from './orders-logic.js';
+  addPage, removePage, renamePageInStore, addSection, bidReadReasonText, sentToInvoiceIso, sortInvoiceRows, parseBidAmount } from './orders-logic.js';
 import { useTypeToSearch, useModalOpenFlag } from './search-hook.js';
+import { catalogTax } from './constants.js';   // per-catalog tax policy (taxableInclusive)
 
 // Tax model (TAX_RATE/money/computeInvoiceTotals) + the per-catalog CATALOG_TAX
 // policy live in orders-logic.js / constants.js so the money math is unit-tested.
@@ -22,6 +23,21 @@ if (typeof window !== 'undefined') { window.__invoiceCalc = computeInvoiceTotals
 // different catalog and/or page. Catalog defaults to the tab the user was viewing;
 // sub-category is internal-only (exportLibrary whitelists fields, so it never reaches
 // xlsx). onSubmit gets the full field bag; the parent decides add vs patch vs move.
+// One Material/Labor field value, as submitted. The field is text: a number, the literal
+// 'Included' sentinel (that side is BUNDLED into the other, not 0), or blank. A numeric
+// input MUST leave here as a NUMBER: computeInvoiceTotals' laborShare checks
+// `typeof === 'number'` strictly -- deliberately, so a malformed value can never be
+// coerced into a tax figure -- so a hand-entered string split would read as ABSENT and
+// the line would silently fall back to the whole-price divide-out. NOT exported: this
+// module self-mounts the App on import (app.jsx createRoot), so a fixture-free logic test
+// cannot load it -- test/msr-tax-accuracy.test.js pins this conversion by source contract
+// and proves its consequences on the money core.
+function splitVal(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (s === '') return '';
+  const n = Number(s);
+  return Number.isFinite(n) ? n : s;      // 'Included' stays a STRING
+}
 function ServiceItemModal({ mode = 'add', initial, defaultCatalog, catalogs, subCats, lib, onSubmit, onClose }) {
   const isEdit = mode === 'edit';
   const [name, setName] = React.useState(isEdit && initial ? (initial.name || '') : '');
@@ -60,7 +76,7 @@ function ServiceItemModal({ mode = 'add', initial, defaultCatalog, catalogs, sub
     onSubmit({
       name: name.trim(), desc: desc.trim(),
       price: price === '' ? 0 : parseFloat(price) || 0,
-      material: material.trim(), labor: labor.trim(),
+      material: splitVal(material), labor: splitVal(labor),
       // Taxable is per-item for every catalog now: AMH is mostly tax-inclusive
       // (non-taxable) but its service calls ($75 plumb / $90 HVAC) are taxable.
       taxable,
@@ -268,8 +284,11 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, ma
     const item = { name, desc, price, taxable, manual: true };
     if (subCategory) item.subCategory = subCategory;
     if (itemPage) item.page = itemPage; // L2 page
-    if (material) item.material = material;
-    if (labor) item.labor = labor;
+    // Cleared is '' (splitVal), not falsy-in-general: a numeric 0 is a REAL split figure
+    // (material 0 = the price is all labor = fully tax-bearing), so a truthiness test
+    // would silently drop it and send the line back to the whole-price divide-out.
+    if (material !== '') item.material = material;
+    if (labor !== '') item.labor = labor;
     if (subCategory && setSubCats && !(subCats || []).includes(subCategory)) {
       setSubCats([...(subCats || []), subCategory]);
     }
@@ -292,7 +311,9 @@ export function ServiceLibrary({ toast, subCats, setSubCats, onRenameCatalog, ma
     const patch = {
       name, desc, price, taxable, manual: true,
       subCategory: subCategory || undefined, page: itemPage || undefined,
-      material: material || undefined, labor: labor || undefined,
+      // '' (cleared) removes the field; 0 is a real figure and must survive. See addFromModal.
+      material: material === '' ? undefined : material,
+      labor: labor === '' ? undefined : labor,
     };
     if (catalog === from) {
       updateItem(idx, patch);
@@ -871,7 +892,17 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
     if (!order || !window.woFolder || !window.woFolder.readBidLineItems) return;
     let cancelled = false;
     window.woFolder.readBidLineItems(order).then(res => {
-      if (cancelled || !res || !res.ok || !Array.isArray(res.items) || !res.items.length) return;
+      if (cancelled || !res) return;
+      // Bid sheets are read ONLY from this WO's own folder. Report WHICH empty state this
+      // is instead of autofilling nothing in silence (main.js sets res.reason; a failed
+      // read used to return here saying nothing at all). bidReadReasonText is shared with
+      // the remittance report so both readers explain an empty read identically.
+      if (!res.ok) { setCaptureMsg(bidReadReasonText('read-failed:' + (res.error || 'unknown'))); return; }
+      if (!Array.isArray(res.items) || !res.items.length) {
+        const why = bidReadReasonText(res.reason);
+        if (why) setCaptureMsg(why);
+        return;
+      }
       // Route through bidItemsToInvoiceLines (shape {name=desc, qty, price}) so
       // materials are detected (taxable=false) and any service-library match
       // applies -- instead of everything defaulting to taxable Labor.
@@ -955,6 +986,12 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
         unitPrice: money(Number(l.unitPrice)),
         category: l.category === 'material' ? 'material' : 'labor',
         taxable: !!l.taxable,
+        // The material/labor split IS the tax base for a tax-inclusive line
+        // (computeInvoiceTotals reads exactly these names). Drop it here and a saved MSR
+        // invoice reloads with no split and silently falls back to the whole-price
+        // divide-out. 'Included' is kept verbatim -- it is a string sentinel, not 0.
+        ...(l.material != null ? { material: l.material } : {}),
+        ...(l.labor != null ? { labor: l.labor } : {}),
         agreement: l.agreement || tabName,
         ...(l.edited ? { edited: true } : {}),   // Slice 5: honor manual-edit protection on recompute
       }));
@@ -1118,7 +1155,16 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
                     style={{ ...inputStyle, width: '100%', textAlign: 'right' }} />
                 </td>
                 <td style={{ padding: '4px 6px', textAlign: 'center' }}>
-                  <input type="checkbox" checked={!!l.taxable} onChange={(e) => setLine(i, { taxable: e.target.checked })} />
+                  {/* On a tax-INCLUSIVE agreement (MSR) the tax figure is derived from the
+                      line's LABOR portion, so this flag no longer controls it -- shown
+                      INERT (a live control that controls nothing is worse than the bug).
+                      Not deleted: AMH and General lines still drive their tax from it. */}
+                  <input type="checkbox" checked={!!l.taxable}
+                    disabled={catalogTax(l.agreement || pm).taxableInclusive}
+                    title={catalogTax(l.agreement || pm).taxableInclusive
+                      ? 'MSR prices are tax-inclusive: tax is derived from the line’s labor portion (material is never taxed), not from this box.'
+                      : undefined}
+                    onChange={(e) => setLine(i, { taxable: e.target.checked })} />
                 </td>
                 <td style={{ padding: '4px 6px', textAlign: 'center' }}>
                   <button onClick={() => removeLine(i)} title="Remove" disabled={lines.length <= 1} style={{
@@ -1139,7 +1185,8 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
           <div style={{ width: 300, borderTop: '1px solid var(--border-1)', paddingTop: 10 }}>
             {isMSR && (
               <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 6 }}>
-                MSR: taxable prices are tax-inclusive; tax divided back out at {TAX_RATE}.
+                MSR: prices are tax-inclusive; tax is divided back out at {TAX_RATE} from the
+                LABOR portion only (material already bore tax at purchase).
               </div>
             )}
             {totalRow('Taxable subtotal', fmt(totals.taxableSubtotal))}
@@ -1176,12 +1223,43 @@ export function InvoiceEditor({ order, library, existingNumbers, onSave, onClear
 // ── Invoices module (slice 3) ─────────────────────────────────────────────────
 // change11: Billing-queue view shows tab='sent' WOs only. Row click opens the
 // invoice editor for that WO. Shows recorded invoice # + grand total when present.
+// Sortable column header for the Invoices table. Module-level so it keeps its
+// identity across InvoicesModule renders (A5). Click cycles asc/desc on its own
+// key; clicking a different column starts that column at 'asc' except sent/total,
+// which start 'desc' (newest / biggest first is what those are asked for).
+function SortTh({ id, label, sort, onSort, width, align = 'left' }) {
+  const on = sort.key === id;
+  return (
+    <th
+      onClick={() => onSort(id)}
+      title={'Sort by ' + label}
+      style={{
+        textAlign: align, padding: '6px', fontWeight: 600, width,
+        color: on ? 'var(--text-1)' : 'var(--text-3)', cursor: 'pointer', userSelect: 'none',
+      }}
+    >
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 11, color: on ? 'var(--accent)' : 'transparent' }}>
+        {sort.dir === 'asc' ? '↑' : '↓'}
+      </span>
+    </th>
+  );
+}
+
 export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId, onOpenInvoice, onWoAction, onRefreshAll }) {
   const fmt = (n) => '$' + money(n).toFixed(2);
   const [query, setQuery] = React.useState('');
   // change11: status filter dropped (only 'sent' exists now). Aging filter
   // retained for throughput review.
   const [agingFilter, setAgingFilter] = React.useState(null);     // null | '0-30' | '31-60' | '60+'
+  // Column sort. Local state, not settings.viewSorts: that map is keyed by WO-list
+  // view and its keys (age/status/lastNote) do not exist on this table.
+  const [sort, setSort] = React.useState({ key: 'sent', dir: 'desc' });
+  const onSort = React.useCallback((key) => {
+    setSort(s => s.key === key
+      ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: (key === 'sent' || key === 'total') ? 'desc' : 'asc' });
+  }, []);
   const selRef = React.useRef(null);
   React.useEffect(() => {
     if (selRef.current) selRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1230,7 +1308,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     if (bucket === '60+')   return days > 60;
     return true;
   };
-  const filtered = sentOrders.filter(o => matches(o) && inAgingBucket(ageOf(o), agingFilter));
+  const filtered = sortInvoiceRows(sentOrders.filter(o => matches(o) && inAgingBucket(ageOf(o), agingFilter)), sort);
   const aging = React.useMemo(() => {
     let a = 0, b = 0, c = 0;
     for (const o of sentOrders) {
@@ -1241,14 +1319,10 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sentOrders]);
   // change11: bid totals tile = sum of bidAmount across all sent WOs (used
-  // for throughput tracking). Parses '$NNN.NN' or bare numerics.
-  const parseBid = (raw) => {
-    if (raw == null) return 0;
-    const m = String(raw).replace(/,/g, '').match(/(-?\d+(?:\.\d{1,2})?)/);
-    return m ? parseFloat(m[1]) : 0;
-  };
+  // for throughput tracking). parseBidAmount ('$NNN.NN' or bare numerics) lives in
+  // orders-logic so the tile and the Total-column sort cannot drift apart.
   const bidTotal = React.useMemo(
-    () => sentOrders.reduce((s, o) => s + parseBid(o.bidAmount), 0),
+    () => sentOrders.reduce((s, o) => s + parseBidAmount(o.bidAmount), 0),
     [sentOrders]
   );
   return (
@@ -1342,11 +1416,12 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 90 }}>WO</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600 }}>Address</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 70 }}>Client</th>
-                  <th style={{ textAlign: 'left', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 120 }}>Invoice #</th>
-                  <th style={{ textAlign: 'right', padding: '6px', color: 'var(--text-3)', fontWeight: 600, width: 110 }}>Total</th>
+                  <SortTh id="wo" label="WO" width={90} sort={sort} onSort={onSort} />
+                  <SortTh id="address" label="Address" sort={sort} onSort={onSort} />
+                  <SortTh id="client" label="Client" width={70} sort={sort} onSort={onSort} />
+                  <SortTh id="sent" label="Sent" width={100} sort={sort} onSort={onSort} />
+                  <SortTh id="invoice" label="Invoice #" width={120} sort={sort} onSort={onSort} />
+                  <SortTh id="total" label="Total" width={110} align="right" sort={sort} onSort={onSort} />
                   <th style={{ width: 96 }} />
                 </tr>
               </thead>
@@ -1354,6 +1429,7 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
                 {filtered.map(o => {
                   const inv = o.invoice;
                   const isSel = o.id === selectedId;
+                  const sentIso = sentToInvoiceIso(o);
                   // change11: row total resolution. Recorded invoice wins.
                   // Else bidAmount. Else red "No Bid!" warning.
                   let totalCell;
@@ -1374,6 +1450,12 @@ export function InvoicesModule({ sentOrders, allOrders, onNavigateWO, selectedId
                       <td style={{ padding: '8px 6px', fontVariantNumeric: 'tabular-nums' }}>{o.id}</td>
                       <td style={{ padding: '8px 6px' }}>{o.address || ''}{o.city ? ', ' + o.city : ''}</td>
                       <td style={{ padding: '8px 6px' }}>{o.pm || ''}</td>
+                      {/* Date this WO ORIGINALLY hit the invoice queue (first
+                          'sent to billing' history entry). Muted dateCreated
+                          fallback for pre-change11 WOs with no such entry. */}
+                      <td style={{ padding: '8px 6px', fontVariantNumeric: 'tabular-nums', color: sentIso ? 'var(--text-2)' : 'var(--text-3)' }}>
+                        {sentIso || o.dateCreated || ''}
+                      </td>
                       <td style={{ padding: '8px 6px', color: inv ? 'var(--text-1)' : 'var(--text-3)' }}>
                         {inv && inv.number ? inv.number : 'not invoiced'}
                       </td>

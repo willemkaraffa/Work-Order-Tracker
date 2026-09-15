@@ -15,8 +15,19 @@ const { spawnSync } = require('child_process');
 
 const GATE = path.join(__dirname, '..', '.claude', 'hooks', 'role-lock-check.js');
 
+// git exports GIT_INDEX_FILE / GIT_DIR to its own hooks. Inherited here, `git add`
+// in a temp repo writes the OUTER commit's index, and paths staged by an earlier
+// case survive into later ones -- which is exactly how this file failed only under
+// pre-commit while passing standalone. Strip GIT_* so a temp repo is a temp repo.
+// Keys are DELETED, not blanked: an empty GIT_DIR makes git see no repo at all.
+const ENV = (() => {
+  const e = Object.assign({}, process.env);
+  for (const k of Object.keys(e)) if (k.startsWith('GIT_')) delete e[k];
+  return e;
+})();
+
 // No git, no meaningful test. Exit 2 = SKIP to test/run.js, not a failure.
-if (spawnSync('git', ['--version'], { encoding: 'utf8' }).status !== 0) {
+if (spawnSync('git', ['--version'], { encoding: 'utf8', env: ENV }).status !== 0) {
   console.log('SKIP role-lock-check: git is not available');
   process.exit(2);
 }
@@ -32,7 +43,7 @@ const LOCKED = ['.claude/settings.json', 'overseer.json', '.githooks/**'];
 // A throwaway repo per test. `overseerJson` null means the file is never written.
 function makeRepo(name, overseerJson) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `role-lock-check-${name}-`));
-  const g = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  const g = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: ENV });
   g('init');
   // A brand-new repo has no identity configured on some machines; nothing here
   // commits, but keep it local and harmless.
@@ -47,7 +58,7 @@ function write(dir, rel, content) {
   fs.writeFileSync(p, content);
 }
 function stage(dir, rel) {
-  const r = spawnSync('git', ['add', '--', rel], { cwd: dir, encoding: 'utf8' });
+  const r = spawnSync('git', ['add', '--', rel], { cwd: dir, encoding: 'utf8', env: ENV });
   assert.strictEqual(r.status, 0, `git add ${rel} failed: ${r.stderr}`);
 }
 function message(dir, text) {
@@ -55,7 +66,7 @@ function message(dir, text) {
 }
 function run(dir, msgPath) {
   const args = msgPath ? [GATE, msgPath] : [GATE];
-  const r = spawnSync(process.execPath, args, { cwd: dir, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, args, { cwd: dir, encoding: 'utf8', env: ENV });
   return { status: r.status, stderr: r.stderr || '' };
 }
 function cleanup(dir) {

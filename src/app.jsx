@@ -10,11 +10,14 @@ import {
   phaseFor, phaseForOrder, phaseStyle, daysSince, ageLevelFor, ageLevelForDays,
   ageDaysFor, migrateOrders, migrateSettingsForChange11,
   applyMarkComplete, applyReopen, applySendToInvoice, reconcileChange11, wasVisited,
-  clearsScheduleOnSet, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
+  isLiveSchedule, isUpcomingSchedule, isOverdueDismissed, orderNumberMatches, phoneMatches, findOtherViewMatches, locationOfOrder, TAB_LABELS,
   recomputeInvoice, normWoNum, matchMsrRow, migrateLibraryModel, LIB_MODEL_VERSION, renameSubCategory, renameLineAgreement,
+  itinTodayStr, itinShiftDay, getReminderNotificationItems,
+  notesForOrder, noteHistoryWoId, lastNoteTsFor, migrateNoteCardsToNotes,
 } from './orders-logic.js';
-// Re-export so existing consumers (detail.jsx, data.js) keep importing it from here.
-export { DEFAULT_STATUSES };
+// Re-export so existing consumers (detail.jsx, data.js, maps.jsx, schedule.jsx)
+// keep importing these from here.
+export { DEFAULT_STATUSES, itinTodayStr, itinShiftDay };
 import {
   PhasesContext, usePhases, StatusColorsContext, useStatusColors,
   ToastContext, useToast, PMsContext, usePMs, ClearSearchKeyContext,
@@ -27,7 +30,7 @@ import {
 import { formatPhone, haversineKm, roadKm, composeNotes } from './utils.js';
 import { MODULE_GROUPS, MODULES, MODULE_ORDER, ModuleNavContext, NavWing, RAIL as NAV_RAIL } from './nav.jsx';
 import { MapsModule, MapInset } from './maps.jsx';
-import { ItineraryModule, DayTimeline } from './itinerary.jsx';
+import { ScheduleModule, DayTimeline } from './schedule.jsx';
 import { DetailPane } from './detail.jsx';
 import { ListPane } from './listpane.jsx';
 import { SettingsDrawer } from './settings.jsx';
@@ -341,7 +344,9 @@ export function splitAddress(o) {
   return { addr: full, city: '' };
 }
 
-function toDisplayRow(o) {
+// statusTags feeds isUpcomingSchedule: schedules persist past completion now, so the
+// `◷` chip must gate on live-and-not-past rather than on "has a schedule".
+function toDisplayRow(o, statusTags, notes) {
   const { addr, city } = splitAddress(o);
   const flags = [];
   if (o.emergency) flags.push('emergency');
@@ -365,23 +370,23 @@ function toDisplayRow(o) {
     ageLevel: ageLevelForDays(ageDays),
     status: o.status || 'Open',
     tab: o.tab || 'active',
-    scheduled: !!(o.schedule && o.schedule.date),
+    scheduled: isUpcomingSchedule(o, statusTags),
     schedDate: o.schedule ? o.schedule.date : null,
     schedStart: o.schedule ? o.schedule.start : null,
     createdTs: o.dateCreated ? new Date(String(o.dateCreated)+'T00:00:00').getTime() : 0,
-    lastNoteTs: (Array.isArray(o.noteCards) ? o.noteCards : []).reduce((m, c) => Math.max(m, c.ts || 0), 0),
+    lastNoteTs: lastNoteTsFor(notes, o.id),
     // Change indicator: { kind:'new' } or { kind:'changed', fields:[...] }. Set by
     // import/capture, cleared when the WO's command center is opened.
     unseen: o.unseen || null,
   };
 }
 
-function groupByPhase(orders, phases) {
+function groupByPhase(orders, phases, statusTags, notes) {
   const list = Array.isArray(phases) && phases.length ? phases : DEFAULT_PHASES;
   const buckets = {};
   for (const o of orders) {
     const name = phaseForOrder(o, list);
-    (buckets[name] = buckets[name] || []).push(toDisplayRow(o));
+    (buckets[name] = buckets[name] || []).push(toDisplayRow(o, statusTags, notes));
   }
   const groups = [];
   for (const p of list) {
@@ -427,8 +432,8 @@ export function sortRows(rows, sort, phaseStatuses) {
     }
     if (k === 'status') {
       // Ascending in settings/phase order (Open -> Closed) by default; dir flips it.
-      // Matches phase-grouping sort (:659) and Itinerary unscheduled pool (:5587)
-      // so all status-based sorts across the app agree on direction.
+      // Matches the phase-grouping sort so all status-based sorts across the app
+      // agree on direction.
       const orderMap = new Map((phaseStatuses || []).map((s, i) => [s, i]));
       const ai = orderMap.has(a.status) ? orderMap.get(a.status) : Infinity;
       const bi = orderMap.has(b.status) ? orderMap.get(b.status) : Infinity;
@@ -467,7 +472,7 @@ function fmtCreated(d) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function fmtHistTime(ts) {
+export function fmtHistTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   const m = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -502,7 +507,11 @@ export function nextWOId(orders, customId) {
 // Mechanism ported from legacy formatPhone().
 // formatPhone moved to ./utils.js (imported at top).
 
-export function toDetailData(o) {
+// statusTags is OPTIONAL: clearsScheduleOnSet (orders-logic.js) already does
+// `const tags = statusTags || {}`, so a missing map degrades to "no visited tag"
+// and never crashes, and the notes-only caller (maps.jsx NotesViewModal) never
+// reads `scheduled`.
+export function toDetailData(o, statusTags, notes) {
   if (!o) return null;
   const { addr, city } = splitAddress(o);
   const flags = [];
@@ -539,23 +548,22 @@ export function toDetailData(o) {
     phone: o.phone || '—',
     contactName: o.contactName || '',
     contacts: Array.isArray(o.contacts) ? o.contacts : [],
-    notes: (() => {
-      const cards = Array.isArray(o.noteCards) ? o.noteCards.slice() : [];
-      // Stable sort: pinned first, then newest ts first.
-      cards.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || (b.ts || 0) - (a.ts || 0));
-      const list = cards.map(n => ({
-        id: n.id, type: n.type || 'Note',
-        time: fmtNoteTime(n.ts), body: n.body || '',
-        pinned: !!n.pinned, edited: !!n.edited,
-      }));
-      return list;
-    })(),
+    // Admin S1: the WO's slice of the flat notes array, pinned first then
+    // newest-written first (notesForOrder owns that order).
+    notes: notesForOrder(notes, o.id).map(n => ({
+      id: n.id, type: n.type || 'Note',
+      time: fmtNoteTime(n.ts), body: n.body || '',
+      pinned: !!n.pinned, edited: !!n.edited,
+    })),
     activity: (Array.isArray(o.history) ? o.history : [])
       .slice().reverse()
       .map(h => fmtHistTime(h.ts) + ' — ' + (h.action || '') + (h.detail ? ': ' + h.detail : '')),
     nextAction,
     tab: o.tab || 'active',
     schedule: o.schedule || null,
+    // Retention (S1): "has a schedule" is not "is upcoming" -- detail.jsx's
+    // context-menu row reads this instead of deriving from `schedule`.
+    scheduled: isUpcomingSchedule(o, statusTags),
     raw: o,
   };
 }
@@ -587,7 +595,7 @@ const ROUTE_WEIGHT_MAP = { low: 0.33, med: 0.66, high: 1 };
 // the candidate pool, a geo lookup, techJobTypes + weights, returns ranked
 // arrays for the two tabs plus a skipped count (candidates with no geocode).
 //   anchorGeo = { lat, lon } | null ; geoOf(id) -> { lat, lon } | null
-//   scheduledIds = Set of WO ids already on the itinerary (excluded)
+//   scheduledIds = Set of WO ids already scheduled that day (excluded)
 function scoreCandidates({ anchor, anchorGeo, candidates, geoOf, tech, techJobTypes, weights, scheduledIds, cityCounts }) {
   if (!anchorGeo) return { suggested: [], closeBy: [], skipped: 0, noAnchor: true };
   const w = { ...DEFAULT_ROUTING_WEIGHTS, ...(weights || {}) };
@@ -1336,10 +1344,11 @@ function WOForm({ initial, mode, onCancel, onSubmit, data }) {
   );
 }
 
-export function MenuItem({ onClick, danger, disabled, children }) {
+export function MenuItem({ onClick, danger, disabled, title, children }) {
   const [hover, setHover] = React.useState(false);
   return (
     <div
+      title={title || undefined}
       onClick={disabled ? undefined : onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -1620,8 +1629,13 @@ export function WOContextMenu({
 
         {(showSchedule || tab !== 'trash') && <MenuDivider />}
 
-        {showSchedule && ctxRow?.scheduled && (
-          <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'jumpToSchedule'); onClose(); }}>Jump to schedule</MenuItem>
+        {/* greyed, not hidden: a missing row reads as a missing feature. Predicate is "has a schedule date" (not scheduled/isUpcomingSchedule) since retention keeps past-dated schedules and the handler jumps on o.schedule. */}
+        {showSchedule && (
+          <MenuItem
+            disabled={!ctxRow?.schedDate}
+            title={!ctxRow?.schedDate ? 'Not scheduled yet' : undefined}
+            onClick={() => { onWoAction && onWoAction(woId, 'jumpToSchedule'); onClose(); }}
+          >Jump to schedule</MenuItem>
         )}
         {showSchedule && (
           <MenuItem onClick={() => { onWoAction && onWoAction(woId, 'openScheduleForm'); onClose(); }}>{ctxRow?.scheduled ? 'Reschedule' : 'Add to schedule'}</MenuItem>
@@ -3415,13 +3429,12 @@ export function HeaderChips() {
 // ModuleLauncher removed: the fold-out NavWing (nav.jsx) replaces the
 // fullscreen module-picker overlay.
 
-// ── Itinerary module ──────────────────────────────────────────────────────────
-// Daily, single-tech timeline. Pick a tech + day; drag active WOs from the
-// unscheduled pool onto 30-min slots (8:00 AM - 6:00 PM). Drag a scheduled
-// block to another slot to change its start time. Click a block for a popover
-// to move it to a different day/tech or unschedule. End times are intentionally
-// not modeled (job length varies). schedule lives on the WO as {date,start};
-// tech is order.tech (kept in sync by setSchedule).
+// ── Schedule helpers ──────────────────────────────────────────────────────────
+// Fixed 30-min slot grid (8:00 AM - 6:00 PM) used by the schedule form. Neither
+// the Schedule module's calendar nor the command-center rail uses it (they list
+// jobs by start time instead). End times are intentionally not
+// modeled (job length varies). schedule lives on the WO as {date,start}; tech
+// is order.tech (kept in sync by setSchedule).
 const ITIN_START_MIN = 8 * 60;   // 8:00 AM
 const ITIN_END_MIN   = 18 * 60;  // 6:00 PM
 const ITIN_STEP_MIN  = 30;
@@ -3439,16 +3452,8 @@ export function itinFmtTime(hhmm) {
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return h12 + ':' + String(m).padStart(2, '0') + ' ' + ap;
 }
-export function itinTodayStr() {
-  const d = new Date(), p = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
-export function itinShiftDay(dateStr, delta) {
-  const [y, mo, d] = String(dateStr).split('-').map(Number);
-  const dt = new Date(y, mo - 1, d + delta, 12);
-  const p = (n) => String(n).padStart(2, '0');
-  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
-}
+// itinTodayStr / itinShiftDay live in orders-logic.js (imported + re-exported
+// at the top of this file) so the pure calendar math can reuse them.
 export function itinDayLabel(dateStr) {
   const [y, mo, d] = String(dateStr).split('-').map(Number);
   const dt = new Date(y, mo - 1, d, 12);
@@ -3477,7 +3482,7 @@ export function itinSnapSlot(start) {
   return String(Math.floor(snapped / 60)).padStart(2, '0') + ':' + String(snapped % 60).padStart(2, '0');
 }
 
-// ItineraryModule carved out to ./itinerary.jsx (imported at top).
+// ScheduleModule (the read-only calendar) carved out to ./schedule.jsx.
 
 export const navBtnStyle = {
   padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border-1)',
@@ -3486,7 +3491,7 @@ export const navBtnStyle = {
 
 // Scheduling form launched from the WO context menu. Assign a technician + a
 // timeframe (day + 30-min start). Prefills from any existing schedule.
-function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick }) {
+function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOrders, geocache, techJobTypes, routingWeights, onPick, statusTags }) {
   useModalOpenFlag(true);
   const slots = React.useMemo(() => itinSlots(), []);
   const [tech, setTech] = React.useState(order.tech || techs[0] || '');
@@ -3508,7 +3513,8 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOr
     if (!onPick) return null; // routing not wired
     const gc = geocache || {};
     const anchorGeo = gc[order.id] && gc[order.id].lat != null ? gc[order.id] : null;
-    const scheduledIds = new Set((activeOrders || []).filter(o => o.schedule && o.schedule.date).map(o => o.id));
+    // Retention (S1): a stale past date is not "already scheduled" any more.
+    const scheduledIds = new Set((activeOrders || []).filter(o => isUpcomingSchedule(o, statusTags)).map(o => o.id));
     const cityCounts = {};
     for (const o of (activeOrders || [])) {
       if (scheduledIds.has(o.id)) continue;
@@ -3521,7 +3527,7 @@ function ScheduleModal({ order, techs, onSubmit, onUnschedule, onClose, activeOr
       tech, techJobTypes: techJobTypes || {}, weights: routingWeights,
       scheduledIds, cityCounts,
     });
-  }, [onPick, order, activeOrders, geocache, tech, techJobTypes, routingWeights]);
+  }, [onPick, order, activeOrders, geocache, tech, techJobTypes, routingWeights, statusTags]);
 
   const routeRows = routing ? (routeTab === 'suggested' ? routing.suggested : routing.closeBy) : [];
 
@@ -3802,10 +3808,10 @@ function App() {
   React.useEffect(() => {
     if (launchPhase && currentModule !== 'overview') setLaunchPhase(false);
   }, [currentModule, launchPhase]);
-  // Itinerary focus request from the WO context menu (jump/add to schedule).
+  // Schedule-module focus request from the WO context menu (jump to schedule).
   // { tech, date, highlightId, ts } — ts forces the module to re-apply.
   const [itinFocus, setItinFocus] = React.useState(null);
-  // Itinerary tech selection lifted to App so it persists across module navigation
+  // Schedule tech filter lifted to App so it persists across module navigation
   // within a session. Page reload resets to 'ALL' (default) by design.
   const [itinTech, setItinTech] = React.useState('ALL');
   // WO id whose scheduling form (assign tech + timeframe) is open, or null.
@@ -3817,9 +3823,13 @@ function App() {
 
   const [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard,
          addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
-         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox] = useWorkOrders();
+         addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
+         storeAddNote, storeUpdateNote, storeDeleteNote] = useWorkOrders();
   const loading = data === null;
   const orders  = data?.orders  || [];
+  // Admin S1: ONE flat notes array -- WO note cards, tasks, events, reminders.
+  // A WO note carries woId; an Admin note has woId null.
+  const notes   = data?.notes   || [];
   // search-ux Part 4: jump to a WO in whatever tab/module it lives (used by the
   // "In other tabs" search list). active/complete/trash -> Work Orders module;
   // sent -> Invoices module. Select + scroll, no forced command center.
@@ -3830,14 +3840,14 @@ function App() {
     if (loc === 'sent') { setCurrentModule('invoices'); setSelectedWO(id); pushRecent(id); }
     else { setCurrentModule('work-orders'); setCurrentView(loc); highlightWO(id); }
   }, [orders, highlightWO, pushRecent]);
-  // Auto-switch Itinerary tech when entering Itinerary with a scheduled
-  // selected WO whose tech differs from the current Itinerary tech. Sticks
-  // otherwise. Fires only on the transition INTO Itinerary, not while there.
+  // Auto-switch the Schedule tech filter when entering the module with a
+  // scheduled selected WO whose tech differs from the current filter. Sticks
+  // otherwise. Fires only on the transition INTO the module, not while there.
   const prevModuleRef = React.useRef(currentModule);
   React.useEffect(() => {
     const prev = prevModuleRef.current;
     prevModuleRef.current = currentModule;
-    if (currentModule !== 'itinerary' || prev === 'itinerary') return;
+    if (currentModule !== 'admin' || prev === 'admin') return;
     if (!selectedWO) return;
     const o = orders.find(x => x.id === selectedWO);
     if (!o || !o.schedule || !o.tech) return;
@@ -3858,8 +3868,8 @@ function App() {
   // Lifted so the maps job-type filter persists across module switches (resets on
   // reload, like itinTech). { 'P'|'H'|'PH': true } = hidden.
   const [mapsHiddenTypes, setMapsHiddenTypes] = React.useState({});
-  // Shared route stops (ordered WO ids), lifted from MapsModule so Itinerary
-  // can read/write the same route. Session-local; does not persist.
+  // Shared route stops (ordered WO ids), lifted from MapsModule so the route
+  // send can reuse them. Session-local; does not persist.
   const [routeStops, setRouteStops] = React.useState([]);
   // Import inspect modal: shown after extension import to let user review
   // newly-imported WOs before they vanish into the active list. Cleared
@@ -4141,13 +4151,17 @@ function App() {
     // complete-marked phases and flip them to tab='complete'.
     const storedPhases = (data && data.phases) || DEFAULT_PHASES;
     const migratedOrders = migrateOrders(orders, storedPhases);
+    // Admin S1: migrateOrders can still mint a note card (imported priority);
+    // route it into the flat notes array so nothing lands back on o.noteCards.
+    const moved = migrateNoteCardsToNotes(migratedOrders, notes);
     const settingsPatch = migrateSettingsForChange11(data || {});
     updateData({
-      orders: migratedOrders,
+      orders: moved.orders,
+      notes: moved.notes,
       ...settingsPatch,
       settings: { ...settings, migrationApplied: MIGRATION_VERSION },
     });
-  }, [orders, settings, data, updateData, backupBeforeApply]);
+  }, [orders, notes, settings, data, updateData, backupBeforeApply]);
   const skipMigration  = React.useCallback(() => { updateSettings({ migrationApplied: MIGRATION_VERSION }); }, [updateSettings]);
 
   // change11 self-healing reconciler (v3). Runs once when settings.change11Reconciled_v3 !== '1'.
@@ -4170,17 +4184,17 @@ function App() {
     if (loading || !settings) return;
     if (settings.change11Reconciled_v6 === '1') return;
     const storedPhases = (data && Array.isArray(data.phases)) ? data.phases : DEFAULT_PHASES;
-    // Pure core in ./orders-logic.js (passes 0-4 + counters). Side effects
+    // Pure core in ./orders-logic.js (passes 0-3 + counters). Side effects
     // (settings patch, write, toast) stay here.
     const {
       orders: finalOrders, flipped, promotedFromInvoiced, hardcodedComplete,
-      hardcodedCancelled, revertedFromComplete, expiredCleared,
+      hardcodedCancelled, revertedFromComplete,
     } = reconcileChange11(orders, storedPhases);
     const patch = migrateSettingsForChange11(data || {});
     const phasesChanged   = JSON.stringify(patch.phases)   !== JSON.stringify(storedPhases);
     const statusesChanged = JSON.stringify(patch.statuses) !== JSON.stringify((data && data.statuses) || []);
     const colorsChanged   = patch.statusColors && JSON.stringify(patch.statusColors) !== JSON.stringify((data && data.statusColors) || {});
-    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (expiredCleared > 0) || (revertedFromComplete > 0);
+    const touched = (flipped > 0) || (promotedFromInvoiced > 0) || (hardcodedComplete > 0) || (hardcodedCancelled > 0) || (revertedFromComplete > 0);
     const wrote = {};
     if (touched) wrote.orders = finalOrders;
     if (phasesChanged) wrote.phases = patch.phases;
@@ -4195,39 +4209,14 @@ function App() {
       if (promotedFromInvoiced) parts.push(promotedFromInvoiced + ' moved to Sent');
       if (hardcodedComplete) parts.push(hardcodedComplete + ' Complete status set');
       if (hardcodedCancelled) parts.push(hardcodedCancelled + ' Cancelled status set');
-      if (expiredCleared) parts.push(expiredCleared + ' expired schedule' + (expiredCleared === 1 ? '' : 's') + ' cleared');
       toast('change11 reconcile: ' + parts.join(', '));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
-  // Standalone auto-unschedule for subsequent loads (after the change11
-  // reconciler ran once). The first-load pass is handled INSIDE the reconciler
-  // to avoid a race over the same orders write. This effect waits until the
-  // reconciler's gate is set, then takes over on every load + orders mutation.
-  // Idempotent: writes only when something was cleared, so it terminates.
-  React.useEffect(() => {
-    if (loading || !Array.isArray(orders)) return;
-    if (!(settings && settings.change11Reconciled_v6 === '1')) return;
-    const today = itinTodayStr();
-    let cleared = 0;
-    const next = orders.map(o => {
-      if (!o || !o.schedule || !o.schedule.date) return o;
-      if (o.schedule.date >= today) return o;
-      cleared++;
-      const clone = { ...o };
-      const wasDate = clone.schedule.date;
-      delete clone.schedule;
-      clone.history = [...(Array.isArray(o.history) ? o.history : []),
-        { ts: Date.now(), action: 'auto-unscheduled (expired)', detail: 'was ' + wasDate }];
-      return clone;
-    });
-    if (cleared > 0) {
-      updateData({ orders: next });
-      if (toast) toast('Cleared ' + cleared + ' expired schedule' + (cleared === 1 ? '' : 's'));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, orders, settings && settings.change11Reconciled_v6]);
+  // (S1) The standalone expired-schedule sweeper that used to live here is GONE,
+  // along with reconciler Pass 4. Past schedules are retained; "is this schedule
+  // still live" is now derived at read time via isLiveSchedule.
 
   const viewSorts = (settings && settings.viewSorts) || {};
   const currentSort = viewSorts[currentView] || { key: 'created', dir: 'desc' };
@@ -4263,6 +4252,16 @@ function App() {
   // alert) re-activate once the re-nag window elapses (overdue-threshold setting)
   // so a stale WO is never lost; capture events are removed outright on click.
   const [notifReads, setNotifReads] = React.useState({});
+  // Overdue dismissals PERSIST (settings, inside the one wo_data blob) so the
+  // nag stops for good — { 'overdue-<woId>': 'YYYY-MM-DD' }. Value is the
+  // schedule date it was dismissed for; rescheduling re-arms the nag.
+  const dismissedOverdueIds = (settings && settings.dismissedOverdueIds && typeof settings.dismissedOverdueIds === 'object') ? settings.dismissedOverdueIds : {};
+  const dismissOverdue = React.useCallback((items) => {
+    const add = {};
+    for (const n of items) { if (n && (n.kind === 'overdue' || n.kind === 'reminder') && n.schedDate) add[n.id] = n.schedDate; }
+    if (!Object.keys(add).length) return;
+    updateSettings(s => ({ dismissedOverdueIds: { ...(s.dismissedOverdueIds || {}), ...add } }));
+  }, [updateSettings]);
   const pushNotif = React.useCallback((ev) => {
     setNotifEvents(prev => [{ id: 'ev-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6), ts: Date.now(), ...ev }, ...prev].slice(0, 30));
   }, []);
@@ -4455,9 +4454,9 @@ function App() {
   // retired (migrated to 'sent' via migrateOrders).
   const activeOrders   = React.useMemo(() => orders.filter(o => !o.deleted && (o.tab || 'active') === 'active'),  [orders]);
   const completeOrders = React.useMemo(() => orders.filter(o => !o.deleted && o.tab === 'complete'),              [orders]);
-  // Maps + Itinerary share the active-only universe (Complete + Sent + Trash
-  // already drop out of scheduling per change11). No phase-complete filter
-  // needed now that the deprecated `complete:true` phase flag is gone.
+  // Maps uses the active-only universe (Complete + Sent + Trash drop out per
+  // change11). The Schedule calendar deliberately does NOT: it reads every
+  // non-deleted order so past days still show completed jobs (S1 retention).
   const mapOrders = activeOrders;
   // App-level Nominatim geocoder. Runs whenever activeOrders changes (app
   // startup, after import). Walks the active list and geocodes any address
@@ -4780,12 +4779,18 @@ function App() {
         // immune to overdue (no overdue notification). 'visited' still clears
         // the schedule elsewhere; onsite keeps it but silences the nag.
         if (statusTags[o.status] === 'onsite') continue;
-        if (o.schedule && o.schedule.date && isOverdueSched(o.schedule.date, o.schedule.start)) {
+        // isLiveSchedule additionally drops `visited`-tagged WOs: schedules now
+        // survive the visit, and a finished job must not nag.
+        if (isLiveSchedule(o, statusTags) && isOverdueSched(o.schedule.date, o.schedule.start)) {
           out.push({ id: 'overdue-' + o.id, kind: 'overdue', title: 'Overdue · ' + o.id,
-            sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''), wo: o.id });
+            sub: fmtSchedule(o.schedule.date, o.schedule.start) + (o.tech ? ' · ' + o.tech : ''),
+            wo: o.id, schedDate: o.schedule.date });
         }
       }
     }
+    // S4: schedule entries whose remindAt has arrived. Derived like overdue,
+    // so the existing minute tick (overdueTick) re-evaluates them; no timer.
+    if (!loading) for (const r of getReminderNotificationItems(notes, dismissedOverdueIds)) out.push(r);
     for (const a of alerts) out.push({ id: 'alert-' + (a.wo || a.kind), kind: a.kind, title: (a.wo || a.kind), sub: a.blurb, wo: a.wo });
     // Status vocab must match main.js update-status: available -> downloading -> ready.
     // ('downloaded' is never emitted; using it dropped the notif mid-download and
@@ -4801,25 +4806,35 @@ function App() {
     const renagMs = (overdueCfg.thresholdMinutes || 60) * 60000;
     return out.filter(n => {
       if (n.update) return true;
+      // Overdue and reminders are the exception: dismissing one stops the nag
+      // PERMANENTLY (no re-nag), persisted in settings.dismissedOverdueIds keyed
+      // to the schedule date / fire time, so a reschedule (or a moved remindAt)
+      // re-arms it. Without this a reminder would resurrect every minute forever.
+      // alert/update re-nag is unchanged.
+      if (n.kind === 'overdue' || n.kind === 'reminder') return !isOverdueDismissed(dismissedOverdueIds, n.id, n.schedDate);
       const readAt = notifReads[n.id];
       return !readAt || (now - readAt) >= renagMs;
     });
-  }, [orders, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg]);
-  // Click a notification: WO items open the command center; capture items open
-  // their review modal; the update item installs.
+  }, [orders, notes, alerts, notifEvents, updateState, overdueTick, loading, statusTags, notifReads, overdueCfg, dismissedOverdueIds]);
+  // Click a notification: WO items open the command center; a WO-less reminder
+  // opens the Schedule module; capture items open their review modal; the update
+  // item installs.
   const onNotifClick = React.useCallback((n) => {
     if (!n) return;
     // Mark read so it drops off the counter. Capture events are removed outright
     // (their payload is a point-in-time snapshot — avoid acting on stale data).
     if (n.id) setNotifReads(r => ({ ...r, [n.id]: Date.now() }));
+    dismissOverdue([n]);
     if (String(n.id).startsWith('ev-')) dismissNotif(n.id);
     if (n.wo) { setCurrentModule('work-orders'); setCurrentView('active'); openWO(n.wo); }
+    else if (n.kind === 'reminder') setCurrentModule('admin');
     else if (n.captureType === 'import' && n.payload) setImportInspect(n.payload);
     else if (n.captureType === 'msr' && n.payload) setNewMsrWos(n.payload);
     else if (n.update) { if (window.updater && window.updater.install) window.updater.install(); }
-  }, [openWO, dismissNotif]);
+  }, [openWO, dismissNotif, dismissOverdue]);
   // Mark all currently-shown notifications read (counter -> 0). Capture events
-  // are cleared entirely; derived notifs re-surface after the re-nag window.
+  // are cleared entirely; alerts re-surface after the re-nag window; overdue
+  // dismissals are permanent (persisted) until the WO is rescheduled.
   const markAllNotifsRead = React.useCallback(() => {
     const now = Date.now();
     setNotifReads(r => {
@@ -4827,8 +4842,9 @@ function App() {
       for (const n of notifications) next[n.id] = now;
       return next;
     });
+    dismissOverdue(notifications);
     setNotifEvents([]);
-  }, [notifications]);
+  }, [notifications, dismissOverdue]);
 
   // Push tray state whenever relevant values change.
   React.useEffect(() => {
@@ -4915,7 +4931,7 @@ function App() {
   }, [selectedIds, deleteOrdersHard, toast, clearSelection]);
 
   // change11: bulk send-to-invoice only applies to Complete tab. Filters
-  // selection accordingly. Also auto-unschedules each moved WO.
+  // selection accordingly. Schedule is retained (S1).
   const bulkSendToInvoice = React.useCallback(() => {
     const ts = Date.now();
     const targets = orders.filter(o => selectedIds.has(o.id) && o.tab === 'complete');
@@ -4926,7 +4942,6 @@ function App() {
       o => selectedIds.has(o.id) && o.tab === 'complete',
       cur => {
         const next = { ...cur, tab: 'sent' };
-        if (next.schedule) delete next.schedule;
         next.history = [...(cur.history || []), { ts, action: 'sent to billing queue (bulk)', detail: '' }];
         return next;
       }
@@ -4944,7 +4959,6 @@ function App() {
       o => selectedIds.has(o.id) && (o.tab || 'active') === 'active',
       cur => {
         const next = { ...cur, tab: 'complete' };
-        if (next.schedule) delete next.schedule;
         next.history = [...(cur.history || []), { ts, action: 'marked complete (bulk)', detail: '' }];
         return next;
       }
@@ -4972,7 +4986,6 @@ function App() {
             prevStatus: cur.prevStatus || status,
             status: 'Complete - Pending Approval',
           };
-          if (next.schedule) delete next.schedule;
           next.history = [...(cur.history || []),
             { ts, action: 'status', detail: (cur.status || '') + ' → ' + status },
             { ts, action: 'auto-flipped to Complete', detail: 'bulk trigger status=' + status }];
@@ -4980,20 +4993,17 @@ function App() {
         }
         const next = { ...cur, status,
           history: [...(cur.history || []), { ts, action: 'status', detail: (cur.status || '') + ' → ' + status }] };
-        // `visited` tag OR "Job Complete" status clears the schedule (mirrors the
-        // single-WO path; round5 A1 / #8).
-        if (clearsScheduleOnSet(status, statusTags) && next.schedule) delete next.schedule;
         return next;
       }
     );
     toast(ids.size + ' set to ' + status);
     clearSelection();
-  }, [selectedIds, batchUpdate, toast, clearSelection, statusTags]);
+  }, [selectedIds, batchUpdate, toast, clearSelection]);
 
   const VIEW_BUILDERS = {
-    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases) }),
-    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases) }),
-    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases) }),
+    active:   () => ({ title: 'Active',   total: activeOrders.length,   groups: groupByPhase(activeOrders, phases, statusTags, notes) }),
+    complete: () => ({ title: 'Complete', total: completeOrders.length, groups: groupByPhase(completeOrders, phases, statusTags, notes) }),
+    trash:    () => ({ title: 'Trash',    total: trashOrders.length,    groups: groupByPhase(trashOrders, phases, statusTags, notes) }),
   };
 
   const activePresetId = (typeof currentView === 'string' && currentView.startsWith('sv:')) ? currentView.slice(3) : null;
@@ -5017,7 +5027,7 @@ function App() {
     // Curated, manually-ordered list: resolve woIds against live (non-trashed)
     // orders, preserve the inbox's order, drop ids that no longer resolve.
     const byId = new Map(orders.filter(o => !o.deleted).map(o => [o.id, o]));
-    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(toDisplayRow);
+    const rows = (activeInbox.woIds || []).map(id => byId.get(id)).filter(Boolean).map(o => toDisplayRow(o, statusTags, notes));
     viewData = {
       title: activeInbox.name || 'Inbox',
       total: rows.length,
@@ -5081,7 +5091,7 @@ function App() {
     () => selectedWO ? orders.find(o => o.id === selectedWO) : null,
     [orders, selectedWO]
   );
-  const detailData = toDetailData(selectedRecord);
+  const detailData = toDetailData(selectedRecord, statusTags, notes);
 
   // change11: sendToInvoice is only valid from tab='complete'. Auto-unschedule
   // and emit a clear history entry. Active WOs cannot be invoiced anymore — the
@@ -5107,7 +5117,8 @@ function App() {
 
   // change11: Active → Complete. Hardcoded status='Complete - Pending Approval'
   // (mirrors Trash's hardcoded Cancelled). Saves prior status into prevStatus
-  // so Reopen can revert. Auto-unschedule (Complete WOs leave the itinerary).
+  // so Reopen can revert. The schedule is KEPT (S1 retention); a completed WO
+  // just reads as not-live on the calendar.
   const doMarkComplete = React.useCallback((id) => {
     updateOrder(id, applyMarkComplete);
   }, [updateOrder]);
@@ -5244,9 +5255,9 @@ function App() {
     }
   }, [invoiceEditorWO, orders]);
 
-  // Itinerary module. schedule = { date:'YYYY-MM-DD', start:'HH:MM' } stored on
+  // Scheduling writer. schedule = { date:'YYYY-MM-DD', start:'HH:MM' } stored on
   // the WO. Pass schedule=null to unschedule. tech (when given) is synced into
-  // order.tech so the list view + itinerary stay one source of truth.
+  // order.tech so the list view + calendar stay one source of truth.
   const setSchedule = React.useCallback((id, schedule, tech) => {
     updateOrder(id, o => {
       const next = { ...o };
@@ -5276,10 +5287,10 @@ function App() {
     });
   }, [updateOrder, statusTags]);
 
-  // Commit the staged draft route to a tech's day (the "Send to Itinerary"
+  // Commit the staged draft route to a tech's day (the "Send to Schedule"
   // action in the Maps route panel). Route order -> sequential timeline slots.
   // Overwrites the day: any of that tech's existing scheduled WOs on that date
-  // that are NOT in the route are unscheduled (returned to the pool). Note:
+  // that are NOT in the route are unscheduled. Note:
   // scheduling never changes a WO's status in this app, so unscheduling already
   // leaves the overridden WOs at their real prior status (no prevStatus dance).
   const sendRouteToItinerary = React.useCallback(async (tech, date) => {
@@ -5290,13 +5301,13 @@ function App() {
       && o.schedule && o.schedule.date === date && !inRouteSet.has(o.id));
     if (occupied.length && !(await confirmDialog(
       tech + ' already has ' + occupied.length + ' job(s) scheduled on ' + date +
-      '. Overwrite the day? Those ' + occupied.length + ' will be returned to the unscheduled pool.', { danger: true, confirmLabel: 'Overwrite' }))) return;
+      '. Overwrite the day? Those ' + occupied.length + ' will be unscheduled.', { danger: true, confirmLabel: 'Overwrite' }))) return;
     occupied.forEach(o => setSchedule(o.id, null));
     routeStops.forEach((id, i) => setSchedule(id, { date, start: slots[Math.min(i, slots.length - 1)] }, tech));
     setRouteStops([]);
     toast('Sent ' + routeStops.length + ' stop' + (routeStops.length === 1 ? '' : 's') + ' to ' + tech);
-    setItinFocus({ tech, date, ts: Date.now() });
-    setCurrentModule('itinerary');
+    setItinFocus({ tech, date, ts: Date.now(), jump: true });
+    setCurrentModule('admin');
   }, [routeStops, orders, setSchedule, toast]);
 
   // Sidebar WO-view selection always returns to the Work Orders module.
@@ -5307,25 +5318,30 @@ function App() {
 
   // MODULE_GROUPS/MODULES/MODULE_ORDER live in nav.jsx (imported at top).
 
-  // Single source for "navigate the Itinerary to a WO": scheduled -> snap to its
-  // tech+day and highlight; unscheduled -> highlight its place in the pool (the
-  // module opens the pool and scrolls to it). Shared by switchModule (WO module
-  // entry) and the Maps 'jumpItinerary' action so every entry point behaves the
-  // same.
-  const focusItinerary = React.useCallback((woId) => {
+  // Single source for "navigate the Schedule module to a WO": scheduled -> move
+  // the calendar to its tech+day and ring-highlight it; unscheduled -> highlight
+  // only (nothing to move to). Shared by switchModule (WO module entry) and the
+  // Maps 'jumpItinerary' action so every entry point behaves the same.
+  // `jump` = "take over the binder tab" (the module lands on Calendar). A
+  // deliberate jump does; module ENTRY does NOT -- it snaps the calendar
+  // silently and leaves the module on its Scratchpad.
+  const focusItinerary = React.useCallback((woId, jump = true) => {
     const o = orders.find(x => x.id === woId);
     if (!o) return;
     if (o.schedule && o.schedule.date) {
-      setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: woId, ts: Date.now() });
+      setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: woId, ts: Date.now(), jump });
     } else {
-      setItinFocus({ highlightId: woId, ts: Date.now() });
+      setItinFocus({ highlightId: woId, ts: Date.now(), jump });
     }
   }, [orders]);
 
-  // Module entry side-effects: itinerary auto-snaps to selectedWO's schedule
+  // Module entry side-effects: the schedule calendar auto-snaps to selectedWO's schedule
   // (if any); invoices highlights selectedWO row via selectedId prop.
   const switchModule = React.useCallback((m) => {
-    if (m === 'itinerary' && selectedWO) focusItinerary(selectedWO);
+    // Entering the module is NOT a jump: snap the calendar to the WO silently
+    // so it is on the right day when the user goes there, but land on the
+    // Scratchpad, which is where the module is supposed to open.
+    if (m === 'admin' && selectedWO) focusItinerary(selectedWO, false);
     // Maps: auto-select the active WO's marker on entry (mirror jumpToMap).
     if (m === 'maps' && selectedWO) setMapsSelected(selectedWO);
     setCurrentModule(m);
@@ -5472,30 +5488,27 @@ function App() {
     toast('Work order updated');
   }, [updateOrder, toast]);
 
-  const addNote = React.useCallback((id, { type, body }) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      const note = { id: 'n_' + Date.now().toString(36), ts: Date.now(), type, body, pinned: false, edited: false };
-      return {
-        ...cur,
-        noteCards: [...cards, note],
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note added', detail: type }],
-      };
-    });
+  // Admin S1: the note itself lands in the flat notes array (store mutator);
+  // the WO keeps its own audit trail, so each handler ALSO patches o.history.
+  // Both writes are synchronous against dataRef, so neither clobbers the other.
+  const noteHistory = React.useCallback((id, action, detail) => {
+    if (!id) return;
+    updateOrder(id, cur => ({
+      ...cur,
+      history: [...(Array.isArray(cur.history) ? cur.history : []),
+                { ts: Date.now(), action, detail: detail || '' }],
+    }));
   }, [updateOrder]);
 
+  const addNote = React.useCallback((id, { type, body }) => {
+    storeAddNote({ type, body, woId: id });
+    noteHistory(id, 'note added', type);
+  }, [storeAddNote, noteHistory]);
+
   const editNote = React.useCallback((id, noteId, newBody) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      return {
-        ...cur,
-        noteCards: cards.map(c => c.id === noteId ? { ...c, body: newBody, edited: true } : c),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note edited', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    storeUpdateNote(noteId, { body: newBody, edited: true });
+    noteHistory(id, 'note edited');
+  }, [storeUpdateNote, noteHistory]);
 
   const setMisc = React.useCallback((id, text) => {
     updateOrder(id, cur => ({
@@ -5515,30 +5528,42 @@ function App() {
   }, [updateOrder]);
 
   const deleteNote = React.useCallback((id, noteId) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      return {
-        ...cur,
-        noteCards: cards.filter(c => c.id !== noteId),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: 'note deleted', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    storeDeleteNote(noteId);
+    noteHistory(id, 'note deleted');
+  }, [storeDeleteNote, noteHistory]);
+
+  // Admin S4 ruling 4: the Admin module was wired to the RAW store mutators, so
+  // a note added, edited or deleted THERE skipped the work order trail that S1
+  // ruled every note handler owes it. These three restore it for all three verbs
+  // at once, rather than leaving three exceptions. The signatures are the
+  // module's, not the detail pane's: (record) / (noteId, patch) / (noteId). A
+  // note with no woId writes no history, which is the S1 rule unchanged.
+  const scheduleAddNote = React.useCallback((record) => {
+    const id = storeAddNote(record);
+    if (record && record.woId) noteHistory(record.woId, 'note added', record.type);
+    return id;
+  }, [storeAddNote, noteHistory]);
+  const scheduleUpdateNote = React.useCallback((noteId, patch) => {
+    const n = (notes || []).find(x => x && x.id === noteId);
+    storeUpdateNote(noteId, patch);
+    const woId = noteHistoryWoId(n, patch);
+    if (woId) noteHistory(woId, 'note edited');
+  }, [notes, storeUpdateNote, noteHistory]);
+  const scheduleDeleteNote = React.useCallback((noteId) => {
+    // The lookup stays HERE and stays FIRST: after the store drops the record
+    // the woId is gone, and no resolver can recover it.
+    const n = (notes || []).find(x => x && x.id === noteId);
+    const woId = noteHistoryWoId(n);
+    storeDeleteNote(noteId);
+    if (woId) noteHistory(woId, 'note deleted');
+  }, [notes, storeDeleteNote, noteHistory]);
 
   const togglePinNote = React.useCallback((id, noteId) => {
-    updateOrder(id, cur => {
-      const cards = Array.isArray(cur.noteCards) ? cur.noteCards : [];
-      const target = cards.find(c => c.id === noteId);
-      const willPin = target && !target.pinned;
-      return {
-        ...cur,
-        noteCards: cards.map(c => c.id === noteId ? { ...c, pinned: !c.pinned } : c),
-        history: [...(Array.isArray(cur.history) ? cur.history : []),
-                  { ts: Date.now(), action: willPin ? 'note pinned' : 'note unpinned', detail: '' }],
-      };
-    });
-  }, [updateOrder]);
+    const target = notes.find(n => n.id === noteId);
+    const willPin = !(target && target.pinned);
+    storeUpdateNote(noteId, { pinned: willPin });
+    noteHistory(id, willPin ? 'note pinned' : 'note unpinned');
+  }, [notes, storeUpdateNote, noteHistory]);
 
   // Merge a capture result ({ ok, wo, warnings }) into the record IN PLACE.
   // Returns the warnings array, or null when the result was not ok. Shared by
@@ -5578,7 +5603,6 @@ function App() {
         patch.tab = 'complete';
         patch.prevStatus = cur.prevStatus || cur.status || 'Open';
         patch.status = 'Complete - Pending Approval';
-        if (patch.schedule) delete patch.schedule;
         hist.push({ ts: Date.now(), action: 'auto-flipped to Complete', detail: 'auto: Pending Validation' });
       }
       patch.history = hist;
@@ -5948,18 +5972,12 @@ function App() {
               prevStatus: cur.prevStatus || payload,
               status: 'Complete - Pending Approval',
             };
-            if (next.schedule) delete next.schedule;
             next.history = [...(cur.history || []),
               histEntry('status', (cur.status || '') + ' → ' + payload),
               histEntry('auto-flipped to Complete', 'trigger status=' + payload)];
             return next;
           }
           const next = { ...cur, status: payload };
-          // `visited` tag OR a "Job Complete" status clears the schedule (tech
-          // finished at the site). Same data effect as completion, but the WO
-          // stays on its tab (round5 A1 / #8 — batched "Job Complete - Enter Bid"
-          // is not a completion status yet still means the visit is done).
-          if (clearsScheduleOnSet(payload, statusTags) && next.schedule) delete next.schedule;
           next.history = [...(cur.history || []), histEntry('status', (cur.status || '') + ' → ' + payload)];
           return next;
         });
@@ -6051,8 +6069,8 @@ function App() {
       case 'jumpToSchedule': {
         const o = orders.find(x => x.id === id);
         if (o && o.schedule) {
-          setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now() });
-          setCurrentModule('itinerary');
+          setItinFocus({ tech: o.tech || '', date: o.schedule.date, highlightId: id, ts: Date.now(), jump: true });
+          setCurrentModule('admin');
         } else { toast('Not scheduled yet'); }
         break;
       }
@@ -6067,10 +6085,10 @@ function App() {
         setCurrentModule('maps');
         break;
       case 'jumpItinerary':
-        // Same navigation as entering Itinerary from the WO module: scheduled ->
-        // snap to slot + highlight; unscheduled -> scroll to its pool position.
+        // Same navigation as entering the Schedule module from the WO module:
+        // scheduled -> move the calendar to its day + highlight.
         focusItinerary(id);
-        setCurrentModule('itinerary');
+        setCurrentModule('admin');
         break;
       case 'regeocode': {
         // Drop the cache entry so the App-level worker picks the WO up
@@ -6321,12 +6339,12 @@ function App() {
           overdueCfg={overdueCfg}
           onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
         />
+        {/* Keyed so Milestones re-collapses per WO; DetailPane is NOT keyed, so its activity log deliberately stays open across switches. */}
         <DayTimeline
+          key={selectedWO}
           wo={selectedRecord}
-          activeOrders={activeOrders}
-          statusColors={statusColors}
-          statusTags={statusTags}
-          onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('itinerary'); }}
+          phases={phases}
+          onOpenItinerary={(id) => { focusItinerary(id); setSelectedWO(null); setCurrentModule('admin'); }}
         />
       </>}
       detail={<DetailPane
@@ -6413,7 +6431,7 @@ function App() {
           display: 'grid',
           // Sidebar column always 0: every module (incl. WO since the
           // header-uniformity rework) renders its own sidebar below its
-          // full-width header, matching the Maps/Invoices/Itinerary shell.
+          // full-width header, matching the Maps/Invoices/Schedule shell.
           gridTemplateColumns: '0 1fr 1.2fr',
           gridTemplateRows: 'minmax(0, 1fr)',
           overflow: 'hidden',
@@ -6424,6 +6442,7 @@ function App() {
             <ServiceLibrary toast={toast} subCats={librarySubCats} setSubCats={setLibrarySubCats} onRenameCatalog={cascadeCatalogRename} masterCatalog={masterCatalog} setMasterCatalog={setMasterCatalog} libraryPages={libraryPages} setLibraryPages={setLibraryPages} librarySections={librarySections} setLibrarySections={setLibrarySections} />
           ) : currentModule === 'maps' ? (
             <MapsModule
+              notes={notes}
               activeOrders={mapOrders}
               geocache={geocache}
               defaultView={mapsDefaultView}
@@ -6463,27 +6482,22 @@ function App() {
             />
           ) : currentModule === 'remittances' ? (
             <RemittancesModule orders={orders} toast={toast} onCaptureAmh={captureAmhItems} onCaptureAmhBatch={captureAmhItemsBatch} onCaptureAmhForRemittance={captureAmhForRemittance} onEnsureMsrOrders={ensureMsrOrdersForRemittance} onSaveInvoice={saveInvoice} onBillMatched={billInvoices} masterCatalog={masterCatalog} />
-          ) : currentModule === 'itinerary' ? (
-            <ItineraryModule
-              activeOrders={activeOrders}
+          ) : currentModule === 'admin' ? (
+            <ScheduleModule
+              orders={orders}
               techs={techs}
-              phases={phases}
               statusColors={statusColors}
               statusTags={statusTags}
               focus={itinFocus}
               tech={itinTech}
               setTech={setItinTech}
               onClearFocus={() => setItinFocus(null)}
-              onSetSchedule={setSchedule}
-              onOpenWO={(id) => { setCurrentModule('work-orders'); setCurrentView('active'); openWO(id); }}
-              statuses={statuses}
-              types={types}
-              pms={pms}
-              inboxes={inboxes}
-              onWoAction={woAction}
-              onAddToInbox={onAddToInbox}
-              onAddToNewInbox={onAddToNewInbox}
-              onRemoveFromInbox={removeFromInbox}
+              onOpenWO={openWO}
+              onOpenMaps={(id) => { setMapsSelected(id); setSelectedWO(null); setCurrentView('active'); setCurrentModule('maps'); }}
+              notes={notes}
+              onAddNote={scheduleAddNote}
+              onUpdateNote={scheduleUpdateNote}
+              onDeleteNote={scheduleDeleteNote}
             />
           ) : (
           <div style={{ gridColumn: '2 / 4', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
@@ -6677,6 +6691,7 @@ function App() {
               geocache={geocache}
               techJobTypes={techJobTypes}
               routingWeights={routingWeights}
+              statusTags={statusTags}
               onPick={(id) => setScheduleTarget(id)}
               onSubmit={(tech, sched) => { setSchedule(scheduleTarget, sched, tech); setScheduleTarget(null); toast('Scheduled ' + scheduleTarget); }}
               onUnschedule={() => { setSchedule(scheduleTarget, null); setScheduleTarget(null); toast('Unscheduled ' + scheduleTarget); }}
@@ -6739,5 +6754,44 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+// Last-resort error boundary. Without one, a single render throw unmounts the
+// WHOLE tree: the window keeps its last paint but every focusable node is gone,
+// so keystrokes go nowhere and it reads exactly like the modal-flag input lock
+// (see search-hook.js). Catching keeps a mounted, focusable tree plus a way out.
+// Exported so test/admin-s0-hardening.test.js can drive it directly.
+// CSS vars carry literal fallbacks: a crash on the first render happens before
+// the theme effect writes them.
+export class RootErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) {
+    // eslint-disable-next-line no-console
+    console.error('[RootErrorBoundary]', err, info && info.componentStack);
+  }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const msg = String((this.state.err && this.state.err.message) || this.state.err);
+    return (
+      <div data-error-boundary="1" style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'var(--bg-canvas, #1c1c1e)', color: 'var(--text-1, #f2f2f7)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        gap: 12, padding: 24, textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 20, fontWeight: 700 }}>Something broke while drawing this screen.</div>
+        <div style={{ fontSize: 13, color: 'var(--text-3, #98989d)', maxWidth: 640, whiteSpace: 'pre-wrap' }}>{msg}</div>
+        <button onClick={() => window.location.reload()} style={{
+          padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border-1, #3a3a3c)',
+          background: 'var(--bg-surface, #2c2c2e)', color: 'var(--text-1, #f2f2f7)',
+          fontFamily: 'inherit', fontSize: 14, cursor: 'pointer',
+        }}>Reload</button>
+        <div style={{ fontSize: 12, color: 'var(--text-3, #98989d)' }}>Your saved work orders are untouched.</div>
+      </div>
+    );
+  }
+}
+
+createRoot(document.getElementById('root')).render(
+  <RootErrorBoundary><App /></RootErrorBoundary>
+);
 

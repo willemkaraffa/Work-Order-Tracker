@@ -9,8 +9,52 @@ import {
   DEFAULT_PMS, DEFAULT_TYPES, DEFAULT_TECHS, isCompletionStatusName,
 } from './constants.js';
 import { formatPhone, composeNotes } from './utils.js';
-import { isTrashedReimport } from './orders-logic.js';
+import {
+  isTrashedReimport, normalizeNote, migrateNoteCardsToNotes, migrateEntriesToNotes,
+} from './orders-logic.js';
 import { nextWOId, DEFAULT_STATUSES } from './app.jsx';
+
+// Admin S2 -- DEBOUNCED NOTE WRITES. The store is 3.1 MB and every write both
+// copied it into the 10-slot backup ring and rewrote it, so on 2026-08-26
+// sixteen minutes of ordinary note editing evicted every pre-migration snapshot.
+// Two fixes, both here:
+//   1. COALESCE. queue() carries NO payload: it only marks the store dirty and,
+//      on the FIRST call of a burst, starts one timer. The payload is serialized
+//      at FLUSH time from getPayload(), so a typing burst collapses into ONE
+//      write and continuous typing still writes every NOTE_WRITE_MS rather than
+//      never. SERIALIZING AT FLUSH TIME IS LOAD-BEARING, not a style choice: every
+//      OTHER write path in this file still writes IMMEDIATELY, so a payload
+//      captured when the note was queued would be stale by the time it lands and
+//      would revert any order/settings/delete write that happened in between --
+//      silently, since memory would still show the newer state and only the next
+//      launch would reveal the loss. Holding a dirty flag instead means a deferred
+//      note write can only ever write the LATEST store.
+//      TRADE: a hard kill (power loss, task-kill) now loses up to ~1.5s of note
+//      text; before S2 it lost nothing. That is bounded and acceptable only
+//      because the milestone backup tier (backup-logic.js) now holds day/version
+//      snapshots the ring cannot eat.
+//   2. skipBackup. Note writes no longer rotate the ring at all; the milestone
+//      tier is their safety net. Every OTHER write path in this file still
+//      rotates, so ordinary use keeps producing ring snapshots.
+// NOTE WRITES ONLY -- deliberately not centralized in the storage layer.
+export const NOTE_WRITE_MS = 1500;
+export function createNoteWriter(getPayload, delay = NOTE_WRITE_MS) {
+  let dirty = false;    // "a note write is owed", NOT a snapshot of one
+  let timer = null;
+  const flush = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (!dirty) return;
+    dirty = false;
+    if (window.storage && window.storage.set) {
+      window.storage.set('wo_data', getPayload(), { skipBackup: true }).catch(() => {});
+    }
+  };
+  const queue = () => {
+    dirty = true;
+    if (!timer) timer = setTimeout(flush, delay);
+  };
+  return { queue, flush };
+}
 
 // Returns [data, updateOrder]; data is null while loading.
 // data is the full wo_data envelope { orders, presets, pms, settings, ... }.
@@ -22,7 +66,7 @@ export function useWorkOrders() {
     let cancelled = false;
     (async () => {
       const fresh = () => ({
-        orders: [], presets: [], inboxes: [],
+        orders: [], presets: [], inboxes: [], notes: [],
         statuses: DEFAULT_STATUSES.slice(),
         phases: DEFAULT_PHASES.map(p => ({ ...p })),
         statusColors: { ...DEFAULT_STATUS_COLORS },
@@ -55,6 +99,15 @@ export function useWorkOrders() {
         }
         if (!Array.isArray(parsed.presets))  parsed.presets  = [];
         if (!Array.isArray(parsed.inboxes))  parsed.inboxes  = [];
+        // Admin S1: ONE flat notes array is the store. Every WO note card moves
+        // off its order and every schedule entry folds in, both keyed by id, so
+        // a second load finds nothing left to move (idempotent). wo_data.entries
+        // is dropped once emptied.
+        if (!Array.isArray(parsed.notes))    parsed.notes    = [];
+        const movedCards = migrateNoteCardsToNotes(parsed.orders, parsed.notes);
+        parsed.orders = movedCards.orders;
+        parsed.notes  = migrateEntriesToNotes(parsed.entries, movedCards.notes);
+        delete parsed.entries;
         if (!Array.isArray(parsed.statuses) || !parsed.statuses.length) parsed.statuses = DEFAULT_STATUSES.slice();
         if (!Array.isArray(parsed.phases))   parsed.phases   = DEFAULT_PHASES.map(p => ({ ...p }));
         // change11: do NOT strip the legacy `complete` flag here — the
@@ -67,6 +120,13 @@ export function useWorkOrders() {
           parsed.moreInfoColor = DEFAULT_MORE_INFO_COLOR;
         }
         if (!parsed.settings || typeof parsed.settings !== 'object') parsed.settings = {};
+        // Admin S3: the module id 'itinerary' became 'admin'. lastModule is
+        // PERSISTED (app.jsx writes it on every module switch), so an un-migrated
+        // store would restore a module id no render branch matches and land the
+        // user on a blank pane. Idempotent: a store already holding 'admin' has
+        // nothing to match. Sits AFTER the settings object is guaranteed, not up
+        // with the note migrations, so it never has to re-check the type.
+        if (parsed.settings.lastModule === 'itinerary') parsed.settings.lastModule = 'admin';
         if (!parsed.settings.viewSorts || typeof parsed.settings.viewSorts !== 'object') parsed.settings.viewSorts = {};
         if (!Array.isArray(parsed.pms)   || !parsed.pms.length)   parsed.pms   = DEFAULT_PMS.slice();
         // Client fullName backfill: older data has {name, color} only. name is the
@@ -174,7 +234,9 @@ export function useWorkOrders() {
     const cur = dataRef.current;
     if (!cur) return;
     const orders = cur.orders.filter(o => o.id !== id);
-    const next = { ...cur, orders };
+    // Hard delete takes the WO's notes with it (a WO in Trash keeps its own).
+    const notes = (cur.notes || []).filter(n => n.woId !== id);
+    const next = { ...cur, orders, notes };
     dataRef.current = next;
     setData(next);
     if (window.storage && window.storage.set) {
@@ -255,12 +317,58 @@ export function useWorkOrders() {
     persistInboxes(cur, (cur.inboxes || []).map(b => b.id === id ? { ...b, woIds } : b));
   }, []);
 
+  // --- Notes (Admin S1: WO notes, tasks, events, reminders -- one array) ---
+  // Same shape as the inbox mutators: one persist helper, one write path.
+  // normalizeNote (orders-logic) owns the field rules, so a bad form submit
+  // cannot store an undated event or an undefined field. Date.now() is passed
+  // as the write clock, which is what moves `updated`.
+  // Only the IPC write defers: dataRef/setData stay synchronous, so the very next
+  // render and every reader see the new notes immediately.
+  const noteWriterRef = React.useRef(null);
+  // dataRef is a stable ref, so this closure always reads the NEWEST store at
+  // flush time -- including writes made by other paths after the note was queued.
+  if (!noteWriterRef.current) noteWriterRef.current = createNoteWriter(() => JSON.stringify(dataRef.current));
+  // A6/A7: ONE stable handler registered once, and the cleanup both removes that
+  // same handler and flushes, so neither a window teardown nor an unmount can
+  // strand the pending write. Refs only -- this must never cause a render.
+  React.useEffect(() => {
+    const writer = noteWriterRef.current;
+    const onUnload = () => writer.flush();
+    window.addEventListener('beforeunload', onUnload);
+    return () => { window.removeEventListener('beforeunload', onUnload); writer.flush(); };
+  }, []);
+  const persistNotes = (cur, notes) => {
+    const next = { ...cur, notes };
+    dataRef.current = next; setData(next);
+    noteWriterRef.current.queue();
+  };
+  const addNote = React.useCallback((record) => {
+    const cur = dataRef.current;
+    if (!cur) return null;
+    const id = 'n-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    persistNotes(cur, [...(cur.notes || []), normalizeNote(record, id, Date.now())]);
+    return id;
+  }, []);
+  const updateNote = React.useCallback((id, patch) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistNotes(cur, (cur.notes || []).map(n =>
+      n.id === id ? normalizeNote({ ...n, ...patch }, id, Date.now()) : n));
+  }, []);
+  const deleteNote = React.useCallback((id) => {
+    const cur = dataRef.current;
+    if (!cur) return;
+    persistNotes(cur, (cur.notes || []).filter(n => n.id !== id));
+  }, []);
+
   const deleteOrdersHard = React.useCallback((ids) => {
     const cur = dataRef.current;
     if (!cur) return;
     const set = new Set(ids);
     const orders = cur.orders.filter(o => !set.has(o.id));
-    const next = { ...cur, orders };
+    // Hard delete takes each WO's notes with it (a WO in Trash keeps its own).
+    const notes = (cur.notes || []).filter(n => !set.has(n.woId));
+    const next = { ...cur, orders, notes };
     dataRef.current = next; setData(next);
     if (window.storage && window.storage.set) window.storage.set('wo_data', JSON.stringify(next)).catch(() => {});
   }, []);
@@ -466,5 +574,6 @@ export function useWorkOrders() {
   }, []);
 
   return [data, updateOrder, batchUpdate, updateSettings, addOrder, deleteOrderHard, addPreset, updatePreset, deletePreset, deleteOrdersHard, upsertOrders, updateData,
-          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox];
+          addInbox, renameInbox, deleteInbox, addToInbox, removeFromInbox, reorderInbox,
+          addNote, updateNote, deleteNote];
 }
