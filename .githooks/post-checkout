@@ -1,0 +1,14 @@
+#!/bin/sh
+# post-checkout: a STAND-IN for the frame's git-hooks/post-checkout (slice 9), for the
+# same reason as the pre-commit stand-in: copied once, updated with the package.
+#
+# NEVER FAILS. The checkout has already happened by the time this runs, so there is
+# nothing to refuse. Every path exits 0.
+
+if [ -f node_modules/project-overseer/git-hooks/post-checkout ]; then
+  sh node_modules/project-overseer/git-hooks/post-checkout "$@" || true
+elif [ -f git-hooks/post-checkout ]; then
+  sh git-hooks/post-checkout "$@" || true
+fi
+
+exit 0

@@ -599,6 +599,15 @@ def build_wo(item: dict) -> dict:
     bid_items, bid_total = extract_bids(order, item.get("remedyInstances"))
 
     warnings = []
+    # FAIL LOUD ON AN EMPTY REQUIRED FIELD. The AMH list feed returns customers:[] for
+    # every order, so bulk capture wrote phone=""/contactName="" on every WO and still
+    # reported success (2026-08-19). hydrate_customers fixes the cause; this makes the
+    # NEXT such silent field loss visible instead of invisible. `warnings` is already
+    # surfaced by the app (toast on single capture, count in the bulk review modal).
+    if not contacts:
+        warnings.append("no contact (phone/name) on this WO")
+    if not normalize_text(addr.get("street")):
+        warnings.append("no street address")
     if not bid_items:
         statuses = sorted({normalize_text(b.get("statusName")) for b in (order.get("bids") or [])})
         if statuses:
@@ -689,10 +698,11 @@ def main():
     results = {}
     if all_open:
         # Every "All Open" WO that is not Completed/Canceled, keyed by WO number.
-        for name, item in order_map.items():
-            o = item.get("order") or item
-            if normalize_text(o.get("statusName")).lower() in _CLOSED_STATUSES:
-                continue
+        # Filter FIRST, then hydrate: no contact lookup is spent on a WO we skip.
+        live = [(name, item) for name, item in order_map.items()
+                if normalize_text((item.get("order") or item).get("statusName")).lower()
+                not in _CLOSED_STATUSES]
+        for name, item in live:
             try:
                 results[name] = build_wo(hydrate_customers(token, item))
             except Exception as exc:

@@ -19,7 +19,7 @@ if (process.env.GIT_INDEX_FILE || process.env.GIT_DIR) {
   process.exit(2);
 }
 
-const GATE = path.join(__dirname, '..', '.claude', 'hooks', 'spawn-limiter.js');
+const GATE = path.join(__dirname, '..', 'node_modules', 'project-overseer', 'hooks', 'spawn-limiter.js');
 const REPO = path.join(__dirname, '..');
 const question = 'Grant a second coder spawn this session?';
 

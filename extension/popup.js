@@ -293,3 +293,17 @@ document.getElementById('btn-dump-dom').addEventListener('click', () => {
     });
   });
 });
+
+// One-shot MSR diagnosis. Renders the whole result as SELECTABLE TEXT, never a
+// screenshot: images ride along in every later model call and cost far more than the
+// same facts as text.
+document.getElementById('btn-diag').addEventListener('click', () => {
+  const box = document.getElementById('diag-out');
+  box.style.display = 'block';
+  box.value = 'Running…';
+  chrome.runtime.sendMessage({ action: 'woDiag' }, (res) => {
+    box.value = chrome.runtime.lastError
+      ? ('Service worker did not answer: ' + chrome.runtime.lastError.message)
+      : JSON.stringify(res, null, 2);
+  });
+});

@@ -794,6 +794,14 @@
 
   // ── Right-click field toast ────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    // Liveness ack for woDiag. A content script that cannot answer this is the
+    // 2026-08-14 failure (Memory Saver discard / extension-reload orphan), which
+    // surfaced only as "MSR page not ready" with no way to tell it apart from a
+    // render failure.
+    if (msg.action === 'ping') {
+      sendResponse({ ok: true, url: location.href, onList: isMSRListPage() });
+      return;
+    }
     if (msg.action === 'fieldCaptured') {
       const labels = { address:'Address', tech:'Tech', pm:'PM', phone:'Phone', notes:'Notes', type:'Type', status:'Status', woId:'WO #' };
       showToast('✓ Captured', '#10b981', [`${labels[msg.field]||msg.field}: ${msg.value.slice(0,60)}`]);
@@ -845,7 +853,7 @@
     } catch (_) {}
   }
 
-  function loadInIframe(url) {
+  function loadInIframe(url, kind) {
     return new Promise((resolve) => {
       const f = document.createElement('iframe');
       // Tall viewport so most content is "in view" and rendered without scrolling.
@@ -860,9 +868,16 @@
           try { doc = f.contentDocument; } catch (e) { return finish(null); } // cross-origin (shouldn't happen)
           if (!doc) return finish(null);
           const txt = doc.body ? doc.body.innerText : '';
-          const ready = doc.querySelectorAll('a[href*="/workorder/"]').length > 0   // list
-            || doc.querySelectorAll('span.uiOutputTextArea').length > 0             // detail
-            || /\bAddress\b/i.test(txt);
+          // READINESS IS PER PAGE KIND. The old check OR-ed the list signal with two
+          // DETAIL signals (uiOutputTextArea, the bare word "Address"), so a list page
+          // whose Lightning SHELL had rendered but whose datatable had not counted as
+          // ready, got scraped 1.6s later, and yielded ZERO rows -- which the caller
+          // then reported as a clean "no new WOs". For a list the only valid ready
+          // signal is an actual /workorder/ anchor.
+          const ready = kind === 'list'
+            ? doc.querySelectorAll('a[href*="/workorder/"]').length > 0
+            : (doc.querySelectorAll('span.uiOutputTextArea').length > 0
+               || /Address/i.test(txt));
           // Once the core body is in: scroll to materialize lazy content, wait for
           // late lookups (Contact link) + the scrolled cells to render, then scrape.
           if (ready) { scrollRender(f.contentWindow, doc); setTimeout(() => finish(doc), 1600); return; }
@@ -946,14 +961,14 @@
 
   // Full headless capture: list iframe -> row stubs -> per-WO detail iframes.
   async function captureMsrViaIframes(mappings) {
-    const listDoc = await loadInIframe(MSR_ASSESSMENT_URL);
+    const listDoc = await loadInIframe(MSR_ASSESSMENT_URL, 'list');
     const stubs = listDoc ? scrapeMSRList(mappings, listDoc) : [];
     const orders = [];
     // Progress events drive the app's capture banner counter (done / total).
     chrome.runtime.sendMessage({ action: 'msrProgress', done: 0, total: stubs.length });
     for (let i = 0; i < stubs.length; i++) {
       let detail = {};
-      const doc = await loadInIframe(stubs[i].portalLink);
+      const doc = await loadInIframe(stubs[i].portalLink, 'detail');
       if (doc) { try { detail = scrapeMSR(mappings, doc); } catch (_) {} }
       orders.push(mergeMsr(stubs[i], detail));
       chrome.runtime.sendMessage({ action: 'msrProgress', done: i + 1, total: stubs.length });
@@ -964,7 +979,7 @@
   // Single-WO capture: load just this WO's detail page in a hidden iframe.
   async function captureMsrOneViaIframe(mappings, one) {
     let detail = {};
-    const doc = await loadInIframe(one.url);
+    const doc = await loadInIframe(one.url, 'detail');
     if (doc) { try { detail = scrapeMSR(mappings, doc); } catch (_) {} }
     return [mergeMsr({ woId: one.woId, portalLink: one.url }, detail)];
   }
